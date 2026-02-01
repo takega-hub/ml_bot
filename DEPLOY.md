@@ -15,7 +15,7 @@ git commit -m "Initial commit"
 Создайте репозиторий на GitHub/GitLab/Bitbucket и добавьте remote:
 
 ```bash
-git remote add origin https://github.com/yourusername/ml_bot.git
+git remote add origin https://github.com/takega-hub/ml_bot.git
 git branch -M main
 git push -u origin main
 ```
