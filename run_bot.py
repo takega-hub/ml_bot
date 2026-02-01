@@ -1,0 +1,135 @@
+import asyncio
+import logging
+import signal
+import sys
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+from bot.config import load_settings
+from bot.state import BotState
+from bot.exchange.bybit_client import BybitClient
+from bot.model_manager import ModelManager
+from bot.telegram_bot import TelegramBot
+from bot.trading_loop import TradingLoop
+from bot.health_monitor import HealthMonitor
+
+# Создаем директорию для логов
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+
+# Настройка расширенного логирования
+# Основной лог с ротацией
+main_handler = RotatingFileHandler(
+    'logs/bot.log', 
+    maxBytes=10*1024*1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+main_handler.setLevel(logging.INFO)
+
+# Лог сделок
+trade_handler = RotatingFileHandler(
+    'logs/trades.log',
+    maxBytes=10*1024*1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+trade_handler.setLevel(logging.INFO)
+
+# Лог сигналов
+signal_handler = RotatingFileHandler(
+    'logs/signals.log',
+    maxBytes=10*1024*1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+signal_handler.setLevel(logging.INFO)
+
+# Лог ошибок
+error_handler = RotatingFileHandler(
+    'logs/errors.log',
+    maxBytes=10*1024*1024,  # 10 MB
+    backupCount=5,
+    encoding='utf-8'
+)
+error_handler.setLevel(logging.ERROR)
+
+# Консольный вывод
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+
+# Форматтер
+formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+main_handler.setFormatter(formatter)
+trade_handler.setFormatter(formatter)
+signal_handler.setFormatter(formatter)
+error_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Настраиваем root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(main_handler)
+root_logger.addHandler(console_handler)
+root_logger.addHandler(error_handler)
+
+# Настраиваем специализированные логгеры
+trade_logger = logging.getLogger("trades")
+trade_logger.addHandler(trade_handler)
+
+signal_logger = logging.getLogger("signals")
+signal_logger.addHandler(signal_handler)
+
+logger = logging.getLogger("main")
+
+async def main():
+    logger.info("Initializing ML Trading Bot Terminal...")
+    
+    # 1. Загрузка настроек
+    settings = load_settings()
+    if not settings.telegram_token:
+        logger.error("TELEGRAM_TOKEN not found in .env file!")
+        return
+
+    # 2. Инициализация состояния
+    state = BotState()
+    
+    # 3. Инициализация клиента биржи
+    bybit = BybitClient(settings.api)
+    
+    # 4. Инициализация менеджера моделей
+    model_manager = ModelManager(settings, state)
+    
+    # 5. Инициализация Telegram бота (передаем bybit для получения позиций)
+    tg_bot = TelegramBot(settings, state, model_manager, bybit)
+    
+    # 6. Инициализация торгового цикла
+    trading_loop = TradingLoop(settings, state, bybit, tg_bot)
+    
+    # 7. Инициализация Health Monitor
+    health_monitor = HealthMonitor(settings, state, bybit, tg_bot)
+    
+    # 8. Запуск компонентов
+    try:
+        # Запускаем все компоненты параллельно
+        await asyncio.gather(
+            tg_bot.start(),
+            trading_loop.run(),
+            health_monitor.run()
+        )
+    except asyncio.CancelledError:
+        logger.info("Bot execution cancelled.")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+    finally:
+        logger.info("Shutting down...")
+
+if __name__ == "__main__":
+    # Обработка прерываний (Ctrl+C)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Manual shutdown.")
+        sys.exit(0)
