@@ -94,7 +94,11 @@ class TelegramBot:
     async def show_status(self, update_or_query):
         status_text = f"🤖 СТАТУС ТЕРМИНАЛА: {'🟢 РАБОТАЕТ' if self.state.is_running else '🔴 ОСТАНОВЛЕН'}\n\n"
         
-        # Account Info (если есть доступ к bybit)
+        # Account Info и Open Positions (если есть доступ к bybit)
+        wallet_balance = 0.0
+        open_positions = []
+        total_margin = 0.0
+        
         if self.bybit:
             try:
                 balance_info = self.bybit.get_wallet_balance()
@@ -106,15 +110,11 @@ class TelegramBot:
                         usdt_coin = next((c for c in wallet if c.get("coin") == "USDT"), None)
                         if usdt_coin:
                             wallet_balance = safe_float(usdt_coin.get("walletBalance"), 0)
-                            available = safe_float(usdt_coin.get("availableToWithdraw"), 0)
-                            status_text += f"💰 ACCOUNT INFO:\n"
-                            status_text += f"Баланс: ${wallet_balance:.2f} | Доступно: ${available:.2f}\n\n"
+            
             except Exception as e:
                 logger.error(f"Error getting balance: {e}")
-        
-        # Open Positions
-        open_positions = []
-        if self.bybit:
+            
+            # Open Positions
             try:
                 for symbol in self.state.active_symbols:
                     pos_info = self.bybit.get_position_info(symbol=symbol)
@@ -169,8 +169,20 @@ class TelegramBot:
                                     "tp": float(tp) if tp else None,
                                     "sl": float(sl) if sl else None
                                 })
+                                # Суммируем маржу для расчета доступного баланса
+                                total_margin += margin
             except Exception as e:
                 logger.error(f"Error getting positions: {e}")
+        
+        # Вычисляем доступный баланс: баланс минус сумма маржи всех позиций
+        available = wallet_balance - total_margin
+        if available < 0:
+            available = 0.0  # Не показываем отрицательные значения
+        
+        # Показываем Account Info
+        if wallet_balance > 0:
+            status_text += f"💰 ACCOUNT INFO:\n"
+            status_text += f"Баланс: ${wallet_balance:.2f} | Доступно: ${available:.2f}\n\n"
         
         if open_positions:
             status_text += "📊 OPEN POSITIONS:\n"
@@ -300,6 +312,14 @@ class TelegramBot:
             await query.edit_message_text("🔄 Запускаю переобучение всех моделей...\nЭто может занять время.", reply_markup=self.get_main_keyboard())
             # Запускаем в фоне
             asyncio.create_task(self.retrain_all_models_async(query.from_user.id))
+        elif query.data.startswith("retrain_"):
+            symbol = query.data.replace("retrain_", "")
+            await query.edit_message_text(
+                f"🎓 Запускаю обучение всех моделей для {symbol}...\n"
+                "Это может занять 10-30 минут в зависимости от количества моделей.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Ожидание...", callback_data="waiting")]])
+            )
+            asyncio.create_task(self.retrain_symbol_models_async(symbol, query.from_user.id))
         elif query.data == "main_menu":
             await query.edit_message_text("🤖 ML Trading Bot Terminal", reply_markup=self.get_main_keyboard())
         elif query.data == "settings_risk":
@@ -570,6 +590,7 @@ class TelegramBot:
         else:
             keyboard.append([InlineKeyboardButton("🔄 Обновить тесты", callback_data=f"test_all_{symbol}")])
         
+        keyboard.append([InlineKeyboardButton("🎓 Обучить все модели", callback_data=f"retrain_{symbol}")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings_models")])
         keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         
@@ -636,6 +657,7 @@ class TelegramBot:
         else:
             keyboard.append([InlineKeyboardButton("🔄 Обновить тесты", callback_data=f"test_all_{symbol}")])
         
+        keyboard.append([InlineKeyboardButton("🎓 Обучить все модели", callback_data=f"retrain_{symbol}")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings_models")])
         keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         
@@ -722,6 +744,87 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Error retraining all models: {e}")
             await self.send_notification(f"❌ Ошибка при переобучении: {str(e)}")
+    
+    async def retrain_symbol_models_async(self, symbol: str, user_id: int):
+        """Обучает все модели для конкретной торговой пары"""
+        import subprocess
+        from pathlib import Path
+        
+        try:
+            await self.send_notification(
+                f"🎓 Начато обучение всех моделей для {symbol}...\n"
+                "Это может занять 10-30 минут.\n"
+                "Вы будете получать уведомления о прогрессе."
+            )
+            
+            # Путь к скрипту обучения
+            script_path = Path(__file__).parent.parent / "retrain_all_models.py"
+            
+            if not script_path.exists():
+                await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
+                return
+            
+            # Запускаем обучение в отдельном процессе
+            process = await asyncio.create_subprocess_exec(
+                "python3", str(script_path), "--symbol", symbol,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_path.parent)
+            )
+            
+            # Отслеживаем вывод
+            trained_models = []
+            current_model = None
+            
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                
+                line_text = line.decode('utf-8', errors='ignore').strip()
+                
+                # Парсим вывод для уведомлений
+                if "Обучение:" in line_text and symbol in line_text:
+                    # Извлекаем название модели
+                    parts = line_text.split("Обучение:")
+                    if len(parts) > 1:
+                        model_name = parts[1].strip().split()[0] if parts[1].strip() else None
+                        if model_name:
+                            current_model = model_name
+                            await self.send_notification(f"🔄 Обучение модели: {model_name} для {symbol}...")
+                
+                if "✅ Успешно завершено" in line_text and current_model:
+                    trained_models.append(current_model)
+                    await self.send_notification(f"✅ {current_model} обучена для {symbol}")
+                    current_model = None
+                
+                if "❌ Ошибка" in line_text and current_model:
+                    await self.send_notification(f"❌ Ошибка при обучении {current_model} для {symbol}")
+                    current_model = None
+            
+            # Ждем завершения процесса
+            await process.wait()
+            
+            if process.returncode == 0:
+                await self.send_notification(
+                    f"✅ Обучение всех моделей для {symbol} завершено!\n"
+                    f"Обучено моделей: {len(trained_models)}\n\n"
+                    "Обновите список моделей для просмотра результатов."
+                )
+                
+                # Автоматически открываем меню с моделями
+                await self.send_model_selection_menu(symbol, user_id)
+            else:
+                # Читаем ошибки
+                stderr = await process.stderr.read()
+                error_msg = stderr.decode('utf-8', errors='ignore')[:500]
+                await self.send_notification(
+                    f"❌ Ошибка при обучении моделей для {symbol}:\n{error_msg}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error retraining models for {symbol}: {e}", exc_info=True)
+            await self.send_notification(f"❌ Ошибка при обучении моделей для {symbol}: {str(e)}")
     
     async def train_new_pair_async(self, symbol: str, user_id: int):
         """Асинхронная функция для обучения модели новой пары"""
@@ -1188,27 +1291,13 @@ class TelegramBot:
                         usdt_coin = next((c for c in wallet if c.get("coin") == "USDT"), None)
                         if usdt_coin:
                             wallet_balance = safe_float(usdt_coin.get("walletBalance"), 0)
-                            available = safe_float(usdt_coin.get("availableToWithdraw"), 0)
-                            # Также пробуем другие поля для available
-                            if available == 0:
-                                available = safe_float(usdt_coin.get("availableBalance"), 0)
-                            if available == 0:
-                                available = safe_float(usdt_coin.get("free"), 0)
-                            
-                            stats = self.state.get_stats()
-                            total_pnl_pct = (stats['total_pnl'] / wallet_balance * 100) if wallet_balance > 0 else 0
-                            
-                            text += "💰 БАЛАНС\n"
-                            text += f"Текущий: ${wallet_balance:.2f} "
-                            text += f"({total_pnl_pct:+.2f}%)\n"
-                            text += f"Доступно: ${available:.2f}\n"
-                            text += f"В позициях: ${wallet_balance - available:.2f}\n\n"
             except Exception as e:
                 logger.error(f"Error getting balance: {e}")
         
-        # Открытые позиции
+        # Открытые позиции (для расчета маржи)
         open_count = 0
         total_pnl = 0
+        total_margin = 0.0
         if self.bybit:
             try:
                 for symbol in self.state.active_symbols:
@@ -1221,8 +1310,38 @@ class TelegramBot:
                                 open_count += 1
                                 unrealised_pnl = safe_float(p.get("unrealisedPnl"), 0)
                                 total_pnl += unrealised_pnl
+                                
+                                # Получаем маржу позиции для расчета доступного баланса
+                                margin = safe_float(p.get("positionMargin"), 0)
+                                if margin == 0:
+                                    margin = safe_float(p.get("positionIM"), 0)  # Initial Margin
+                                if margin == 0:
+                                    # Рассчитываем маржу из стоимости позиции и плеча
+                                    position_value = safe_float(p.get("positionValue"), 0)
+                                    leverage_str = p.get("leverage", str(self.settings.leverage))
+                                    leverage = safe_float(leverage_str, self.settings.leverage)
+                                    if position_value > 0 and leverage > 0:
+                                        margin = position_value / leverage
+                                
+                                total_margin += margin
             except Exception as e:
                 logger.error(f"Error getting positions: {e}")
+        
+        # Вычисляем доступный баланс: баланс минус сумма маржи всех позиций
+        available = wallet_balance - total_margin
+        if available < 0:
+            available = 0.0  # Не показываем отрицательные значения
+        
+        # Показываем баланс
+        if wallet_balance > 0:
+            stats = self.state.get_stats()
+            total_pnl_pct = (stats['total_pnl'] / wallet_balance * 100) if wallet_balance > 0 else 0
+            
+            text += "💰 БАЛАНС\n"
+            text += f"Текущий: ${wallet_balance:.2f} "
+            text += f"({total_pnl_pct:+.2f}%)\n"
+            text += f"Доступно: ${available:.2f}\n"
+            text += f"В позициях: ${total_margin:.2f}\n\n"
         
         text += f"📈 ОТКРЫТЫЕ ПОЗИЦИИ ({open_count})\n"
         if open_count > 0:
