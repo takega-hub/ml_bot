@@ -169,8 +169,13 @@ class TradingLoop:
             if self.state.is_symbol_in_cooldown(symbol):
                 return
             
-            # 1. Получаем данные
-            df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=200)
+            # 1. Получаем данные (асинхронно, чтобы не блокировать event loop)
+            df = await asyncio.to_thread(
+                self.bybit.get_kline_df,
+                symbol,
+                self.settings.timeframe,
+                200
+            )
             if df.empty:
                 logger.warning(f"[{symbol}] No data received from exchange")
                 return
@@ -720,7 +725,12 @@ class TradingLoop:
             # Метод 4: Если все еще не нашли, используем текущую цену из свечей
             if exit_price is None or exit_price == 0:
                 try:
-                    df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
+                    df = await asyncio.to_thread(
+                        self.bybit.get_kline_df,
+                        symbol,
+                        self.settings.timeframe,
+                        1
+                    )
                     if not df.empty:
                         exit_price = float(df['close'].iloc[-1])
                         logger.info(f"Using current price from candles as exit price: {exit_price}")
@@ -773,7 +783,12 @@ class TradingLoop:
             # В случае ошибки пытаемся получить текущую цену и закрыть позицию
             try:
                 # Пытаемся получить текущую цену из свечей
-                df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
+                df = await asyncio.to_thread(
+                    self.bybit.get_kline_df,
+                    symbol,
+                    self.settings.timeframe,
+                    1
+                )
                 if not df.empty:
                     exit_price = float(df['close'].iloc[-1])
                     # Рассчитываем PnL даже при ошибке
