@@ -684,7 +684,8 @@ class MLStrategy:
                     symbol = "UNKNOWN"
             
             # Делаем предсказание
-            prediction, confidence = self.predict(df, skip_feature_creation=True)
+            # ВАЖНО: НЕ пропускаем создание фичей, чтобы индикаторы обновлялись для новых свечей
+            prediction, confidence = self.predict(df, skip_feature_creation=False)
             
             # === УЛУЧШЕННЫЙ РАСЧЕТ TP/SL (из успешного бэктеста) ===
             # Базовые значения:
