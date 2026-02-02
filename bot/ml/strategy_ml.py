@@ -635,10 +635,6 @@ class MLStrategy:
         if np.isnan(confidence) or not np.isfinite(confidence):
             confidence = 0.0
         
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"Prediction result: {prediction}, confidence: {confidence:.4f}")
-        
         return int(prediction), float(confidence)
     
     def generate_signal(
