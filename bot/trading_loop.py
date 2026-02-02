@@ -36,12 +36,15 @@ class TradingLoop:
         await self.sync_positions_with_exchange()
         
         # Запускаем оба цикла параллельно с обработкой ошибок
+        logger.info("Trading Loop: About to start both loops in parallel...")
         try:
-            await asyncio.gather(
+            logger.info("Trading Loop: Starting asyncio.gather...")
+            results = await asyncio.gather(
                 self._signal_processing_loop(),
                 self._position_monitoring_loop(),
                 return_exceptions=True  # Не останавливаемся при ошибке в одном из циклов
             )
+            logger.info(f"Trading Loop: asyncio.gather completed with results: {results}")
         except Exception as e:
             logger.error(f"Fatal error in trading loop: {e}", exc_info=True)
             raise
@@ -70,8 +73,13 @@ class TradingLoop:
     async def _position_monitoring_loop(self):
         """Цикл мониторинга открытых позиций для breakeven и trailing stop"""
         logger.info("Starting Position Monitoring Loop...")
-        logger.info("Position Monitoring Loop: Waiting 10 seconds before starting...")
-        await asyncio.sleep(10)  # Даем время запуститься основному циклу
+        try:
+            logger.info("Position Monitoring Loop: About to sleep for 10 seconds...")
+            await asyncio.sleep(10)  # Даем время запуститься основному циклу
+            logger.info("Position Monitoring Loop: Sleep completed, continuing...")
+        except Exception as e:
+            logger.error(f"Error in position monitoring loop initial sleep: {e}", exc_info=True)
+            raise
         logger.info("Position Monitoring Loop: Initial delay completed, starting main loop...")
         
         while True:
