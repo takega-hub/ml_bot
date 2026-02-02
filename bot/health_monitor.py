@@ -28,7 +28,8 @@ class HealthMonitor:
         self.last_notification = datetime.now()
         
         # Пороги для уведомлений
-        self.memory_threshold_mb = 500  # МБ
+        self.memory_threshold_mb = 2048  # МБ (2 ГБ) - обучение моделей требует много памяти
+        self.memory_critical_mb = 4096  # МБ (4 ГБ) - критический порог
         self.notification_cooldown = timedelta(minutes=15)  # Не чаще раза в 15 минут
     
     async def run(self):
@@ -86,8 +87,14 @@ class HealthMonitor:
         health["memory"] = memory_ok
         health["memory_usage_mb"] = memory_info["used_mb"]
         if not memory_ok:
-            health["healthy"] = False
-            health["issues"].append(f"⚠️ High memory usage: {memory_info['used_mb']:.1f} MB")
+            # Различаем предупреждение и критическую ситуацию
+            if memory_info["used_mb"] >= self.memory_critical_mb:
+                health["healthy"] = False
+                health["issues"].append(f"🔴 CRITICAL memory usage: {memory_info['used_mb']:.1f} MB")
+            else:
+                # Высокое использование, но не критическое (например, во время обучения)
+                # Не помечаем как unhealthy, но добавляем в issues для информации
+                health["issues"].append(f"⚠️ High memory usage: {memory_info['used_mb']:.1f} MB (normal during model training)")
         
         return health
     
@@ -156,10 +163,12 @@ class HealthMonitor:
             
             info = {
                 "used_mb": used_mb,
-                "threshold_mb": self.memory_threshold_mb
+                "threshold_mb": self.memory_threshold_mb,
+                "critical_threshold_mb": self.memory_critical_mb
             }
             
-            is_ok = used_mb < self.memory_threshold_mb
+            # Считаем проблемой только критическое использование памяти (>= 4 ГБ)
+            is_ok = used_mb < self.memory_critical_mb
             
             if not is_ok:
                 logger.warning(f"High memory usage: {used_mb:.1f} MB")
