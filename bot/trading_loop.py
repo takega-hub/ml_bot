@@ -158,13 +158,13 @@ class TradingLoop:
                         self.state.symbol_models[symbol] = model_path
                 
                 if model_path:
-                    logger.info(f"[{symbol}] Loading model: {model_path}")
-                    logger.info(f"[{symbol}] Confidence threshold: {self.settings.ml_strategy.confidence_threshold}, Min signal strength: {self.settings.ml_strategy.min_signal_strength}")
+                    logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
                     self.strategies[symbol] = MLStrategy(
                         model_path=model_path,
                         confidence_threshold=self.settings.ml_strategy.confidence_threshold,
                         min_signal_strength=self.settings.ml_strategy.min_signal_strength
                     )
+                    logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
                 else:
                     logger.warning(f"No model found for {symbol}, skipping...")
                     return
