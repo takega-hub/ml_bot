@@ -160,11 +160,17 @@ class TradingLoop:
             if len(df) >= 2:
                 row = df.iloc[-2]  # Предпоследняя закрытая свеча
                 current_price = df.iloc[-1]['close']  # Текущая цена из последней свечи
-                candle_timestamp = row.name  # Timestamp закрытой свечи
+                # Получаем timestamp из колонки timestamp (индекс сброшен в get_kline_df)
+                candle_timestamp = row.get('timestamp') if 'timestamp' in row else df.iloc[-2].get('timestamp', None)
+                if candle_timestamp is None:
+                    # Если timestamp не в колонке, пытаемся получить из индекса
+                    candle_timestamp = df.index[-2] if len(df.index) > 1 else None
             else:
                 row = df.iloc[-1]
                 current_price = row['close']
-                candle_timestamp = row.name
+                candle_timestamp = row.get('timestamp') if 'timestamp' in row else df.iloc[-1].get('timestamp', None)
+                if candle_timestamp is None:
+                    candle_timestamp = df.index[-1] if len(df.index) > 0 else None
             
             # Проверяем, не обрабатывали ли мы уже эту свечу
             # ВАЖНО: Проверяем только если timestamp валиден
