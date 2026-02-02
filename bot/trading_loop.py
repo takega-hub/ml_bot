@@ -274,14 +274,19 @@ class TradingLoop:
                 logger.warning(f"Position info is None for {symbol}")
 
             # Генерация сигнала
+            # КРИТИЧНО: generate_signal() выполняет долгие синхронные операции (feature engineering, model.predict)
+            # Оборачиваем в to_thread() чтобы не блокировать event loop
             try:
-                signal = strategy.generate_signal(
+                logger.debug(f"[{symbol}] Calling strategy.generate_signal() in thread...")
+                signal = await asyncio.to_thread(
+                    strategy.generate_signal,
                     row=row,
                     df=df.iloc[:-1] if len(df) >= 2 else df,  # Используем все данные кроме последней незакрытой свечи
                     has_position=has_pos,
                     current_price=current_price,  # Используем текущую цену из последней свечи
                     leverage=self.settings.leverage
                 )
+                logger.debug(f"[{symbol}] strategy.generate_signal() completed")
             except Exception as e:
                 logger.error(f"Error generating signal for {symbol}: {e}")
                 return
