@@ -262,7 +262,13 @@ class TelegramBot:
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
-        await query.answer()
+        # Отвечаем на callback query сразу, чтобы избежать таймаута Telegram
+        # Если ответ не успел - не критично, пользователь все равно получит обновленное сообщение
+        try:
+            await query.answer()
+        except Exception as e:
+            # Игнорируем ошибки "Query is too old" - это не критично
+            logger.debug(f"Could not answer callback query (non-critical): {e}")
 
         if query.data == "bot_start":
             self.state.set_running(True)

@@ -27,14 +27,24 @@ class TradingLoop:
     async def run(self):
         logger.info("Starting Trading Loop...")
         
+        # Устанавливаем is_running = True при запуске (если еще не установлено)
+        if not self.state.is_running:
+            logger.info("Setting bot state to running...")
+            self.state.set_running(True)
+        
         # Синхронизируем позиции с биржей при старте
         await self.sync_positions_with_exchange()
         
-        # Запускаем оба цикла параллельно
-        await asyncio.gather(
-            self._signal_processing_loop(),
-            self._position_monitoring_loop()
-        )
+        # Запускаем оба цикла параллельно с обработкой ошибок
+        try:
+            await asyncio.gather(
+                self._signal_processing_loop(),
+                self._position_monitoring_loop(),
+                return_exceptions=True  # Не останавливаемся при ошибке в одном из циклов
+            )
+        except Exception as e:
+            logger.error(f"Fatal error in trading loop: {e}", exc_info=True)
+            raise
     
     async def _signal_processing_loop(self):
         """Основной цикл обработки сигналов"""
@@ -60,21 +70,30 @@ class TradingLoop:
     async def _position_monitoring_loop(self):
         """Цикл мониторинга открытых позиций для breakeven и trailing stop"""
         logger.info("Starting Position Monitoring Loop...")
+        logger.info("Position Monitoring Loop: Waiting 10 seconds before starting...")
         await asyncio.sleep(10)  # Даем время запуститься основному циклу
+        logger.info("Position Monitoring Loop: Initial delay completed, starting main loop...")
         
         while True:
             try:
                 if not self.state.is_running:
+                    logger.debug("Bot is not running, waiting...")
                     await asyncio.sleep(10)
                     continue
                 
                 # ОПТИМИЗАЦИЯ: получаем ВСЕ позиции одним запросом вместо отдельных для каждого символа
                 # Это значительно снижает количество API запросов и предотвращает rate limit ошибки
                 try:
-                    all_positions = await asyncio.to_thread(
-                        self.bybit.get_position_info,
-                        settle_coin="USDT"  # Получаем все USDT позиции одним запросом
+                    logger.debug("Fetching all positions from exchange...")
+                    # Добавляем таймаут для предотвращения зависания
+                    all_positions = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self.bybit.get_position_info,
+                            settle_coin="USDT"  # Получаем все USDT позиции одним запросом
+                        ),
+                        timeout=30.0  # Таймаут 30 секунд
                     )
+                    logger.debug(f"Received positions response: retCode={all_positions.get('retCode') if all_positions else 'None'}")
                     
                     if all_positions and all_positions.get("retCode") == 0:
                         result = all_positions.get("result")
@@ -123,10 +142,13 @@ class TradingLoop:
                     else:
                         logger.warning(f"Failed to get positions: retCode={all_positions.get('retCode') if all_positions else 'None'}")
                 
+                except asyncio.TimeoutError:
+                    logger.error("Timeout while fetching positions from exchange (30s)")
                 except Exception as e:
-                    logger.error(f"Error getting all positions: {e}")
+                    logger.error(f"Error getting all positions: {e}", exc_info=True)
                 
                 # Проверяем позиции каждые 25 секунд (увеличено с 15 для снижения нагрузки на API)
+                logger.debug("Position monitoring cycle completed, sleeping for 25 seconds...")
                 await asyncio.sleep(25)
             
             except Exception as e:
