@@ -298,6 +298,7 @@ class TradingLoop:
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
+                logger.debug(f"[{symbol}] Adding signal to history...")
                 self.state.add_signal(
                     symbol=symbol,
                     action=signal.action.value,
@@ -306,10 +307,15 @@ class TradingLoop:
                     reason=signal.reason,
                     indicators=indicators_info
                 )
+                logger.debug(f"[{symbol}] Signal added to history, checking notification...")
                 
                 # Уведомление о сигнале высокой уверенности
                 if confidence > 0.7:
+                    logger.debug(f"[{symbol}] Sending notification...")
                     await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(confidence*100)}%\nЦена: {signal.price}")
+                    logger.debug(f"[{symbol}] Notification sent")
+            
+            logger.debug(f"[{symbol}] Signal processing completed, returning from process_symbol")
 
             # 5. Исполнение сделок (упрощенно)
             if signal.action == Action.LONG and has_pos != Bias.LONG:
