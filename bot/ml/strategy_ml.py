@@ -492,22 +492,14 @@ class MLStrategy:
         # Предсказание
         if hasattr(self.model, "predict_proba"):
             # Для классификаторов с вероятностями (включая ансамбль)
-            # DEBUG: Логируем входные данные для модели
-            logger.debug(f"[ml_strategy] predict() - X_last shape: {X_last.shape}, first 5 features: {X_last[0][:5]}")
-            
             # Проверяем, является ли это QuadEnsemble (требует историю для LSTM)
             if hasattr(self.model, 'lstm_trainer') and hasattr(self.model, 'sequence_length'):
                 # QuadEnsemble: передаем историю данных для LSTM
                 # Используем df_with_features, который уже содержит все фичи
-                logger.debug(f"[ml_strategy] Using QuadEnsemble with df_history shape: {df_with_features.shape}")
                 proba = self.model.predict_proba(X_last, df_history=df_with_features)[0]
             else:
                 # Обычные модели и ансамбли (TripleEnsemble, etc.)
-                logger.debug(f"[ml_strategy] Using standard model predict_proba")
                 proba = self.model.predict_proba(X_last)[0]
-            
-            # DEBUG: Логируем вероятности
-            logger.debug(f"[ml_strategy] Model probabilities: {proba}")
             
             # Проверяем proba на NaN
             if np.any(np.isnan(proba)) or not np.all(np.isfinite(proba)):
