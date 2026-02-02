@@ -97,7 +97,7 @@ async def main():
         
         if not settings.telegram_token:
             logger.error("TELEGRAM_TOKEN not found in .env file!")
-            return
+            sys.exit(1)
 
         # 2. Инициализация состояния
         try:
@@ -167,3 +167,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Manual shutdown.")
         sys.exit(0)
+    except Exception as e:
+        logger.error(f"Unhandled exception in main: {e}", exc_info=True)
+        sys.exit(1)

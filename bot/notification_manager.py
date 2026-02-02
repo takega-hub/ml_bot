@@ -25,7 +25,12 @@ class NotificationManager:
             "MEDIUM": NotificationLevel.MEDIUM,
             "LOW": NotificationLevel.LOW
         }
-        self.current_level = level_map.get(settings.notification_level.upper(), NotificationLevel.HIGH)
+        notification_level = getattr(settings, 'notification_level', 'HIGH')
+        if notification_level:
+            notification_level = str(notification_level).upper()
+        else:
+            notification_level = 'HIGH'
+        self.current_level = level_map.get(notification_level, NotificationLevel.HIGH)
     
     async def send(self, message: str, level: NotificationLevel = NotificationLevel.MEDIUM):
         """Отправляет уведомление если уровень соответствует настройкам"""
