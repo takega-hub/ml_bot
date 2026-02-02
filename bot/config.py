@@ -127,6 +127,11 @@ class RiskParams:
     dca_drawdown_pct: float = 0.003  # Усреднять при просадке 0.3%
     dca_max_adds: int = 2
     dca_min_confidence: float = 0.6
+
+    # Реверс при сильном обратном сигнале
+    reverse_on_strong_signal: bool = True
+    reverse_min_confidence: float = 0.75
+    reverse_min_strength: str = "сильное"  # слабое/умеренное/среднее/сильное/очень_сильное
     
     # Динамическое изменение размера позиции
     enable_dynamic_position_sizing: bool = True
@@ -160,6 +165,8 @@ class RiskParams:
             self.long_term_sl_pct /= 100.0
         if self.dca_drawdown_pct >= 1:
             self.dca_drawdown_pct /= 100.0
+        if self.reverse_min_confidence >= 1:
+            self.reverse_min_confidence /= 100.0
 
 
 @dataclass
@@ -432,6 +439,16 @@ def load_settings() -> AppSettings:
             settings.risk.dca_drawdown_pct = value
         except ValueError:
             pass
+
+    reverse_min_conf = os.getenv("REVERSE_MIN_CONFIDENCE", "").strip()
+    if reverse_min_conf:
+        try:
+            value = float(reverse_min_conf)
+            if value >= 1:
+                value /= 100.0
+            settings.risk.reverse_min_confidence = value
+        except ValueError:
+            pass
     
     # Загружаем общие настройки
     timeframe = os.getenv("TIMEFRAME", "").strip()
@@ -659,6 +676,15 @@ def _load_risk_settings(settings: AppSettings) -> None:
             risk.dca_max_adds = int(data["dca_max_adds"])
         if "dca_min_confidence" in data:
             risk.dca_min_confidence = float(data["dca_min_confidence"])
+        if "reverse_on_strong_signal" in data:
+            risk.reverse_on_strong_signal = bool(data["reverse_on_strong_signal"])
+        if "reverse_min_confidence" in data:
+            value = float(data["reverse_min_confidence"])
+            if value >= 1:
+                value /= 100.0
+            risk.reverse_min_confidence = value
+        if "reverse_min_strength" in data:
+            risk.reverse_min_strength = str(data["reverse_min_strength"])
         
         print(f"[config] Risk settings loaded from {settings_file}")
     except Exception as e:

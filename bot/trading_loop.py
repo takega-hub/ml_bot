@@ -342,6 +342,19 @@ class TradingLoop:
 
                 # Если позиция уже есть, решаем: игнорировать реверс или усреднять
                 if has_pos is not None and local_pos:
+                    # Проверяем, нужно ли реверсировать позицию по сильному сигналу
+                    if has_pos != signal_side and self._is_strong_reverse_signal(signal, confidence):
+                        logger.info(f"[{symbol}] Strong reverse signal detected, closing & reversing.")
+                        if size > 0:
+                            await self._close_position_market(symbol, has_pos, size)
+                        await self.execute_trade(
+                            symbol,
+                            "Buy" if signal_side == Bias.LONG else "Sell",
+                            signal,
+                            position_horizon=self._classify_position_horizon(signal),
+                        )
+                        return
+
                     # Не закрываем средне/долгосрочные позиции по противоположному сигналу
                     if (
                         has_pos != signal_side
@@ -635,6 +648,50 @@ class TradingLoop:
             drawdown_pct = (current_price - local_pos.entry_price) / local_pos.entry_price
 
         return drawdown_pct >= self.settings.risk.dca_drawdown_pct
+
+    def _is_strong_reverse_signal(self, signal: Signal, confidence: float) -> bool:
+        """Определяет, является ли обратный сигнал сильным для реверса."""
+        if not self.settings.risk.reverse_on_strong_signal:
+            return False
+        if confidence < self.settings.risk.reverse_min_confidence:
+            return False
+        # Проверяем силу сигнала, если доступна
+        strength = None
+        if signal.indicators_info and isinstance(signal.indicators_info, dict):
+            strength = signal.indicators_info.get("strength")
+        if strength is None and signal.reason:
+            # Пытаемся вытащить силу из текста причины (ml_..._сила_сильное_..)
+            parts = str(signal.reason).split("_сила_")
+            if len(parts) == 2:
+                strength = parts[1].split("_")[0]
+        if strength:
+            order = ["слабое", "умеренное", "среднее", "сильное", "очень_сильное"]
+            try:
+                if order.index(strength) < order.index(self.settings.risk.reverse_min_strength):
+                    return False
+            except ValueError:
+                # неизвестная сила — не блокируем, но логируем
+                logger.warning(f"Unknown signal strength '{strength}', allowing reverse by confidence only.")
+        return True
+
+    async def _close_position_market(self, symbol: str, side: Bias, size: float):
+        """Закрывает позицию по рынку (reduce_only)."""
+        if size <= 0:
+            return
+        close_side = "Sell" if side == Bias.LONG else "Buy"
+        logger.info(f"[{symbol}] Closing position by market for reverse: {size} {close_side}")
+        resp = await asyncio.to_thread(
+            self.bybit.place_order,
+            symbol=symbol,
+            side=close_side,
+            qty=size,
+            order_type="Market",
+            reduce_only=True,
+        )
+        if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
+            await self.notifier.high(f"🔁 РЕВЕРС: позиция {symbol} закрыта и будет открыта в обратную сторону")
+        else:
+            logger.error(f"[{symbol}] Failed to close position for reverse: {resp}")
     
     async def update_trailing_stop(self, symbol: str, position_info: dict):
         """Активирует трейлинг стоп при достижении порога прибыли"""

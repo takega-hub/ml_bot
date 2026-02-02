@@ -975,6 +975,8 @@ class TelegramBot:
             "dca_drawdown_pct": ("Просадка для DCA (в %)", "0.3", "Пример: 0.3 означает 0.3% от цены"),
             "dca_max_adds": ("Максимум DCA добавлений", "2", "Пример: 2 означает максимум 2 усреднения"),
             "dca_min_confidence": ("Мин. уверенность для DCA (в %)", "60", "Пример: 60 означает 60%"),
+            "reverse_min_confidence": ("Мин. уверенность для реверса (в %)", "75", "Пример: 75 означает 75%"),
+            "reverse_min_strength": ("Мин. сила для реверса", "сильное", "Пример: сильное или очень_сильное"),
             "trailing_stop_activation_pct": ("Активация трейлинг стопа (в %)", "0.3", "Пример: 0.3 означает 0.3%"),
             "trailing_stop_distance_pct": ("Расстояние трейлинг стопа (в %)", "0.2", "Пример: 0.2 означает 0.2%"),
             "breakeven_activation_pct": ("Активация безубытка (в %)", "0.5", "Пример: 0.5 означает 0.5%"),
@@ -1138,6 +1140,26 @@ class TelegramBot:
                     await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
                     return
             
+            elif setting_name == "reverse_min_confidence":
+                if 1.0 <= value <= 100.0:
+                    risk.reverse_min_confidence = value / 100.0
+                elif 0.0 <= value <= 1.0:
+                    risk.reverse_min_confidence = value
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
+                    return
+            
+            elif setting_name == "reverse_min_strength":
+                normalized = text.strip().lower().replace(" ", "_")
+                valid_strengths = ["слабое", "умеренное", "среднее", "сильное", "очень_сильное"]
+                if normalized in valid_strengths:
+                    risk.reverse_min_strength = normalized
+                else:
+                    await update.message.reply_text(
+                        "❌ Неверное значение. Используйте: слабое, умеренное, среднее, сильное, очень_сильное"
+                    )
+                    return
+            
             elif setting_name == "trailing_stop_activation_pct":
                 if 0.1 <= value <= 5.0:
                     risk.trailing_stop_activation_pct = value / 100.0
@@ -1179,6 +1201,8 @@ class TelegramBot:
                 display_value = f"{value:.2f}%"
             elif setting_name in ("fee_rate", "dca_min_confidence"):
                 display_value = f"{value:.4f}%" if setting_name == "fee_rate" else f"{value:.2f}%"
+            elif setting_name == "reverse_min_strength":
+                display_value = text.strip()
             elif setting_name == "base_order_usd":
                 display_value = f"${value:.2f}"
             else:
@@ -1203,6 +1227,11 @@ class TelegramBot:
                 f"Просадка: {risk.dca_drawdown_pct*100:.2f}% | "
                 f"Макс: {risk.dca_max_adds} | "
                 f"Мин. уверенность: {risk.dca_min_confidence*100:.0f}%\n\n"
+            )
+            text += (
+                f"🔁 Реверс по сильному сигналу: {'✅' if risk.reverse_on_strong_signal else '❌'} | "
+                f"Мин. уверенность: {risk.reverse_min_confidence*100:.0f}% | "
+                f"Мин. сила: {risk.reverse_min_strength}\n\n"
             )
             text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
             text += f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%\n"
@@ -1229,6 +1258,9 @@ class TelegramBot:
                 [InlineKeyboardButton(f"   Просадка: {risk.dca_drawdown_pct*100:.2f}%", callback_data="edit_risk_dca_drawdown_pct")],
                 [InlineKeyboardButton(f"   Макс: {risk.dca_max_adds}", callback_data="edit_risk_dca_max_adds")],
                 [InlineKeyboardButton(f"   Мин. уверенность: {risk.dca_min_confidence*100:.0f}%", callback_data="edit_risk_dca_min_confidence")],
+                [InlineKeyboardButton(f"🔁 Реверс: {'✅' if risk.reverse_on_strong_signal else '❌'}", callback_data="toggle_risk_reverse_on_strong_signal")],
+                [InlineKeyboardButton(f"   Мин. уверенность: {risk.reverse_min_confidence*100:.0f}%", callback_data="edit_risk_reverse_min_confidence")],
+                [InlineKeyboardButton(f"   Мин. сила: {risk.reverse_min_strength}", callback_data="edit_risk_reverse_min_strength")],
                 [InlineKeyboardButton(f"🔄 Трейлинг: {'✅' if risk.enable_trailing_stop else '❌'}", callback_data="toggle_risk_enable_trailing_stop")],
                 [InlineKeyboardButton(f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_activation_pct")],
                 [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],
@@ -1265,6 +1297,8 @@ class TelegramBot:
             risk.long_term_ignore_reverse = not risk.long_term_ignore_reverse
         elif setting_name == "dca_enabled":
             risk.dca_enabled = not risk.dca_enabled
+        elif setting_name == "reverse_on_strong_signal":
+            risk.reverse_on_strong_signal = not risk.reverse_on_strong_signal
         else:
             await query.answer("Неизвестная настройка", show_alert=True)
             return
@@ -1338,6 +1372,9 @@ class TelegramBot:
                 "dca_drawdown_pct": self.settings.risk.dca_drawdown_pct,
                 "dca_max_adds": self.settings.risk.dca_max_adds,
                 "dca_min_confidence": self.settings.risk.dca_min_confidence,
+            "reverse_on_strong_signal": self.settings.risk.reverse_on_strong_signal,
+            "reverse_min_confidence": self.settings.risk.reverse_min_confidence,
+            "reverse_min_strength": self.settings.risk.reverse_min_strength,
             }
             
             with open(config_file, 'w', encoding='utf-8') as f:
@@ -1465,6 +1502,10 @@ class TelegramBot:
             f"Макс: {risk.dca_max_adds} | "
             f"Мин. уверенность: {risk.dca_min_confidence*100:.0f}%\n\n"
         )
+        text += (
+            f"🔁 Реверс по сильному сигналу: {'✅' if risk.reverse_on_strong_signal else '❌'} | "
+            f"Мин. уверенность: {risk.reverse_min_confidence*100:.0f}%\n\n"
+        )
         text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
         text += f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%\n"
         text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
@@ -1490,6 +1531,8 @@ class TelegramBot:
             [InlineKeyboardButton(f"   Просадка: {risk.dca_drawdown_pct*100:.2f}%", callback_data="edit_risk_dca_drawdown_pct")],
             [InlineKeyboardButton(f"   Макс: {risk.dca_max_adds}", callback_data="edit_risk_dca_max_adds")],
             [InlineKeyboardButton(f"   Мин. уверенность: {risk.dca_min_confidence*100:.0f}%", callback_data="edit_risk_dca_min_confidence")],
+            [InlineKeyboardButton(f"🔁 Реверс: {'✅' if risk.reverse_on_strong_signal else '❌'}", callback_data="toggle_risk_reverse_on_strong_signal")],
+            [InlineKeyboardButton(f"   Мин. уверенность: {risk.reverse_min_confidence*100:.0f}%", callback_data="edit_risk_reverse_min_confidence")],
             [InlineKeyboardButton(f"🔄 Трейлинг: {'✅' if risk.enable_trailing_stop else '❌'}", callback_data="toggle_risk_enable_trailing_stop")],
             [InlineKeyboardButton(f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_activation_pct")],
             [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],
