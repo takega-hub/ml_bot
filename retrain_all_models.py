@@ -1,5 +1,14 @@
 """
-Мастер-скрипт для обучения всех 6 типов моделей для всех символов.
+Мастер-скрипт для обучения всех типов моделей для всех символов.
+
+Типы моделей:
+- rf: Random Forest
+- xgb: XGBoost
+- ensemble: RF + XGBoost
+- triple_ensemble: RF + XGBoost + LightGBM
+- quad_ensemble: RF + XGBoost + LightGBM + LSTM
+
+Примечание: LSTM используется только внутри quad_ensemble и не сохраняется как отдельная модель.
 """
 import warnings
 import os
@@ -47,13 +56,8 @@ MODEL_CONFIGS = [
         "script": "train_quad_ensemble.py",
         "args": ["--days", "180", "--interval", "15m"],
         "suffix": "15"
-    },
-    {
-        "name": "lstm",
-        "script": "train_lstm_model.py",
-        "args": ["--days", "180", "--interval", "15m"],
-        "suffix": "15"
     }
+    # Примечание: LSTM используется только внутри quad_ensemble и не сохраняется как отдельная модель
 ]
 
 # MTF варианты (если нужны)

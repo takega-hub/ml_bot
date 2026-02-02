@@ -493,6 +493,7 @@ def main():
     safe_print("   • ml_models/xgb_*_15.pkl (XGBoost)")
     safe_print("   • ml_models/ensemble_*_15.pkl (RF + XGBoost)")
     safe_print("   • ml_models/triple_ensemble_*_15.pkl (RF + XGBoost + LightGBM)")
+    safe_print("\n💡 Примечание: LSTM используется только внутри quad_ensemble и не сохраняется отдельно.")
     safe_print("\n🚀 Следующие шаги:")
     safe_print("   1. Протестируйте новые модели:")
     safe_print("      python test_ml_strategy.py --symbol SOLUSDT --days 7")

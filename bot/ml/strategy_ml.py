@@ -761,15 +761,33 @@ class MLStrategy:
                     tp_price = current_price * 0.975  # 2.5% ниже
             
             # УЛУЧШЕНИЕ: Финальная проверка на валидность (из успешного бэктеста)
+            # ВАЖНО: Если TP/SL невалидны, мы их пересчитаем позже, но НЕ устанавливаем в None
+            # для LONG/SHORT сигналов, так как они ВСЕГДА должны иметь TP/SL
             if tp_price is not None and sl_price is not None:
                 # Проверяем, что цены не NaN и не бесконечны
                 if not (np.isfinite(tp_price) and np.isfinite(sl_price)):
-                    tp_price = None
-                    sl_price = None
+                    # Для LONG/SHORT пересчитываем, а не устанавливаем None
+                    if prediction == 1:  # LONG
+                        sl_price = current_price * 0.99
+                        tp_price = current_price * 1.025
+                    elif prediction == -1:  # SHORT
+                        sl_price = current_price * 1.01
+                        tp_price = current_price * 0.975
+                    else:
+                        tp_price = None
+                        sl_price = None
                 # Проверяем, что цены положительные
                 elif tp_price <= 0 or sl_price <= 0:
-                    tp_price = None
-                    sl_price = None
+                    # Для LONG/SHORT пересчитываем, а не устанавливаем None
+                    if prediction == 1:  # LONG
+                        sl_price = current_price * 0.99
+                        tp_price = current_price * 1.025
+                    elif prediction == -1:  # SHORT
+                        sl_price = current_price * 1.01
+                        tp_price = current_price * 0.975
+                    else:
+                        tp_price = None
+                        sl_price = None
             
             # Определяем силу предсказания
             if confidence >= 0.9:
@@ -891,8 +909,8 @@ class MLStrategy:
             
             # Генерируем сигналы
             if prediction == 1:  # LONG
-                # КРИТИЧНО: Убеждаемся, что TP/SL установлены
-                if tp_price is None or sl_price is None:
+                # КРИТИЧНО: Убеждаемся, что TP/SL установлены и валидны
+                if tp_price is None or sl_price is None or not np.isfinite(tp_price) or not np.isfinite(sl_price) or tp_price <= 0 or sl_price <= 0:
                     # Принудительно устанавливаем TP/SL
                     sl_price = current_price * 0.99  # 1% ниже (строго 1.0%)
                     tp_price = current_price * 1.025  # 2.5% выше (базовый TP)
@@ -900,6 +918,11 @@ class MLStrategy:
                     tp_pct = 0.025  # Базовый TP
                     sl_pct_display = 1.0
                     tp_pct_display = 2.5
+                
+                # Дополнительная проверка: убеждаемся, что SL < цена < TP для LONG
+                if sl_price >= current_price or tp_price <= current_price:
+                    sl_price = current_price * 0.99
+                    tp_price = current_price * 1.025
                 
                 reason = f"ml_LONG_сила_{strength}_{confidence_pct}%_TP_{tp_pct_display:.1f}%_SL_{sl_pct_display:.1f}%"
                 
@@ -944,19 +967,36 @@ class MLStrategy:
                 except Exception:
                     pass
                 
+                # ФИНАЛЬНАЯ ПРОВЕРКА: Убеждаемся, что TP/SL валидны перед возвратом
+                if sl_price is None or tp_price is None or not np.isfinite(sl_price) or not np.isfinite(tp_price) or sl_price <= 0 or tp_price <= 0:
+                    logger.error(f"CRITICAL: Invalid TP/SL for LONG signal! sl_price={sl_price}, tp_price={tp_price}, price={current_price}")
+                    # Принудительно устанавливаем валидные значения
+                    sl_price = current_price * 0.99
+                    tp_price = current_price * 1.025
+                
+                # Проверяем логическую корректность для LONG
+                if sl_price >= current_price or tp_price <= current_price:
+                    logger.warning(f"Fixing invalid TP/SL for LONG: sl={sl_price}, tp={tp_price}, price={current_price}")
+                    sl_price = current_price * 0.99
+                    tp_price = current_price * 1.025
+                
+                # Обновляем indicators_info с финальными значениями TP/SL
+                indicators_info['stop_loss'] = sl_price
+                indicators_info['take_profit'] = tp_price
+                
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
                     action=Action.LONG,
                     reason=reason,
                     price=current_price,
-                    stop_loss=sl_price,  # ВСЕГДА установлен
-                    take_profit=tp_price,  # ВСЕГДА установлен
+                    stop_loss=sl_price,  # ВСЕГДА установлен и валиден
+                    take_profit=tp_price,  # ВСЕГДА установлен и валиден
                     indicators_info=indicators_info
                 )
             
             elif prediction == -1:  # SHORT
-                # КРИТИЧНО: Убеждаемся, что TP/SL установлены
-                if tp_price is None or sl_price is None:
+                # КРИТИЧНО: Убеждаемся, что TP/SL установлены и валидны
+                if tp_price is None or sl_price is None or not np.isfinite(tp_price) or not np.isfinite(sl_price) or tp_price <= 0 or sl_price <= 0:
                     # Принудительно устанавливаем TP/SL
                     sl_price = current_price * 1.01  # 1% выше (строго 1.0%)
                     tp_price = current_price * 0.975  # 2.5% ниже (базовый TP)
@@ -964,6 +1004,11 @@ class MLStrategy:
                     tp_pct = 0.025  # Базовый TP
                     sl_pct_display = 1.0
                     tp_pct_display = 2.5
+                
+                # Дополнительная проверка: убеждаемся, что TP < цена < SL для SHORT
+                if tp_price >= current_price or sl_price <= current_price:
+                    sl_price = current_price * 1.01
+                    tp_price = current_price * 0.975
                 
                 reason = f"ml_SHORT_сила_{strength}_{confidence_pct}%_TP_{tp_pct_display:.1f}%_SL_{sl_pct_display:.1f}%"
                 
@@ -1008,13 +1053,30 @@ class MLStrategy:
                 except Exception:
                     pass
                 
+                # ФИНАЛЬНАЯ ПРОВЕРКА: Убеждаемся, что TP/SL валидны перед возвратом
+                if sl_price is None or tp_price is None or not np.isfinite(sl_price) or not np.isfinite(tp_price) or sl_price <= 0 or tp_price <= 0:
+                    logger.error(f"CRITICAL: Invalid TP/SL for SHORT signal! sl_price={sl_price}, tp_price={tp_price}, price={current_price}")
+                    # Принудительно устанавливаем валидные значения
+                    sl_price = current_price * 1.01
+                    tp_price = current_price * 0.975
+                
+                # Проверяем логическую корректность для SHORT
+                if tp_price >= current_price or sl_price <= current_price:
+                    logger.warning(f"Fixing invalid TP/SL for SHORT: sl={sl_price}, tp={tp_price}, price={current_price}")
+                    sl_price = current_price * 1.01
+                    tp_price = current_price * 0.975
+                
+                # Обновляем indicators_info с финальными значениями TP/SL
+                indicators_info['stop_loss'] = sl_price
+                indicators_info['take_profit'] = tp_price
+                
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
                     action=Action.SHORT,
                     reason=reason,
                     price=current_price,
-                    stop_loss=sl_price,  # ВСЕГДА установлен
-                    take_profit=tp_price,  # ВСЕГДА установлен
+                    stop_loss=sl_price,  # ВСЕГДА установлен и валиден
+                    take_profit=tp_price,  # ВСЕГДА установлен и валиден
                     indicators_info=indicators_info
                 )
             

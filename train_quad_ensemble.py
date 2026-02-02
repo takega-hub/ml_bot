@@ -1,5 +1,10 @@
 """
 Скрипт для обучения QuadEnsemble модели (RF + XGBoost + LightGBM + LSTM).
+
+ВАЖНО: LSTM используется только внутри QuadEnsemble и не сохраняется как отдельная модель.
+Для обучения отдельной LSTM модели используйте train_quad_ensemble.py, который создаст
+QuadEnsemble с встроенным LSTM.
+
 Использование: python train_quad_ensemble.py --symbol BTCUSDT --days 180
 """
 import warnings

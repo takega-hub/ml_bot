@@ -74,7 +74,7 @@ ML_CONFIDENCE_THRESHOLD=0.5
 
 ## 🎯 Основные возможности
 
-- 🤖 **ML модели**: Random Forest, XGBoost, LightGBM, LSTM, Ensemble модели
+- 🤖 **ML модели**: Random Forest, XGBoost, LightGBM, Ensemble модели (включая QuadEnsemble с LSTM)
 - 📊 **Мультитаймфреймовый анализ**: Использование данных с разных таймфреймов
 - 💰 **Управление рисками**: Стоп-лосс, тейк-профит, трейлинг стоп
 - 📱 **Telegram интеграция**: Полный контроль через Telegram бота
@@ -111,8 +111,8 @@ python retrain_all_models.py --symbol BTCUSDT
 
 ```bash
 python retrain_ml_optimized.py --symbol BTCUSDT
-python train_lstm_model.py --symbol BTCUSDT --days 180
 python train_quad_ensemble.py --symbol BTCUSDT --days 180
+# Примечание: LSTM используется только внутри quad_ensemble и не сохраняется как отдельная модель
 ```
 
 ## 🧪 Тестирование
