@@ -35,7 +35,7 @@ def setup_logging():
         backupCount=5,
         encoding='utf-8'
     )
-    main_handler.setLevel(logging.INFO)
+    main_handler.setLevel(logging.DEBUG)  # Временно включаем DEBUG для диагностики
 
     # Лог сделок
     trade_handler = RotatingFileHandler(
@@ -76,7 +76,7 @@ def setup_logging():
 
     # Настраиваем root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)  # Временно включаем DEBUG для диагностики
 
     # Очищаем существующие обработчики (на всякий случай)
     root_logger.handlers.clear()
