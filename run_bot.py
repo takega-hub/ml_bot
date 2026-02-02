@@ -71,16 +71,24 @@ console_handler.setFormatter(formatter)
 # Настраиваем root logger
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
+# Очищаем существующие обработчики, чтобы избежать дублирования
+root_logger.handlers.clear()
 root_logger.addHandler(main_handler)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(error_handler)
+# Отключаем propagate для root logger, чтобы избежать двойного логирования
+root_logger.propagate = False
 
 # Настраиваем специализированные логгеры
 trade_logger = logging.getLogger("trades")
+trade_logger.handlers.clear()  # Очищаем существующие обработчики
 trade_logger.addHandler(trade_handler)
+trade_logger.propagate = False  # Отключаем propagate
 
 signal_logger = logging.getLogger("signals")
+signal_logger.handlers.clear()  # Очищаем существующие обработчики
 signal_logger.addHandler(signal_handler)
+signal_logger.propagate = False  # Отключаем propagate
 
 logger = logging.getLogger("main")
 
