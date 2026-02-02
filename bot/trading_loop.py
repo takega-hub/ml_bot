@@ -21,6 +21,8 @@ class TradingLoop:
         self.tg_bot = tg_bot
         self.notifier = NotificationManager(tg_bot, settings)
         self.strategies: Dict[str, MLStrategy] = {}
+        # Отслеживаем последнюю обработанную свечу для каждого символа
+        self.last_processed_candle: Dict[str, Optional[pd.Timestamp]] = {}
 
     async def run(self):
         logger.info("Starting Trading Loop...")
@@ -158,9 +160,21 @@ class TradingLoop:
             if len(df) >= 2:
                 row = df.iloc[-2]  # Предпоследняя закрытая свеча
                 current_price = df.iloc[-1]['close']  # Текущая цена из последней свечи
+                candle_timestamp = row.name  # Timestamp закрытой свечи
             else:
                 row = df.iloc[-1]
                 current_price = row['close']
+                candle_timestamp = row.name
+            
+            # Проверяем, не обрабатывали ли мы уже эту свечу
+            if symbol in self.last_processed_candle:
+                if self.last_processed_candle[symbol] == candle_timestamp:
+                    # Эта свеча уже была обработана, пропускаем
+                    logger.debug(f"[{symbol}] Candle {candle_timestamp} already processed, skipping...")
+                    return
+            
+            # Сохраняем timestamp обработанной свечи
+            self.last_processed_candle[symbol] = candle_timestamp
             
             # Проверяем позицию
             try:
