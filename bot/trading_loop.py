@@ -63,15 +63,17 @@ class TradingLoop:
                     await asyncio.sleep(10)
                     continue
 
-                logger.debug(f"Signal Processing Loop: Processing {len(self.state.active_symbols)} symbols...")
+                logger.info(f"🔄 Signal Processing Loop: Processing {len(self.state.active_symbols)} symbols...")
                 for symbol in self.state.active_symbols:
+                    logger.info(f"🎯 Signal Processing Loop: Starting to process {symbol}")
                     await self.process_symbol(symbol)
+                    logger.info(f"✅ Signal Processing Loop: Completed processing {symbol}")
                     # Добавляем задержку между символами для снижения нагрузки на API
                     if len(self.state.active_symbols) > 1:
                         await asyncio.sleep(2)
                 
                 # Пауза между циклами (из настроек)
-                logger.debug(f"Signal Processing Loop: Completed iteration {iteration}, sleeping for {self.settings.live_poll_seconds}s...")
+                logger.info(f"✅ Signal Processing Loop: Completed iteration {iteration}, sleeping for {self.settings.live_poll_seconds}s...")
                 await asyncio.sleep(self.settings.live_poll_seconds)
                 logger.debug(f"Signal Processing Loop: Woke up from sleep, starting next iteration...")
             except Exception as e:
@@ -277,7 +279,7 @@ class TradingLoop:
             # КРИТИЧНО: generate_signal() выполняет долгие синхронные операции (feature engineering, model.predict)
             # Оборачиваем в to_thread() чтобы не блокировать event loop
             try:
-                logger.debug(f"[{symbol}] Calling strategy.generate_signal() in thread...")
+                logger.info(f"[{symbol}] 🔄 Calling strategy.generate_signal() in thread...")
                 signal = await asyncio.to_thread(
                     strategy.generate_signal,
                     row=row,
@@ -286,7 +288,7 @@ class TradingLoop:
                     current_price=current_price,  # Используем текущую цену из последней свечи
                     leverage=self.settings.leverage
                 )
-                logger.debug(f"[{symbol}] strategy.generate_signal() completed")
+                logger.info(f"[{symbol}] ✅ strategy.generate_signal() completed")
             except Exception as e:
                 logger.error(f"Error generating signal for {symbol}: {e}")
                 return
@@ -299,11 +301,11 @@ class TradingLoop:
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
             logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
-            logger.debug(f"[{symbol}] Signal generated, continuing processing...")
+            logger.info(f"[{symbol}] ⏭️ Signal generated, continuing processing...")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
-                logger.debug(f"[{symbol}] Adding signal to history...")
+                logger.info(f"[{symbol}] 📝 Adding signal to history...")
                 self.state.add_signal(
                     symbol=symbol,
                     action=signal.action.value,
@@ -312,15 +314,15 @@ class TradingLoop:
                     reason=signal.reason,
                     indicators=indicators_info
                 )
-                logger.debug(f"[{symbol}] Signal added to history, checking notification...")
+                logger.info(f"[{symbol}] ✅ Signal added to history, checking notification...")
                 
                 # Уведомление о сигнале высокой уверенности
                 if confidence > 0.7:
-                    logger.debug(f"[{symbol}] Sending notification...")
+                    logger.info(f"[{symbol}] 📢 Sending notification...")
                     await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(confidence*100)}%\nЦена: {signal.price}")
-                    logger.debug(f"[{symbol}] Notification sent")
+                    logger.info(f"[{symbol}] ✅ Notification sent")
             
-            logger.debug(f"[{symbol}] Signal processing completed, returning from process_symbol")
+            logger.info(f"[{symbol}] ✅ Signal processing completed, returning from process_symbol")
 
             # 5. Исполнение сделок (упрощенно)
             if signal.action == Action.LONG and has_pos != Bias.LONG:
