@@ -99,6 +99,8 @@ class TradingLoop:
 
     async def process_symbol(self, symbol: str):
         try:
+            logger.debug(f"[{symbol}] Processing symbol...")
+            
             # 0. Проверяем cooldown
             if self.state.is_symbol_in_cooldown(symbol):
                 logger.debug(f"Symbol {symbol} is in cooldown, skipping...")
@@ -106,7 +108,10 @@ class TradingLoop:
             
             # 1. Получаем данные
             df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=200)
-            if df.empty: return
+            if df.empty:
+                logger.warning(f"[{symbol}] No data received from exchange")
+                return
+            logger.debug(f"[{symbol}] Received {len(df)} candles, last close: {df['close'].iloc[-1]:.2f}")
 
             # 2. Инициализируем стратегию если нужно
             if symbol not in self.strategies:
@@ -121,6 +126,8 @@ class TradingLoop:
                         self.state.symbol_models[symbol] = model_path
                 
                 if model_path:
+                    logger.info(f"[{symbol}] Loading model: {model_path}")
+                    logger.info(f"[{symbol}] Confidence threshold: {self.settings.ml_strategy.confidence_threshold}, Min signal strength: {self.settings.ml_strategy.min_signal_strength}")
                     self.strategies[symbol] = MLStrategy(
                         model_path=model_path,
                         confidence_threshold=self.settings.ml_strategy.confidence_threshold,
@@ -159,6 +166,9 @@ class TradingLoop:
                 current_price=row["close"],
                 leverage=self.settings.leverage
             )
+            
+            # Логируем каждый сигнал (для отладки)
+            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {row['close']:.2f} | Confidence: {signal.indicators_info.get('confidence', 0):.2%}")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
@@ -202,40 +212,47 @@ class TradingLoop:
             else:
                 precision = 0
             
-            # Выбираем режим расчета размера позиции
-            if self.settings.risk.position_size_mode == "percentage":
-                # РЕЖИМ: Процент от баланса
-                # Получаем баланс
-                balance_info = await asyncio.to_thread(self.bybit.get_wallet_balance)
-                balance = 0.0
-                
-                if balance_info.get("retCode") == 0:
-                    result = balance_info.get("result", {})
-                    list_data = result.get("list", [])
-                    if list_data:
-                        wallet = list_data[0].get("coin", [])
-                        usdt_coin = next((c for c in wallet if c.get("coin") == "USDT"), None)
-                        if usdt_coin:
-                            balance_str = usdt_coin.get("walletBalance", "0")
-                            balance = float(balance_str) if balance_str and balance_str != "" else 0.0
-                
-                if balance <= 0:
-                    logger.error(f"Cannot get balance or balance is zero for {symbol}")
-                    return
-                
-                # РАСЧЕТ: margin_pct_balance% от баланса с использованием плеча
-                # Маржа = баланс * margin_pct_balance
-                # Количество = (маржа * leverage) / цена
-                margin = balance * self.settings.risk.margin_pct_balance
-                total_qty = (margin * self.settings.leverage) / signal.price
-                
-                logger.info(f"Position size (percentage mode) for {symbol}: balance=${balance:.2f}, margin=${margin:.2f} ({self.settings.risk.margin_pct_balance*100}%), leverage={self.settings.leverage}x")
-            else:
-                # РЕЖИМ: Фиксированная сумма
-                # РАСЧЕТ: base_order_usd / цена
-                total_qty = self.settings.risk.base_order_usd / signal.price
-                
-                logger.info(f"Position size (fixed mode) for {symbol}: ${self.settings.risk.base_order_usd:.2f} at price ${signal.price:.2f}")
+            # Вычисляем размер позиции: используем минимум из двух вариантов
+            # 1. Процент от баланса
+            # Получаем баланс
+            balance_info = await asyncio.to_thread(self.bybit.get_wallet_balance)
+            balance = 0.0
+            
+            if balance_info.get("retCode") == 0:
+                result = balance_info.get("result", {})
+                list_data = result.get("list", [])
+                if list_data:
+                    wallet = list_data[0].get("coin", [])
+                    usdt_coin = next((c for c in wallet if c.get("coin") == "USDT"), None)
+                    if usdt_coin:
+                        balance_str = usdt_coin.get("walletBalance", "0")
+                        balance = float(balance_str) if balance_str and balance_str != "" else 0.0
+            
+            if balance <= 0:
+                logger.error(f"Cannot get balance or balance is zero for {symbol}")
+                return
+            
+            # РАСЧЕТ 1: margin_pct_balance% от баланса с использованием плеча
+            # Маржа = баланс * margin_pct_balance
+            # Количество = (маржа * leverage) / цена
+            margin_from_percentage = balance * self.settings.risk.margin_pct_balance
+            qty_from_percentage = (margin_from_percentage * self.settings.leverage) / signal.price
+            
+            # РАСЧЕТ 2: Фиксированная сумма
+            # Количество = base_order_usd / цена
+            qty_from_fixed = self.settings.risk.base_order_usd / signal.price
+            
+            # Используем минимум из двух вариантов
+            total_qty = min(qty_from_percentage, qty_from_fixed)
+            used_method = "percentage" if qty_from_percentage < qty_from_fixed else "fixed"
+            
+            logger.info(
+                f"Position size for {symbol}: "
+                f"balance=${balance:.2f}, "
+                f"percentage_margin=${margin_from_percentage:.2f} ({self.settings.risk.margin_pct_balance*100}%) -> qty={qty_from_percentage:.6f}, "
+                f"fixed=${self.settings.risk.base_order_usd:.2f} -> qty={qty_from_fixed:.6f}, "
+                f"selected={used_method}, final_qty={total_qty:.6f}, leverage={self.settings.leverage}x"
+            )
             
             # Округляем вниз до ближайшего кратного qtyStep (как в примере кода)
             # Округляем вниз: Math.floor(totalQty / qtyStep) * qtyStep

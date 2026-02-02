@@ -78,10 +78,11 @@ class RiskParams:
     
     # Размеры позиций
     max_position_usd: float = 200.0
-    position_size_mode: str = "percentage"  # "percentage" или "fixed"
-    base_order_usd: float = 50.0  # Используется когда position_size_mode = "fixed"
+    position_size_mode: str = "percentage"  # УСТАРЕЛО: больше не используется, оставлено для обратной совместимости
+    base_order_usd: float = 50.0  # Фиксированная сумма маржи в USD
     add_order_usd: float = 50.0
-    margin_pct_balance: float = 0.20  # Маржа как процент от баланса (20%), используется когда position_size_mode = "percentage"
+    margin_pct_balance: float = 0.20  # Маржа как процент от баланса (20%)
+    # ИСПОЛЬЗУЕТСЯ: минимум из base_order_usd и margin_pct_balance% от баланса
     
     # Параметры стоп-лосса и тейк-профита
     stop_loss_pct: float = 0.01  # 1% от входа
@@ -531,8 +532,6 @@ def _load_risk_settings(settings: AppSettings) -> None:
         risk = settings.risk
         
         # Загружаем значения если они есть
-        if "position_size_mode" in data:
-            risk.position_size_mode = str(data["position_size_mode"])
         if "margin_pct_balance" in data:
             risk.margin_pct_balance = float(data["margin_pct_balance"])
         if "base_order_usd" in data:

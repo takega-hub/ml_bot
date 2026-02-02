@@ -482,8 +482,11 @@ class MLBacktestSimulator:
         if self.current_position is not None:
             self.close_position(final_time, final_price, ExitReason.END_OF_BACKTEST)
     
-    def calculate_metrics(self, symbol: str, model_name: str) -> BacktestMetrics:
+    def calculate_metrics(self, symbol: str, model_name: str, days_back: int = 0) -> BacktestMetrics:
         """Рассчитывает метрики бэктеста."""
+        # Рассчитываем trades_per_day на основе количества дней
+        trades_per_day = len(self.trades) / days_back if days_back > 0 and self.trades else 0.0
+        
         if not self.trades:
             return BacktestMetrics(
                 symbol=symbol,
@@ -521,7 +524,7 @@ class MLBacktestSimulator:
                 recovery_factor=0.0,
                 expectancy_usd=0.0,
                 risk_reward_ratio=0.0,
-                trade_frequency_per_day=0.0,
+                trade_frequency_per_day=trades_per_day,
                 profitable_days_pct=0.0,
                 ulcer_index=0.0,
                 kelly_criterion=0.0,
@@ -629,7 +632,7 @@ class MLBacktestSimulator:
             recovery_factor=total_pnl / max_drawdown if max_drawdown > 0 else 0.0,
             expectancy_usd=(win_rate/100 * avg_win) - ((100 - win_rate)/100 * abs(avg_loss)),
             risk_reward_ratio=avg_win / abs(avg_loss) if abs(avg_loss) > 0 else 0.0,
-            trade_frequency_per_day=0.0,
+            trade_frequency_per_day=trades_per_day,
             profitable_days_pct=0.0,
             ulcer_index=0.0,
             kelly_criterion=0.0,
@@ -880,7 +883,7 @@ def run_exact_backtest(
     # Рассчитываем метрики
     print(f"\n📊 Расчет метрик...")
     model_name = model_file.stem
-    metrics = simulator.calculate_metrics(symbol, model_name)
+    metrics = simulator.calculate_metrics(symbol, model_name, days_back=days_back)
     
     # Выводим результаты
     print("\n" + "=" * 80)

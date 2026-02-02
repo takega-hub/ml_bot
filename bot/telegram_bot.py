@@ -222,6 +222,10 @@ class TelegramBot:
                         status_text += f"Пара: {symbol} | Модель: {model_name} (авто)\n"
                     else:
                         status_text += f"Пара: {symbol} | Модель: ❌ Не найдена\n"
+            
+            # Добавляем информацию о пороге уверенности
+            confidence_threshold = self.settings.ml_strategy.confidence_threshold * 100
+            status_text += f"🎯 Порог уверенности: {confidence_threshold:.0f}%\n"
         
         # Overall Stats
         stats = self.state.get_stats()
@@ -240,7 +244,8 @@ class TelegramBot:
              InlineKeyboardButton("📈 СТАТИСТИКА", callback_data="stats")],
             [InlineKeyboardButton("⚙️ НАСТРОЙКИ ПАР", callback_data="settings_pairs"),
              InlineKeyboardButton("🤖 МОДЕЛИ", callback_data="settings_models")],
-            [InlineKeyboardButton("⚙️ НАСТРОЙКИ РИСКА", callback_data="settings_risk")],
+            [InlineKeyboardButton("⚙️ НАСТРОЙКИ РИСКА", callback_data="settings_risk"),
+             InlineKeyboardButton("🧠 ML НАСТРОЙКИ", callback_data="settings_ml")],
             [InlineKeyboardButton("📝 ИСТОРИЯ", callback_data="history_menu"),
              InlineKeyboardButton("🚨 ЭКСТРЕННЫЕ", callback_data="emergency_menu")]
         ]
@@ -324,6 +329,11 @@ class TelegramBot:
             await query.edit_message_text("🤖 ML Trading Bot Terminal", reply_markup=self.get_main_keyboard())
         elif query.data == "settings_risk":
             await self.show_risk_settings(query)
+        elif query.data == "settings_ml":
+            await self.show_ml_settings(query)
+        elif query.data.startswith("edit_ml_"):
+            setting_name = query.data.replace("edit_ml_", "")
+            await self.start_edit_ml_setting(query, setting_name)
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
@@ -462,6 +472,11 @@ class TelegramBot:
         if user_id in self.waiting_for_risk_setting:
             setting_name = self.waiting_for_risk_setting.pop(user_id)
             await self.process_risk_setting_input(update, setting_name, text)
+            return
+        
+        if user_id in self.waiting_for_ml_setting:
+            setting_name = self.waiting_for_ml_setting.pop(user_id)
+            await self.process_ml_setting_input(update, setting_name, text)
             return
         
         # Проверяем, ждем ли мы ввод символа
@@ -905,6 +920,55 @@ class TelegramBot:
             ])
         )
     
+    async def process_ml_setting_input(self, update: Update, setting_name: str, text: str):
+        """Обрабатывает ввод значения ML настройки"""
+        try:
+            # Парсим число
+            value = float(text.replace(",", "."))
+            
+            # Валидация и применение
+            ml_settings = self.settings.ml_strategy
+            
+            if setting_name == "confidence_threshold":
+                if 1.0 <= value <= 100.0:  # 1% - 100%
+                    ml_settings.confidence_threshold = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
+                    return
+            
+            # Сохраняем настройки
+            self.save_ml_settings()
+            
+            # Показываем обновленные настройки
+            ml_settings = self.settings.ml_strategy
+            
+            text = "🧠 НАСТРОЙКИ ML СТРАТЕГИИ\n\n"
+            text += f"🎯 Минимальная уверенность: {ml_settings.confidence_threshold*100:.0f}%\n"
+            text += f"💪 Минимальная сила сигнала:\n"
+            text += f"   • Ансамбли: 0.3% (фиксировано)\n"
+            text += f"   • Одиночные модели: 60% (фиксировано)\n\n"
+            
+            text += f"✅ Настройка обновлена!\n\n"
+            text += f"ℹ️ Уверенность модели — это вероятность правильного предсказания.\n"
+            text += f"Чем выше порог, тем меньше сигналов, но качественнее.\n\n"
+            text += f"🔹 Рекомендуемые значения:\n"
+            text += f"   • Консервативно: 70-80%\n"
+            text += f"   • Сбалансированно: 50-70%\n"
+            text += f"   • Агрессивно: 30-50%\n"
+            
+            keyboard = [
+                [InlineKeyboardButton(f"🎯 Уверенность: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
+            ]
+            
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат. Введите число (например: 50)")
+        except Exception as e:
+            logger.error(f"Error processing ML setting input: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+    
     async def process_risk_setting_input(self, update: Update, setting_name: str, text: str):
         """Обрабатывает ввод значения настройки риска"""
         try:
@@ -982,13 +1046,9 @@ class TelegramBot:
             text += f"✅ Настройка обновлена: {setting_name} = {display_value}\n\n"
             
             # Режим расчета размера позиции
-            mode_text = "Процент от баланса" if risk.position_size_mode == "percentage" else "Фиксированная сумма"
-            text += f"📊 Режим размера позиции: {mode_text}\n"
-            
-            if risk.position_size_mode == "percentage":
-                text += f"💰 Маржа от баланса: {risk.margin_pct_balance*100:.0f}%\n"
-            else:
-                text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
+            text += f"💰 Маржа от баланса: {risk.margin_pct_balance*100:.0f}%\n"
+            text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
+            text += f"ℹ️ Используется меньшее значение\n"
             text += f"📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
             text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
             text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
@@ -999,16 +1059,10 @@ class TelegramBot:
             text += f"   Активация при: {risk.breakeven_activation_pct*100:.2f}%\n\n"
             text += f"❄️ Cooldown после убытков: {'✅ Включен' if risk.enable_loss_cooldown else '❌ Выключен'}\n"
             
-            mode_text = "Процент от баланса" if risk.position_size_mode == "percentage" else "Фиксированная сумма"
-            
             keyboard = [
-                [InlineKeyboardButton(f"📊 Режим: {mode_text}", callback_data="toggle_risk_position_size_mode")],
+                [InlineKeyboardButton(f"💰 Маржа: {risk.margin_pct_balance*100:.0f}%", callback_data="edit_risk_margin_pct_balance")],
+                [InlineKeyboardButton(f"💰 Сумма: ${risk.base_order_usd:.2f}", callback_data="edit_risk_base_order_usd")],
             ]
-            
-            if risk.position_size_mode == "percentage":
-                keyboard.append([InlineKeyboardButton(f"💰 Маржа: {risk.margin_pct_balance*100:.0f}%", callback_data="edit_risk_margin_pct_balance")])
-            else:
-                keyboard.append([InlineKeyboardButton(f"💰 Сумма: ${risk.base_order_usd:.2f}", callback_data="edit_risk_base_order_usd")])
             
             keyboard.extend([
                 [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
@@ -1045,12 +1099,6 @@ class TelegramBot:
             risk.enable_breakeven = not risk.enable_breakeven
         elif setting_name == "enable_loss_cooldown":
             risk.enable_loss_cooldown = not risk.enable_loss_cooldown
-        elif setting_name == "position_size_mode":
-            # Переключаем между "percentage" и "fixed"
-            if risk.position_size_mode == "percentage":
-                risk.position_size_mode = "fixed"
-            else:
-                risk.position_size_mode = "percentage"
         else:
             await query.answer("Неизвестная настройка", show_alert=True)
             return
@@ -1074,6 +1122,26 @@ class TelegramBot:
         await query.answer("✅ Настройки сброшены на стандартные!", show_alert=True)
         await self.show_risk_settings(query)
     
+    def save_ml_settings(self):
+        """Сохраняет ML настройки в файл"""
+        try:
+            from pathlib import Path
+            import json
+            
+            config_file = Path("ml_settings.json")
+            
+            ml_dict = {
+                "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+            }
+            
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(ml_dict, f, indent=2, ensure_ascii=False)
+            
+            logger.info("ML settings saved to ml_settings.json")
+        
+        except Exception as e:
+            logger.error(f"Error saving ML settings: {e}")
+    
     def save_risk_settings(self):
         """Сохраняет настройки риска в файл"""
         try:
@@ -1084,7 +1152,6 @@ class TelegramBot:
             
             # Преобразуем настройки в словарь
             risk_dict = {
-                "position_size_mode": self.settings.risk.position_size_mode,
                 "margin_pct_balance": self.settings.risk.margin_pct_balance,
                 "base_order_usd": self.settings.risk.base_order_usd,
                 "stop_loss_pct": self.settings.risk.stop_loss_pct,
@@ -1159,14 +1226,10 @@ class TelegramBot:
         
         text = "⚙️ НАСТРОЙКИ РИСКА\n\n"
         
-        # Режим расчета размера позиции
-        mode_text = "Процент от баланса" if risk.position_size_mode == "percentage" else "Фиксированная сумма"
-        text += f"📊 Режим размера позиции: {mode_text}\n"
-        
-        if risk.position_size_mode == "percentage":
-            text += f"💰 Маржа от баланса: {risk.margin_pct_balance*100:.0f}%\n"
-        else:
-            text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
+        # Размер позиции (используется меньшее значение)
+        text += f"💰 Маржа от баланса: {risk.margin_pct_balance*100:.0f}%\n"
+        text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
+        text += f"ℹ️ Используется меньшее значение\n"
         
         text += f"\n📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
         text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
@@ -1179,13 +1242,9 @@ class TelegramBot:
         text += f"❄️ Cooldown после убытков: {'✅ Включен' if risk.enable_loss_cooldown else '❌ Выключен'}\n"
         
         keyboard = [
-            [InlineKeyboardButton(f"📊 Режим: {mode_text}", callback_data="toggle_risk_position_size_mode")],
+            [InlineKeyboardButton(f"💰 Маржа: {risk.margin_pct_balance*100:.0f}%", callback_data="edit_risk_margin_pct_balance")],
+            [InlineKeyboardButton(f"💰 Сумма: ${risk.base_order_usd:.2f}", callback_data="edit_risk_base_order_usd")],
         ]
-        
-        if risk.position_size_mode == "percentage":
-            keyboard.append([InlineKeyboardButton(f"💰 Маржа: {risk.margin_pct_balance*100:.0f}%", callback_data="edit_risk_margin_pct_balance")])
-        else:
-            keyboard.append([InlineKeyboardButton(f"💰 Сумма: ${risk.base_order_usd:.2f}", callback_data="edit_risk_base_order_usd")])
         
         keyboard.extend([
             [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
