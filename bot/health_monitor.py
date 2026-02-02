@@ -27,9 +27,10 @@ class HealthMonitor:
         self.last_api_success = False
         self.last_notification = datetime.now()
         
-        # Пороги для уведомлений
-        self.memory_threshold_mb = 2048  # МБ (2 ГБ) - обучение моделей требует много памяти
-        self.memory_critical_mb = 4096  # МБ (4 ГБ) - критический порог
+        # Пороги для уведомлений (из настроек или по умолчанию)
+        self.memory_threshold_mb = getattr(settings, 'memory_threshold_mb', 1000.0)  # МБ - порог для предупреждений
+        self.memory_critical_mb = getattr(settings, 'memory_critical_mb', 2000.0)  # МБ - критический порог
+        self.health_check_interval = getattr(settings, 'health_check_interval_seconds', 300)  # секунды
         self.notification_cooldown = timedelta(minutes=15)  # Не чаще раза в 15 минут
     
     async def run(self):
@@ -38,8 +39,8 @@ class HealthMonitor:
         
         while True:
             try:
-                # Проверяем здоровье каждые 5 минут
-                await asyncio.sleep(300)
+                # Проверяем здоровье с интервалом из настроек
+                await asyncio.sleep(self.health_check_interval)
                 
                 if not self.state.is_running:
                     continue
@@ -167,11 +168,16 @@ class HealthMonitor:
                 "critical_threshold_mb": self.memory_critical_mb
             }
             
-            # Считаем проблемой только критическое использование памяти (>= 4 ГБ)
+            # Считаем проблемой только критическое использование памяти
             is_ok = used_mb < self.memory_critical_mb
             
-            if not is_ok:
-                logger.warning(f"High memory usage: {used_mb:.1f} MB")
+            # Логируем предупреждение только при превышении порога предупреждений
+            if used_mb >= self.memory_threshold_mb:
+                if used_mb >= self.memory_critical_mb:
+                    logger.warning(f"🔴 CRITICAL memory usage: {used_mb:.1f} MB (threshold: {self.memory_critical_mb:.1f} MB)")
+                else:
+                    # Высокое использование, но не критическое (может быть нормально при обучении моделей)
+                    logger.info(f"⚠️ High memory usage: {used_mb:.1f} MB (threshold: {self.memory_threshold_mb:.1f} MB, critical: {self.memory_critical_mb:.1f} MB)")
             
             return is_ok, info
         

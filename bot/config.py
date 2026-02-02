@@ -210,6 +210,11 @@ class AppSettings:
     live_poll_seconds: int = 60  # Пауза между циклами
     kline_limit: int = 1000  # Количество свечей для анализа
     
+    # Настройки мониторинга здоровья
+    health_check_interval_seconds: int = 300  # Интервал проверки здоровья (5 минут)
+    memory_threshold_mb: float = 1000.0  # Порог использования памяти для предупреждений (МБ)
+    memory_critical_mb: float = 2000.0  # Критический порог использования памяти (МБ)
+    
     # Настройки моделей по парам
     symbol_ml_settings: Dict[str, SymbolMLSettings] = field(default_factory=dict)
     
@@ -415,6 +420,28 @@ def load_settings() -> AppSettings:
     if kline_limit_env:
         try:
             settings.kline_limit = int(kline_limit_env)
+        except ValueError:
+            pass
+    
+    # Загружаем настройки мониторинга здоровья
+    health_check_interval = os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "").strip()
+    if health_check_interval:
+        try:
+            settings.health_check_interval_seconds = int(health_check_interval)
+        except ValueError:
+            pass
+    
+    memory_threshold = os.getenv("MEMORY_THRESHOLD_MB", "").strip()
+    if memory_threshold:
+        try:
+            settings.memory_threshold_mb = float(memory_threshold)
+        except ValueError:
+            pass
+    
+    memory_critical = os.getenv("MEMORY_CRITICAL_MB", "").strip()
+    if memory_critical:
+        try:
+            settings.memory_critical_mb = float(memory_critical)
         except ValueError:
             pass
     

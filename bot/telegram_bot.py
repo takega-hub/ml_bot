@@ -210,7 +210,13 @@ class TelegramBot:
                 model_path = self.state.symbol_models.get(symbol)
                 if model_path and Path(model_path).exists():
                     model_name = Path(model_path).stem
+                    
+                    # Определяем тип модели
+                    is_ensemble = "ensemble" in model_name.lower()
+                    min_strength = 0.3 if is_ensemble else 60.0
+                    
                     status_text += f"Пара: {symbol} | Модель: {model_name}\n"
+                    status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
                 else:
                     # Пытаемся найти модель автоматически
                     models = self.model_manager.find_models_for_symbol(symbol)
@@ -219,13 +225,15 @@ class TelegramBot:
                         model_path = str(models[0])
                         self.model_manager.apply_model(symbol, model_path)
                         model_name = models[0].stem
+                        
+                        # Определяем тип модели
+                        is_ensemble = "ensemble" in model_name.lower()
+                        min_strength = 0.3 if is_ensemble else 60.0
+                        
                         status_text += f"Пара: {symbol} | Модель: {model_name} (авто)\n"
+                        status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
                     else:
                         status_text += f"Пара: {symbol} | Модель: ❌ Не найдена\n"
-            
-            # Добавляем информацию о пороге уверенности
-            confidence_threshold = self.settings.ml_strategy.confidence_threshold * 100
-            status_text += f"🎯 Порог уверенности: {confidence_threshold:.0f}%\n"
         
         # Overall Stats
         stats = self.state.get_stats()
