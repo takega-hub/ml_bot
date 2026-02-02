@@ -600,11 +600,29 @@ class TradingLoop:
             
         except Exception as e:
             logger.error(f"Error handling closed position for {symbol}: {e}")
-            # В случае ошибки все равно закрываем позицию в state с нулевым PnL
+            # В случае ошибки пытаемся получить текущую цену и закрыть позицию
             try:
-                self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
-            except:
-                pass
+                # Пытаемся получить текущую цену из свечей
+                df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
+                if not df.empty:
+                    exit_price = float(df['close'].iloc[-1])
+                    # Рассчитываем PnL даже при ошибке
+                    if local_pos.side == "Buy":
+                        pnl_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price) * 100
+                    else:
+                        pnl_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price) * 100
+                    pnl_usd = (pnl_pct / 100) * (local_pos.entry_price * local_pos.qty)
+                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
+                else:
+                    # Если не удалось получить цену, используем entry_price с нулевым PnL
+                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
+            except Exception as e2:
+                logger.error(f"Error in fallback close handling for {symbol}: {e2}")
+                # Последняя попытка - закрываем с entry_price
+                try:
+                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
+                except:
+                    pass
     
     async def sync_positions_with_exchange(self):
         """Синхронизирует локальное состояние с позициями на бирже при старте"""

@@ -444,10 +444,59 @@ class TelegramBot:
             for idx, t in enumerate(reversed(closed_trades)):
                 pnl_sign = "+" if t.pnl_usd >= 0 else ""
                 trade_idx = len(self.state.trades) - len(closed_trades) + idx
-                text += f"#{trade_idx} 🕒 {t.exit_time[11:19] if t.exit_time else 'N/A'} | {t.symbol} {t.side}\n"
-                exit_price = t.exit_price if t.exit_price else 0.0
-                text += f"   Вход: ${t.entry_price:.2f} | Выход: ${exit_price:.2f}\n"
-                text += f"   PnL: {pnl_sign}${t.pnl_usd:.2f} ({pnl_sign}{t.pnl_pct:.2f}%)\n\n"
+                
+                # Форматируем время выхода
+                exit_time_str = "N/A"
+                if t.exit_time:
+                    try:
+                        exit_time_str = t.exit_time[11:19] if len(t.exit_time) > 19 else t.exit_time
+                    except:
+                        exit_time_str = str(t.exit_time)[:8]
+                
+                # Форматируем время входа
+                entry_time_str = "N/A"
+                if t.entry_time:
+                    try:
+                        entry_time_str = t.entry_time[11:19] if len(t.entry_time) > 19 else t.entry_time
+                    except:
+                        entry_time_str = str(t.entry_time)[:8]
+                
+                # Рассчитываем длительность
+                duration_str = "N/A"
+                if t.entry_time and t.exit_time:
+                    try:
+                        from datetime import datetime
+                        entry_dt = datetime.fromisoformat(t.entry_time.replace('Z', '+00:00'))
+                        exit_dt = datetime.fromisoformat(t.exit_time.replace('Z', '+00:00'))
+                        duration = exit_dt - entry_dt
+                        hours = duration.total_seconds() / 3600
+                        if hours < 1:
+                            duration_str = f"{int(duration.total_seconds() / 60)}м"
+                        elif hours < 24:
+                            duration_str = f"{hours:.1f}ч"
+                        else:
+                            duration_str = f"{hours/24:.1f}д"
+                    except:
+                        pass
+                
+                # Форматируем цену выхода
+                exit_price = t.exit_price if t.exit_price and t.exit_price > 0 else None
+                
+                # Форматируем количество
+                qty_str = f"{t.qty:.4f}" if t.qty > 0 else "N/A"
+                
+                # Эмодзи для PnL
+                pnl_emoji = "✅" if t.pnl_usd > 0 else "❌" if t.pnl_usd < 0 else "➖"
+                
+                text += f"#{trade_idx} {pnl_emoji} {t.symbol} {t.side}\n"
+                text += f"   📅 Вход: {entry_time_str} → Выход: {exit_time_str} ({duration_str})\n"
+                text += f"   💰 Вход: ${t.entry_price:.2f}"
+                if exit_price:
+                    text += f" | Выход: ${exit_price:.2f}\n"
+                else:
+                    text += f" | Выход: N/A\n"
+                text += f"   📊 Количество: {qty_str}\n"
+                text += f"   💵 PnL: {pnl_sign}${t.pnl_usd:.2f} ({pnl_sign}{t.pnl_pct:.2f}%)\n\n"
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
