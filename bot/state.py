@@ -19,6 +19,8 @@ class TradeRecord:
     exit_time: Optional[str] = None
     status: str = "open"  # open, closed
     model_name: str = ""
+    horizon: str = "short_term"  # short_term, mid_term, long_term
+    dca_count: int = 0
 
 @dataclass
 class SignalRecord:
@@ -253,5 +255,14 @@ class BotState:
                 if trade.symbol == symbol and trade.status == "open":
                     trade.qty = new_size
                     trade.entry_price = new_entry_price
+                    break
+        self.save()
+
+    def increment_dca(self, symbol: str):
+        """Увеличивает счетчик усреднений для открытой позиции"""
+        with self.lock:
+            for trade in reversed(self.trades):
+                if trade.symbol == symbol and trade.status == "open":
+                    trade.dca_count += 1
                     break
         self.save()

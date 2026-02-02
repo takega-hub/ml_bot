@@ -115,6 +115,18 @@ class RiskParams:
 
     # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
     fee_rate: float = 0.0006
+
+    # Категоризация горизонта позиции по TP/SL
+    mid_term_tp_pct: float = 0.025  # 2.5% от цены
+    long_term_tp_pct: float = 0.04  # 4% от цены
+    long_term_sl_pct: float = 0.02  # 2% от цены
+    long_term_ignore_reverse: bool = True
+
+    # Усреднение (DCA)
+    dca_enabled: bool = True
+    dca_drawdown_pct: float = 0.003  # Усреднять при просадке 0.3%
+    dca_max_adds: int = 2
+    dca_min_confidence: float = 0.6
     
     # Динамическое изменение размера позиции
     enable_dynamic_position_sizing: bool = True
@@ -140,6 +152,14 @@ class RiskParams:
             self.breakeven_activation_pct /= 100.0
         if self.fee_rate >= 1:
             self.fee_rate /= 100.0
+        if self.mid_term_tp_pct >= 1:
+            self.mid_term_tp_pct /= 100.0
+        if self.long_term_tp_pct >= 1:
+            self.long_term_tp_pct /= 100.0
+        if self.long_term_sl_pct >= 1:
+            self.long_term_sl_pct /= 100.0
+        if self.dca_drawdown_pct >= 1:
+            self.dca_drawdown_pct /= 100.0
 
 
 @dataclass
@@ -402,6 +422,16 @@ def load_settings() -> AppSettings:
             settings.risk.fee_rate = value
         except ValueError:
             pass
+
+    dca_drawdown = os.getenv("DCA_DRAWDOWN_PCT", "").strip()
+    if dca_drawdown:
+        try:
+            value = float(dca_drawdown)
+            if value >= 1:
+                value /= 100.0
+            settings.risk.dca_drawdown_pct = value
+        except ValueError:
+            pass
     
     # Загружаем общие настройки
     timeframe = os.getenv("TIMEFRAME", "").strip()
@@ -601,6 +631,34 @@ def _load_risk_settings(settings: AppSettings) -> None:
             if value >= 1:
                 value /= 100.0
             risk.fee_rate = value
+        if "mid_term_tp_pct" in data:
+            value = float(data["mid_term_tp_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.mid_term_tp_pct = value
+        if "long_term_tp_pct" in data:
+            value = float(data["long_term_tp_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.long_term_tp_pct = value
+        if "long_term_sl_pct" in data:
+            value = float(data["long_term_sl_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.long_term_sl_pct = value
+        if "long_term_ignore_reverse" in data:
+            risk.long_term_ignore_reverse = bool(data["long_term_ignore_reverse"])
+        if "dca_enabled" in data:
+            risk.dca_enabled = bool(data["dca_enabled"])
+        if "dca_drawdown_pct" in data:
+            value = float(data["dca_drawdown_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.dca_drawdown_pct = value
+        if "dca_max_adds" in data:
+            risk.dca_max_adds = int(data["dca_max_adds"])
+        if "dca_min_confidence" in data:
+            risk.dca_min_confidence = float(data["dca_min_confidence"])
         
         print(f"[config] Risk settings loaded from {settings_file}")
     except Exception as e:

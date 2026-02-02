@@ -960,6 +960,13 @@ class TelegramBot:
             "base_order_usd": ("Фиксированная сумма (в USD)", "50", "Пример: 50 означает $50 на позицию"),
             "stop_loss_pct": ("Stop Loss (в %)", "1.0", "Пример: 1.0 означает 1%"),
             "take_profit_pct": ("Take Profit (в %)", "2.5", "Пример: 2.5 означает 2.5%"),
+            "fee_rate": ("Комиссия биржи (per side, в %)", "0.06", "Пример: 0.06 означает 0.06% за вход/выход"),
+            "mid_term_tp_pct": ("Порог mid-term TP (в %)", "2.5", "Пример: 2.5 означает 2.5% от цены"),
+            "long_term_tp_pct": ("Порог long-term TP (в %)", "4.0", "Пример: 4.0 означает 4% от цены"),
+            "long_term_sl_pct": ("Порог long-term SL (в %)", "2.0", "Пример: 2.0 означает 2% от цены"),
+            "dca_drawdown_pct": ("Просадка для DCA (в %)", "0.3", "Пример: 0.3 означает 0.3% от цены"),
+            "dca_max_adds": ("Максимум DCA добавлений", "2", "Пример: 2 означает максимум 2 усреднения"),
+            "dca_min_confidence": ("Мин. уверенность для DCA (в %)", "60", "Пример: 60 означает 60%"),
             "trailing_stop_activation_pct": ("Активация трейлинг стопа (в %)", "0.3", "Пример: 0.3 означает 0.3%"),
             "trailing_stop_distance_pct": ("Расстояние трейлинг стопа (в %)", "0.2", "Пример: 0.2 означает 0.2%"),
             "breakeven_activation_pct": ("Активация безубытка (в %)", "0.5", "Пример: 0.5 означает 0.5%"),
@@ -1072,6 +1079,57 @@ class TelegramBot:
                     await update.message.reply_text("❌ Значение должно быть от 0.5 до 20%")
                     return
             
+            elif setting_name == "fee_rate":
+                if 0.0 <= value <= 5.0:
+                    risk.fee_rate = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0 до 5%")
+                    return
+            
+            elif setting_name == "mid_term_tp_pct":
+                if 0.5 <= value <= 10.0:
+                    risk.mid_term_tp_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.5 до 10%")
+                    return
+            
+            elif setting_name == "long_term_tp_pct":
+                if 1.0 <= value <= 20.0:
+                    risk.long_term_tp_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 1 до 20%")
+                    return
+            
+            elif setting_name == "long_term_sl_pct":
+                if 0.5 <= value <= 10.0:
+                    risk.long_term_sl_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.5 до 10%")
+                    return
+            
+            elif setting_name == "dca_drawdown_pct":
+                if 0.05 <= value <= 5.0:
+                    risk.dca_drawdown_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.05 до 5%")
+                    return
+            
+            elif setting_name == "dca_max_adds":
+                if 0 <= value <= 10:
+                    risk.dca_max_adds = int(value)
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0 до 10")
+                    return
+            
+            elif setting_name == "dca_min_confidence":
+                if 1.0 <= value <= 100.0:
+                    risk.dca_min_confidence = value / 100.0
+                elif 0.0 <= value <= 1.0:
+                    risk.dca_min_confidence = value
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
+                    return
+            
             elif setting_name == "trailing_stop_activation_pct":
                 if 0.1 <= value <= 5.0:
                     risk.trailing_stop_activation_pct = value / 100.0
@@ -1111,6 +1169,8 @@ class TelegramBot:
             # Форматируем значение для отображения
             if setting_name.endswith("_pct"):
                 display_value = f"{value:.2f}%"
+            elif setting_name in ("fee_rate", "dca_min_confidence"):
+                display_value = f"{value:.4f}%" if setting_name == "fee_rate" else f"{value:.2f}%"
             elif setting_name == "base_order_usd":
                 display_value = f"${value:.2f}"
             else:
@@ -1123,8 +1183,19 @@ class TelegramBot:
             text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
             text += f"ℹ️ Используется меньшее значение\n"
             text += f"📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
-            text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
+            text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n"
             text += f"💸 Комиссия (per side): {risk.fee_rate*100:.4f}%\n\n"
+            text += (
+                f"🧭 Горизонт: mid TP≥{risk.mid_term_tp_pct*100:.2f}% | "
+                f"long TP≥{risk.long_term_tp_pct*100:.2f}% или SL≥{risk.long_term_sl_pct*100:.2f}%\n"
+            )
+            text += f"↪️ Игнорировать реверс (mid/long): {'✅' if risk.long_term_ignore_reverse else '❌'}\n\n"
+            text += (
+                f"➕ DCA: {'✅' if risk.dca_enabled else '❌'} | "
+                f"Просадка: {risk.dca_drawdown_pct*100:.2f}% | "
+                f"Макс: {risk.dca_max_adds} | "
+                f"Мин. уверенность: {risk.dca_min_confidence*100:.0f}%\n\n"
+            )
             text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
             text += f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%\n"
             text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
@@ -1141,6 +1212,15 @@ class TelegramBot:
             keyboard.extend([
                 [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
                 [InlineKeyboardButton(f"📈 TP: {risk.take_profit_pct*100:.2f}%", callback_data="edit_risk_take_profit_pct")],
+                [InlineKeyboardButton(f"💸 Комиссия: {risk.fee_rate*100:.4f}%", callback_data="edit_risk_fee_rate")],
+                [InlineKeyboardButton(f"🧭 Mid TP: {risk.mid_term_tp_pct*100:.2f}%", callback_data="edit_risk_mid_term_tp_pct")],
+                [InlineKeyboardButton(f"🧭 Long TP: {risk.long_term_tp_pct*100:.2f}%", callback_data="edit_risk_long_term_tp_pct")],
+                [InlineKeyboardButton(f"🧭 Long SL: {risk.long_term_sl_pct*100:.2f}%", callback_data="edit_risk_long_term_sl_pct")],
+                [InlineKeyboardButton(f"↪️ Игнор. реверс: {'✅' if risk.long_term_ignore_reverse else '❌'}", callback_data="toggle_risk_long_term_ignore_reverse")],
+                [InlineKeyboardButton(f"➕ DCA: {'✅' if risk.dca_enabled else '❌'}", callback_data="toggle_risk_dca_enabled")],
+                [InlineKeyboardButton(f"   Просадка: {risk.dca_drawdown_pct*100:.2f}%", callback_data="edit_risk_dca_drawdown_pct")],
+                [InlineKeyboardButton(f"   Макс: {risk.dca_max_adds}", callback_data="edit_risk_dca_max_adds")],
+                [InlineKeyboardButton(f"   Мин. уверенность: {risk.dca_min_confidence*100:.0f}%", callback_data="edit_risk_dca_min_confidence")],
                 [InlineKeyboardButton(f"🔄 Трейлинг: {'✅' if risk.enable_trailing_stop else '❌'}", callback_data="toggle_risk_enable_trailing_stop")],
                 [InlineKeyboardButton(f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_activation_pct")],
                 [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],
@@ -1173,6 +1253,10 @@ class TelegramBot:
             risk.enable_breakeven = not risk.enable_breakeven
         elif setting_name == "enable_loss_cooldown":
             risk.enable_loss_cooldown = not risk.enable_loss_cooldown
+        elif setting_name == "long_term_ignore_reverse":
+            risk.long_term_ignore_reverse = not risk.long_term_ignore_reverse
+        elif setting_name == "dca_enabled":
+            risk.dca_enabled = not risk.dca_enabled
         else:
             await query.answer("Неизвестная настройка", show_alert=True)
             return
@@ -1238,6 +1322,14 @@ class TelegramBot:
                 "breakeven_activation_pct": self.settings.risk.breakeven_activation_pct,
                 "enable_loss_cooldown": self.settings.risk.enable_loss_cooldown,
                 "fee_rate": self.settings.risk.fee_rate,
+                "mid_term_tp_pct": self.settings.risk.mid_term_tp_pct,
+                "long_term_tp_pct": self.settings.risk.long_term_tp_pct,
+                "long_term_sl_pct": self.settings.risk.long_term_sl_pct,
+                "long_term_ignore_reverse": self.settings.risk.long_term_ignore_reverse,
+                "dca_enabled": self.settings.risk.dca_enabled,
+                "dca_drawdown_pct": self.settings.risk.dca_drawdown_pct,
+                "dca_max_adds": self.settings.risk.dca_max_adds,
+                "dca_min_confidence": self.settings.risk.dca_min_confidence,
             }
             
             with open(config_file, 'w', encoding='utf-8') as f:
@@ -1353,6 +1445,18 @@ class TelegramBot:
         
         text += f"\n📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
         text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
+        text += f"💸 Комиссия (per side): {risk.fee_rate*100:.4f}%\n\n"
+        text += (
+            f"🧭 Горизонт: mid TP≥{risk.mid_term_tp_pct*100:.2f}% | "
+            f"long TP≥{risk.long_term_tp_pct*100:.2f}% или SL≥{risk.long_term_sl_pct*100:.2f}%\n"
+        )
+        text += f"↪️ Игнорировать реверс (mid/long): {'✅' if risk.long_term_ignore_reverse else '❌'}\n\n"
+        text += (
+            f"➕ DCA: {'✅' if risk.dca_enabled else '❌'} | "
+            f"Просадка: {risk.dca_drawdown_pct*100:.2f}% | "
+            f"Макс: {risk.dca_max_adds} | "
+            f"Мин. уверенность: {risk.dca_min_confidence*100:.0f}%\n\n"
+        )
         text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
         text += f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%\n"
         text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
@@ -1369,6 +1473,15 @@ class TelegramBot:
         keyboard.extend([
             [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
             [InlineKeyboardButton(f"📈 TP: {risk.take_profit_pct*100:.2f}%", callback_data="edit_risk_take_profit_pct")],
+            [InlineKeyboardButton(f"💸 Комиссия: {risk.fee_rate*100:.4f}%", callback_data="edit_risk_fee_rate")],
+            [InlineKeyboardButton(f"🧭 Mid TP: {risk.mid_term_tp_pct*100:.2f}%", callback_data="edit_risk_mid_term_tp_pct")],
+            [InlineKeyboardButton(f"🧭 Long TP: {risk.long_term_tp_pct*100:.2f}%", callback_data="edit_risk_long_term_tp_pct")],
+            [InlineKeyboardButton(f"🧭 Long SL: {risk.long_term_sl_pct*100:.2f}%", callback_data="edit_risk_long_term_sl_pct")],
+            [InlineKeyboardButton(f"↪️ Игнор. реверс: {'✅' if risk.long_term_ignore_reverse else '❌'}", callback_data="toggle_risk_long_term_ignore_reverse")],
+            [InlineKeyboardButton(f"➕ DCA: {'✅' if risk.dca_enabled else '❌'}", callback_data="toggle_risk_dca_enabled")],
+            [InlineKeyboardButton(f"   Просадка: {risk.dca_drawdown_pct*100:.2f}%", callback_data="edit_risk_dca_drawdown_pct")],
+            [InlineKeyboardButton(f"   Макс: {risk.dca_max_adds}", callback_data="edit_risk_dca_max_adds")],
+            [InlineKeyboardButton(f"   Мин. уверенность: {risk.dca_min_confidence*100:.0f}%", callback_data="edit_risk_dca_min_confidence")],
             [InlineKeyboardButton(f"🔄 Трейлинг: {'✅' if risk.enable_trailing_stop else '❌'}", callback_data="toggle_risk_enable_trailing_stop")],
             [InlineKeyboardButton(f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_activation_pct")],
             [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],

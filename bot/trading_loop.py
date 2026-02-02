@@ -285,6 +285,8 @@ class TradingLoop:
             elif pos_info is None:
                 logger.warning(f"Position info is None for {symbol}")
 
+            local_pos = self.state.get_open_position(symbol)
+
             # Генерация сигнала
             # КРИТИЧНО: generate_signal() выполняет долгие синхронные операции (feature engineering, model.predict)
             # Оборачиваем в to_thread() чтобы не блокировать event loop
@@ -334,18 +336,53 @@ class TradingLoop:
             
             logger.info(f"[{symbol}] ✅ Signal processing completed, returning from process_symbol")
 
-            # 5. Исполнение сделок (упрощенно)
-            if signal.action == Action.LONG and has_pos != Bias.LONG:
-                # Открываем LONG
-                await self.execute_trade(symbol, "Buy", signal)
-            elif signal.action == Action.SHORT and has_pos != Bias.SHORT:
-                # Открываем SHORT
-                await self.execute_trade(symbol, "Sell", signal)
+            # 5. Исполнение сделок
+            if signal.action in (Action.LONG, Action.SHORT):
+                signal_side = Bias.LONG if signal.action == Action.LONG else Bias.SHORT
+
+                # Если позиция уже есть, решаем: игнорировать реверс или усреднять
+                if has_pos is not None and local_pos:
+                    # Не закрываем средне/долгосрочные позиции по противоположному сигналу
+                    if (
+                        has_pos != signal_side
+                        and local_pos.horizon in ("mid_term", "long_term")
+                        and self.settings.risk.long_term_ignore_reverse
+                    ):
+                        logger.info(
+                            f"[{symbol}] Opposite signal ignored for {local_pos.horizon} position."
+                        )
+                        return
+
+                    # Усреднение при сигнале в ту же сторону и в минусе
+                    if has_pos == signal_side:
+                        if self._should_dca(local_pos, signal, current_price, confidence):
+                            logger.info(f"[{symbol}] DCA conditions met, adding to position.")
+                            await self.execute_trade(
+                                symbol,
+                                "Buy" if signal_side == Bias.LONG else "Sell",
+                                signal,
+                                is_add=True,
+                                position_horizon=local_pos.horizon,
+                            )
+                        return
+
+                # Открываем позицию, если ее нет или она в другую сторону (для short_term)
+                if signal.action == Action.LONG and has_pos != Bias.LONG:
+                    await self.execute_trade(symbol, "Buy", signal)
+                elif signal.action == Action.SHORT and has_pos != Bias.SHORT:
+                    await self.execute_trade(symbol, "Sell", signal)
 
         except Exception as e:
             logger.error(f"[trading_loop] Error processing {symbol}: {e}")
 
-    async def execute_trade(self, symbol: str, side: str, signal: Signal):
+    async def execute_trade(
+        self,
+        symbol: str,
+        side: str,
+        signal: Signal,
+        is_add: bool = False,
+        position_horizon: Optional[str] = None,
+    ):
         try:
             # Получаем qtyStep для символа
             qty_step = self.bybit.get_qty_step(symbol)
@@ -393,7 +430,10 @@ class TradingLoop:
             
             # РАСЧЕТ 2: Фиксированная сумма
             # Количество = base_order_usd / цена
-            qty_from_fixed = self.settings.risk.base_order_usd / signal.price
+            fixed_margin_usd = (
+                self.settings.risk.add_order_usd if is_add else self.settings.risk.base_order_usd
+            )
+            qty_from_fixed = fixed_margin_usd / signal.price
             
             # Используем минимум из двух вариантов
             total_qty = min(qty_from_percentage, qty_from_fixed)
@@ -403,7 +443,7 @@ class TradingLoop:
                 f"Position size for {symbol}: "
                 f"balance=${balance:.2f}, "
                 f"percentage_margin=${margin_from_percentage:.2f} ({self.settings.risk.margin_pct_balance*100}%) -> qty={qty_from_percentage:.6f}, "
-                f"fixed=${self.settings.risk.base_order_usd:.2f} -> qty={qty_from_fixed:.6f}, "
+                f"fixed=${fixed_margin_usd:.2f} -> qty={qty_from_fixed:.6f}, "
                 f"selected={used_method}, final_qty={total_qty:.6f}, leverage={self.settings.leverage}x"
             )
             
@@ -425,24 +465,50 @@ class TradingLoop:
                 side=side,
                 qty=qty,
                 order_type="Market",
-                take_profit=signal.take_profit,
-                stop_loss=signal.stop_loss
+                take_profit=None if is_add else signal.take_profit,
+                stop_loss=None if is_add else signal.stop_loss,
             )
             
             if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
-                logger.info(f"Successfully opened {side} for {symbol}")
-                await self.notifier.high(f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\nЦена: {signal.price}\nTP: {signal.take_profit}\nSL: {signal.stop_loss}")
-                
-                # Добавляем в историю (пока как открытую)
-                trade = TradeRecord(
-                    symbol=symbol,
-                    side=side,
-                    entry_price=signal.price,
-                    qty=qty,
-                    status="open",
-                    model_name=self.state.symbol_models.get(symbol, "")
-                )
-                self.state.add_trade(trade)
+                if is_add:
+                    logger.info(f"Successfully added to {side} for {symbol}")
+                    await self.notifier.medium(
+                        f"➕ ДОБАВЛЕНИЕ К ПОЗИЦИИ {side} {symbol}\n"
+                        f"Цена: {signal.price}\n"
+                        f"Объем: {qty}"
+                    )
+                    self.state.increment_dca(symbol)
+                    # Обновляем среднюю цену и размер по бирже
+                    pos_info = await asyncio.to_thread(self.bybit.get_position_info, symbol=symbol)
+                    if pos_info and isinstance(pos_info, dict) and pos_info.get("retCode") == 0:
+                        result = pos_info.get("result")
+                        if result and isinstance(result, dict):
+                            list_data = result.get("list", [])
+                            if list_data:
+                                position = list_data[0]
+                                if position and isinstance(position, dict):
+                                    size = float(position.get("size", 0))
+                                    avg_price = float(position.get("avgPrice", 0))
+                                    if size > 0 and avg_price > 0:
+                                        self.state.update_position(symbol, size, avg_price)
+                else:
+                    logger.info(f"Successfully opened {side} for {symbol}")
+                    await self.notifier.high(
+                        f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\n"
+                        f"Цена: {signal.price}\nTP: {signal.take_profit}\nSL: {signal.stop_loss}"
+                    )
+                    
+                    # Добавляем в историю (пока как открытую)
+                    trade = TradeRecord(
+                        symbol=symbol,
+                        side=side,
+                        entry_price=signal.price,
+                        qty=qty,
+                        status="open",
+                        model_name=self.state.symbol_models.get(symbol, ""),
+                        horizon=position_horizon or self._classify_position_horizon(signal),
+                    )
+                    self.state.add_trade(trade)
             else:
                 logger.error(f"Failed to place order: {resp}")
         except Exception as e:
@@ -535,6 +601,40 @@ class TradingLoop:
             return 0.0
         notional = (entry_price + exit_price) * qty
         return notional * fee_rate
+
+    def _classify_position_horizon(self, signal: Signal) -> str:
+        """Категоризирует позицию по расстоянию до TP/SL."""
+        if not signal.take_profit or not signal.stop_loss or not signal.price:
+            return "short_term"
+
+        tp_pct = abs(signal.take_profit - signal.price) / signal.price
+        sl_pct = abs(signal.price - signal.stop_loss) / signal.price
+
+        if tp_pct >= self.settings.risk.long_term_tp_pct or sl_pct >= self.settings.risk.long_term_sl_pct:
+            return "long_term"
+        if tp_pct >= self.settings.risk.mid_term_tp_pct:
+            return "mid_term"
+        return "short_term"
+
+    def _should_dca(self, local_pos: TradeRecord, signal: Signal, current_price: float, confidence: float) -> bool:
+        """Проверяет условия для усреднения позиции."""
+        if not self.settings.risk.dca_enabled:
+            return False
+        if local_pos.horizon not in ("mid_term", "long_term"):
+            return False
+        if local_pos.dca_count >= self.settings.risk.dca_max_adds:
+            return False
+        if confidence < self.settings.risk.dca_min_confidence:
+            return False
+        if not current_price or not local_pos.entry_price:
+            return False
+
+        if local_pos.side == "Buy":
+            drawdown_pct = (local_pos.entry_price - current_price) / local_pos.entry_price
+        else:
+            drawdown_pct = (current_price - local_pos.entry_price) / local_pos.entry_price
+
+        return drawdown_pct >= self.settings.risk.dca_drawdown_pct
     
     async def update_trailing_stop(self, symbol: str, position_info: dict):
         """Активирует трейлинг стоп при достижении порога прибыли"""
