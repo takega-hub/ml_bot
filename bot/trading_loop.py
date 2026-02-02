@@ -175,19 +175,26 @@ class TradingLoop:
 
     async def process_symbol(self, symbol: str):
         try:
+            logger.info(f"[{symbol}] 🚀 START process_symbol()")
+            
             # 0. Проверяем cooldown
+            logger.info(f"[{symbol}] Checking cooldown...")
             if self.state.is_symbol_in_cooldown(symbol):
+                logger.info(f"[{symbol}] In cooldown, returning")
                 return
+            logger.info(f"[{symbol}] No cooldown, continuing...")
             
             # 1. Получаем данные (асинхронно, чтобы не блокировать event loop)
+            logger.info(f"[{symbol}] 📊 Fetching kline data...")
             df = await asyncio.to_thread(
                 self.bybit.get_kline_df,
                 symbol,
                 self.settings.timeframe,
                 200
             )
+            logger.info(f"[{symbol}] ✅ Kline data received: {len(df) if not df.empty else 0} candles")
             if df.empty:
-                logger.warning(f"[{symbol}] No data received from exchange")
+                logger.warning(f"[{symbol}] ⚠️ No data received from exchange")
                 return
 
             # 2. Инициализируем стратегию если нужно
