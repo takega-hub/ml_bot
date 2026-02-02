@@ -35,6 +35,7 @@ class TelegramBot:
         self.app = None
         self.waiting_for_symbol = {}  # user_id -> True если ждем ввод символа
         self.waiting_for_risk_setting = {}  # user_id -> setting_name для редактирования настроек риска
+        self.waiting_for_ml_setting = {}  # user_id -> setting_name для редактирования ML настроек
 
     async def start(self):
         if not self.settings.telegram_token:
@@ -1220,6 +1221,51 @@ class TelegramBot:
         ]
         
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def show_ml_settings(self, query):
+        """Показывает настройки ML стратегии"""
+        ml_settings = self.settings.ml_strategy
+        
+        text = "🧠 НАСТРОЙКИ ML СТРАТЕГИИ\n\n"
+        text += f"🎯 Минимальная уверенность: {ml_settings.confidence_threshold*100:.0f}%\n"
+        text += f"💪 Минимальная сила сигнала:\n"
+        text += f"   • Ансамбли: 0.3% (фиксировано)\n"
+        text += f"   • Одиночные модели: 60% (фиксировано)\n\n"
+        
+        text += f"ℹ️ Уверенность модели — это вероятность правильного предсказания.\n"
+        text += f"Чем выше порог, тем меньше сигналов, но качественнее.\n\n"
+        text += f"🔹 Рекомендуемые значения:\n"
+        text += f"   • Консервативно: 70-80%\n"
+        text += f"   • Сбалансированно: 50-70%\n"
+        text += f"   • Агрессивно: 30-50%\n"
+        
+        keyboard = [
+            [InlineKeyboardButton(f"🎯 Уверенность: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def start_edit_ml_setting(self, query, setting_name: str):
+        """Начинает редактирование ML настройки"""
+        user_id = query.from_user.id
+        
+        if setting_name == "confidence_threshold":
+            current_value = self.settings.ml_strategy.confidence_threshold * 100
+            self.waiting_for_ml_setting[user_id] = setting_name
+            
+            await query.edit_message_text(
+                f"✏️ РЕДАКТИРОВАНИЕ: Минимальная уверенность модели\n\n"
+                f"Текущее значение: {current_value:.0f}%\n\n"
+                f"Введите новое значение от 1 до 100 (в процентах):\n"
+                f"Пример: 50 означает 50%",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Отмена", callback_data="settings_ml")]
+                ])
+            )
+        else:
+            await query.answer("Неизвестная настройка", show_alert=True)
 
     async def send_notification(self, text: str):
         if self.app and self.settings.allowed_user_id:

@@ -44,15 +44,16 @@ ENV/
 logs/
 bot.log
 
-# ML Models and Data (можно раскомментировать если не хотите коммитить модели)
-# ml_models/*.pkl
-# ml_data/*.csv
+# ML Models and Data (не коммитим модели и данные)
+ml_models/*.pkl
+ml_data/*.csv
 
 # Runtime state
 runtime_state.json
 model_test_results_*.json
 symbol_ml_settings.json
 risk_settings.json
+ml_settings.json
 
 # Backtest reports
 backtest_reports/
