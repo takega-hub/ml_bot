@@ -183,16 +183,26 @@ class TradingLoop:
                 logger.warning(f"Position info is None for {symbol}")
 
             # Генерация сигнала
-            signal = strategy.generate_signal(
-                row=row,
-                df=df,
-                has_position=has_pos,
-                current_price=row["close"],
-                leverage=self.settings.leverage
-            )
+            try:
+                signal = strategy.generate_signal(
+                    row=row,
+                    df=df,
+                    has_position=has_pos,
+                    current_price=row["close"],
+                    leverage=self.settings.leverage
+                )
+            except Exception as e:
+                logger.error(f"Error generating signal for {symbol}: {e}")
+                return
+            
+            if not signal:
+                logger.warning(f"No signal generated for {symbol}")
+                return
             
             # Логируем каждый сигнал (для отладки)
-            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {row['close']:.2f} | Confidence: {signal.indicators_info.get('confidence', 0):.2%}")
+            indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+            confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
+            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {row['close']:.2f} | Confidence: {confidence:.2%}")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
@@ -200,14 +210,14 @@ class TradingLoop:
                     symbol=symbol,
                     action=signal.action.value,
                     price=signal.price,
-                    confidence=signal.indicators_info.get("confidence", 0.0),
+                    confidence=confidence,
                     reason=signal.reason,
-                    indicators=signal.indicators_info
+                    indicators=indicators_info
                 )
                 
                 # Уведомление о сигнале высокой уверенности
-                if signal.indicators_info.get("confidence", 0) > 0.7:
-                    await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(signal.indicators_info['confidence']*100)}%\nЦена: {signal.price}")
+                if confidence > 0.7:
+                    await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(confidence*100)}%\nЦена: {signal.price}")
 
             # 5. Исполнение сделок (упрощенно)
             if signal.action == Action.LONG and has_pos != Bias.LONG:
@@ -304,7 +314,7 @@ class TradingLoop:
                 stop_loss=signal.stop_loss
             )
             
-            if resp.get("retCode") == 0:
+            if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                 logger.info(f"Successfully opened {side} for {symbol}")
                 await self.notifier.high(f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\nЦена: {signal.price}\nTP: {signal.take_profit}\nSL: {signal.stop_loss}")
                 
@@ -326,7 +336,7 @@ class TradingLoop:
     async def update_breakeven_stop(self, symbol: str, position_info: dict):
         """Перемещает SL в безубыток при достижении порога прибыли"""
         try:
-            if not position_info or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))
@@ -384,7 +394,7 @@ class TradingLoop:
                         stop_loss=new_sl
                     )
                     
-                    if resp.get("retCode") == 0:
+                    if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                         await self.notifier.medium(
                             f"🛡️ БЕЗУБЫТОК АКТИВИРОВАН\n{symbol} SL → ${new_sl:.2f}\nТекущий PnL: +{pnl_pct:.2f}%"
                         )
@@ -398,7 +408,7 @@ class TradingLoop:
             if not self.settings.risk.enable_trailing_stop:
                 return
             
-            if not position_info or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))
@@ -431,7 +441,7 @@ class TradingLoop:
                     trailing_stop=trailing_pct
                 )
                 
-                if resp.get("retCode") == 0:
+                if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                     await self.notifier.medium(
                         f"📊 ТРЕЙЛИНГ СТОП АКТИВИРОВАН\n{symbol} | {trailing_pct}%\nТекущий PnL: +{pnl_pct*100:.2f}%"
                     )
@@ -445,7 +455,7 @@ class TradingLoop:
             if not self.settings.risk.enable_partial_close:
                 return
             
-            if not position_info or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))
@@ -502,7 +512,7 @@ class TradingLoop:
                             reduce_only=True
                         )
                         
-                        if resp.get("retCode") == 0:
+                        if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                             await self.notifier.high(
                                 f"💰 ЧАСТИЧНОЕ ЗАКРЫТИЕ\n{symbol} | {close_pct*100}%\nПрогресс к TP: {progress_pct*100:.1f}%"
                             )
@@ -538,14 +548,15 @@ class TradingLoop:
             pnl_pct = 0.0
             
             # Пытаемся найти закрывающий ордер в истории
-            if executions and executions.get("retCode") == 0:
+            if executions and isinstance(executions, dict) and executions.get("retCode") == 0:
                 result = executions.get("result")
                 if result and isinstance(result, dict):
                     exec_list = result.get("list", [])
-                    if exec_list:
+                    if exec_list and len(exec_list) > 0:
                         # Берем последнее исполнение (закрывающий ордер)
                         last_exec = exec_list[0]
-                        exit_price = float(last_exec.get("execPrice", local_pos.entry_price))
+                        if last_exec and isinstance(last_exec, dict):
+                            exit_price = float(last_exec.get("execPrice", local_pos.entry_price))
             
             # Если не нашли в истории, используем текущую цену из свечей
             if exit_price == local_pos.entry_price:
