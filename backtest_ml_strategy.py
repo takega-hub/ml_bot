@@ -236,11 +236,13 @@ class MLBacktestSimulator:
                         print(f"   Действие: {signal.action.value}, Цена: {current_price:.2f}")
                         print(f"   Причина: {signal.reason}")
         else:
-            self.signal_stats.signals_without_tp_sl += 1
-            # Логируем только первые 3 сигнала без TP/SL
-            if self.signal_stats.signals_without_tp_sl <= 3:
-                print(f"❌ Сигнал БЕЗ TP/SL: {signal.action.value} @ {current_price:.2f}")
-                print(f"   Причина: {signal.reason}")
+            # HOLD сигналы не должны иметь TP/SL - это нормально
+            if signal.action != Action.HOLD:
+                self.signal_stats.signals_without_tp_sl += 1
+                # Логируем только первые 3 LONG/SHORT сигнала без TP/SL
+                if self.signal_stats.signals_without_tp_sl <= 3:
+                    print(f"❌ Сигнал БЕЗ TP/SL: {signal.action.value} @ {current_price:.2f}")
+                    print(f"   Причина: {signal.reason}")
         
         # Записываем в историю
         self.signal_history.append({
@@ -587,8 +589,10 @@ class MLBacktestSimulator:
             avg_rr_ratio = avg_tp_distance / np.mean(sl_distances)
         
         # Статистика сигналов
+        # ВАЖНО: Считаем процент только для LONG/SHORT сигналов, так как HOLD не должны иметь TP/SL
+        tradable_signals = self.signal_stats.long_signals + self.signal_stats.short_signals
         signals_with_tp_sl_pct = (self.signal_stats.signals_with_tp_sl / 
-                                 max(1, self.signal_stats.total_signals)) * 100
+                                 max(1, tradable_signals)) * 100 if tradable_signals > 0 else 0.0
         
         signals_with_correct_sl_pct = (self.signal_stats.signals_with_correct_sl / 
                                       max(1, self.signal_stats.signals_with_tp_sl)) * 100
@@ -911,7 +915,11 @@ def run_exact_backtest(
     print(f"   Всего сигналов: {metrics.total_signals}")
     print(f"   LONG сигналов: {metrics.long_signals}")
     print(f"   SHORT сигналов: {metrics.short_signals}")
-    print(f"   Сигналов с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}%")
+    tradable_count = metrics.long_signals + metrics.short_signals
+    if tradable_count > 0:
+        print(f"   Сигналов с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}% (от {tradable_count} LONG/SHORT)")
+    else:
+        print(f"   Сигналов с TP/SL: N/A (нет LONG/SHORT сигналов)")
     print(f"   Сигналов с SL=1%: {metrics.signals_with_correct_sl_pct:.1f}%")
     print(f"   Средний SL в сигналах: {metrics.avg_sl_distance_pct:.2f}%")
     print(f"   Средний TP в сигналах: {metrics.avg_tp_distance_pct:.2f}%")
@@ -932,10 +940,15 @@ def run_exact_backtest(
     print(f"\n🔍 КРИТИЧЕСКИЙ АНАЛИЗ СТРАТЕГИИ:")
     print(f"   (Анализ основан на ТОЧНОЙ симуляции работы реального бота)")
     
-    if metrics.signals_with_tp_sl_pct < 90:
-        print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_tp_sl_pct:.1f}% сигналов имеют TP/SL")
+    # Проверяем процент только для LONG/SHORT сигналов (HOLD не должны иметь TP/SL)
+    tradable_signals_count = metrics.long_signals + metrics.short_signals
+    if tradable_signals_count > 0 and metrics.signals_with_tp_sl_pct < 90:
+        print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_tp_sl_pct:.1f}% LONG/SHORT сигналов имеют TP/SL")
         print(f"   Реальная стратегия на сервере НЕ сможет открыть {100-metrics.signals_with_tp_sl_pct:.1f}% позиций!")
         print(f"   ⚠️  Это означает, что на реальных данных будет такая же проблема!")
+    elif tradable_signals_count == 0:
+        print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Нет LONG/SHORT сигналов для анализа TP/SL")
+        print(f"   Всего сигналов: {metrics.total_signals}, из них HOLD: {metrics.total_signals}")
     
     if metrics.signals_with_correct_sl_pct < 90:
         print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_correct_sl_pct:.1f}% сигналов имеют SL=1%")
@@ -963,7 +976,8 @@ def run_exact_backtest(
         print(f"1. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать SL=1%")
         print(f"   Текущий код должен гарантировать: sl_pct = max_loss_pct_margin / leverage")
     
-    if metrics.signals_with_tp_sl_pct < 90:
+    tradable_count = metrics.long_signals + metrics.short_signals
+    if tradable_count > 0 and metrics.signals_with_tp_sl_pct < 90:
         print(f"2. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать TP/SL в сигналах")
         print(f"   Все сигналы LONG/SHORT должны содержать stop_loss и take_profit")
     
@@ -979,7 +993,7 @@ def run_exact_backtest(
     if (metrics.win_rate > 50 and 
         metrics.profit_factor > 2.0 and 
         metrics.signals_with_correct_sl_pct >= 90 and
-        metrics.signals_with_tp_sl_pct >= 90 and
+        (metrics.long_signals + metrics.short_signals == 0 or metrics.signals_with_tp_sl_pct >= 90) and
         metrics.total_trades > 0):
         print(f"✅ СТРАТЕГИЯ ГОТОВА К ПРОДАКШЕНУ!")
         print(f"   Win Rate: {metrics.win_rate:.1f}%")
@@ -1051,8 +1065,9 @@ def main():
         print(f"   Результаты показывают КАК стратегия работает на самом деле")
         
         # Финальный вердикт
+        tradable_count = metrics.long_signals + metrics.short_signals
         if (metrics.signals_with_correct_sl_pct >= 90 and 
-            metrics.signals_with_tp_sl_pct >= 90 and
+            (tradable_count == 0 or metrics.signals_with_tp_sl_pct >= 90) and
             metrics.total_trades > 0):
             print(f"\n🎯 СТРАТЕГИЯ ПРОШЛА ПРОВЕРКУ")
             print(f"   Можно тестировать на сервере")
