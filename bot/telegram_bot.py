@@ -13,8 +13,8 @@ from bot.state import BotState
 from bot.model_manager import ModelManager
 from pathlib import Path
 
-# Enable logging
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# Логирование уже настроено в run_bot.py, не нужно настраивать здесь
+# logging.basicConfig() добавляет обработчик к root logger, что вызывает дублирование логов
 logger = logging.getLogger(__name__)
 
 def safe_float(value, default=0.0):
