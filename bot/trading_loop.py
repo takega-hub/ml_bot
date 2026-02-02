@@ -178,8 +178,11 @@ class TradingLoop:
             logger.info(f"[{symbol}] 🚀 START process_symbol()")
             
             # 0. Проверяем cooldown
+            # КРИТИЧНО: is_symbol_in_cooldown() может вызывать save() (запись в файл)
+            # Оборачиваем в to_thread() чтобы не блокировать event loop
             logger.info(f"[{symbol}] Checking cooldown...")
-            if self.state.is_symbol_in_cooldown(symbol):
+            in_cooldown = await asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol)
+            if in_cooldown:
                 logger.info(f"[{symbol}] In cooldown, returning")
                 return
             logger.info(f"[{symbol}] No cooldown, continuing...")
