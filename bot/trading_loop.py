@@ -71,21 +71,35 @@ class TradingLoop:
                             symbol=symbol
                         )
                         
-                        if pos_info.get("retCode") == 0:
-                            list_data = pos_info.get("result", {}).get("list", [])
-                            if list_data:
-                                position = list_data[0]
-                                size = float(position.get("size", 0))
-                                
-                                if size > 0:
-                                    # Проверяем частичное закрытие
-                                    await self.check_partial_close(symbol, position)
-                                    
-                                    # Обновляем breakeven stop
-                                    await self.update_breakeven_stop(symbol, position)
-                                    
-                                    # Обновляем trailing stop
-                                    await self.update_trailing_stop(symbol, position)
+                        if pos_info and pos_info.get("retCode") == 0:
+                            result = pos_info.get("result")
+                            if result and isinstance(result, dict):
+                                list_data = result.get("list", [])
+                                if list_data and len(list_data) > 0:
+                                    position = list_data[0]
+                                    if position and isinstance(position, dict):
+                                        size = float(position.get("size", 0))
+                                        
+                                        # Проверяем, закрылась ли позиция на бирже
+                                        local_pos = self.state.get_open_position(symbol)
+                                        if local_pos and size == 0:
+                                            # Позиция закрылась на бирже, но в state еще открыта
+                                            await self.handle_position_closed(symbol, local_pos)
+                                        elif size > 0:
+                                            # Позиция открыта, проверяем частичное закрытие и обновляем стопы
+                                            await self.check_partial_close(symbol, position)
+                                            
+                                            # Обновляем breakeven stop
+                                            await self.update_breakeven_stop(symbol, position)
+                                            
+                                            # Обновляем trailing stop
+                                            await self.update_trailing_stop(symbol, position)
+                                else:
+                                    # Нет позиции в списке, проверяем локальное состояние
+                                    local_pos = self.state.get_open_position(symbol)
+                                    if local_pos:
+                                        # Позиция закрылась на бирже
+                                        await self.handle_position_closed(symbol, local_pos)
                     
                     except Exception as e:
                         logger.error(f"Error monitoring position for {symbol}: {e}")
@@ -143,20 +157,30 @@ class TradingLoop:
             row = df.iloc[-1]
             
             # Проверяем позицию
-            pos_info = self.bybit.get_position_info(symbol=symbol)
+            try:
+                pos_info = self.bybit.get_position_info(symbol=symbol)
+            except Exception as e:
+                logger.error(f"Error getting position info for {symbol}: {e}")
+                pos_info = None
+            
             has_pos = None
             size = 0.0
             entry_price = 0.0
             
-            if pos_info.get("retCode") == 0:
-                list_data = pos_info.get("result", {}).get("list", [])
-                if list_data:
-                    p = list_data[0]
-                    size = float(p.get("size", 0))
-                    if size > 0:
-                        side = p.get("side")
-                        has_pos = Bias.LONG if side == "Buy" else Bias.SHORT
-                        entry_price = float(p.get("avgPrice", 0))
+            if pos_info and isinstance(pos_info, dict) and pos_info.get("retCode") == 0:
+                result = pos_info.get("result")
+                if result and isinstance(result, dict):
+                    list_data = result.get("list", [])
+                    if list_data and len(list_data) > 0:
+                        p = list_data[0]
+                        if p and isinstance(p, dict):
+                            size = float(p.get("size", 0))
+                            if size > 0:
+                                side = p.get("side")
+                                has_pos = Bias.LONG if side == "Buy" else Bias.SHORT
+                                entry_price = float(p.get("avgPrice", 0))
+            elif pos_info is None:
+                logger.warning(f"Position info is None for {symbol}")
 
             # Генерация сигнала
             signal = strategy.generate_signal(
@@ -218,15 +242,19 @@ class TradingLoop:
             balance_info = await asyncio.to_thread(self.bybit.get_wallet_balance)
             balance = 0.0
             
-            if balance_info.get("retCode") == 0:
-                result = balance_info.get("result", {})
-                list_data = result.get("list", [])
-                if list_data:
-                    wallet = list_data[0].get("coin", [])
-                    usdt_coin = next((c for c in wallet if c.get("coin") == "USDT"), None)
-                    if usdt_coin:
-                        balance_str = usdt_coin.get("walletBalance", "0")
-                        balance = float(balance_str) if balance_str and balance_str != "" else 0.0
+            if balance_info and balance_info.get("retCode") == 0:
+                result = balance_info.get("result")
+                if result and isinstance(result, dict):
+                    list_data = result.get("list", [])
+                    if list_data and len(list_data) > 0:
+                        wallet_item = list_data[0]
+                        if wallet_item and isinstance(wallet_item, dict):
+                            wallet = wallet_item.get("coin", [])
+                            if wallet and isinstance(wallet, list):
+                                usdt_coin = next((c for c in wallet if isinstance(c, dict) and c.get("coin") == "USDT"), None)
+                                if usdt_coin:
+                                    balance_str = usdt_coin.get("walletBalance", "0")
+                                    balance = float(balance_str) if balance_str and balance_str != "" else 0.0
             
             if balance <= 0:
                 logger.error(f"Cannot get balance or balance is zero for {symbol}")
@@ -484,62 +512,139 @@ class TradingLoop:
         except Exception as e:
             logger.error(f"Error checking partial close for {symbol}: {e}")
     
+    async def handle_position_closed(self, symbol: str, local_pos: TradeRecord):
+        """Обрабатывает закрытие позиции, которая была открыта локально, но закрылась на бирже"""
+        try:
+            logger.info(f"Position {symbol} closed on exchange, updating state...")
+            
+            # Пытаемся получить информацию о закрытии из истории исполнений
+            # Получаем последние исполнения за последние 5 минут
+            import time
+            from datetime import datetime, timedelta
+            
+            end_time = int(time.time() * 1000)
+            start_time = int((time.time() - 300) * 1000)  # 5 минут назад
+            
+            executions = await asyncio.to_thread(
+                self.bybit.get_execution_list,
+                symbol=symbol,
+                start_time=start_time,
+                end_time=end_time,
+                limit=10
+            )
+            
+            exit_price = local_pos.entry_price  # По умолчанию используем entry price
+            pnl_usd = 0.0
+            pnl_pct = 0.0
+            
+            # Пытаемся найти закрывающий ордер в истории
+            if executions and executions.get("retCode") == 0:
+                result = executions.get("result")
+                if result and isinstance(result, dict):
+                    exec_list = result.get("list", [])
+                    if exec_list:
+                        # Берем последнее исполнение (закрывающий ордер)
+                        last_exec = exec_list[0]
+                        exit_price = float(last_exec.get("execPrice", local_pos.entry_price))
+            
+            # Если не нашли в истории, используем текущую цену из свечей
+            if exit_price == local_pos.entry_price:
+                df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
+                if not df.empty:
+                    exit_price = float(df['close'].iloc[-1])
+            
+            # Рассчитываем PnL
+            if local_pos.side == "Buy":
+                pnl_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price) * 100
+            else:  # Sell
+                pnl_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price) * 100
+            
+            # PnL в USD = (процент PnL / 100) * (entry_price * qty)
+            pnl_usd = (pnl_pct / 100) * (local_pos.entry_price * local_pos.qty)
+            
+            # Обновляем статус сделки
+            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
+            
+            # Отправляем уведомление
+            pnl_emoji = "✅" if pnl_usd > 0 else "❌"
+            reason = "TP" if pnl_usd > 0 else "SL"
+            await self.notifier.high(
+                f"{pnl_emoji} ПОЗИЦИЯ ЗАКРЫТА ({reason})\n"
+                f"{symbol} {local_pos.side}\n"
+                f"Вход: ${local_pos.entry_price:.2f}\n"
+                f"Выход: ${exit_price:.2f}\n"
+                f"PnL: {pnl_usd:+.2f} USD ({pnl_pct:+.2f}%)"
+            )
+            
+            logger.info(f"Position {symbol} closed: PnL={pnl_usd:.2f} USD ({pnl_pct:.2f}%)")
+            
+        except Exception as e:
+            logger.error(f"Error handling closed position for {symbol}: {e}")
+            # В случае ошибки все равно закрываем позицию в state с нулевым PnL
+            try:
+                self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
+            except:
+                pass
+    
     async def sync_positions_with_exchange(self):
         """Синхронизирует локальное состояние с позициями на бирже при старте"""
         logger.info("Syncing positions with exchange...")
         
         try:
             for symbol in self.state.active_symbols:
-                try:
-                    # Получаем позицию с биржи
-                    pos_info = await asyncio.to_thread(
-                        self.bybit.get_position_info,
-                        symbol=symbol
-                    )
-                    
-                    if pos_info.get("retCode") == 0:
-                        list_data = pos_info.get("result", {}).get("list", [])
-                        if list_data:
-                            position = list_data[0]
-                            size = float(position.get("size", 0))
-                            
-                            if size > 0:
-                                # Есть открытая позиция на бирже
-                                side = position.get("side")
-                                entry_price = float(position.get("avgPrice", 0))
-                                
-                                # Проверяем, есть ли она в локальном состоянии
-                                local_pos = self.state.get_open_position(symbol)
-                                
-                                if not local_pos:
-                                    # Позиции нет в локальном состоянии, добавляем
-                                    logger.info(f"Found open position on exchange for {symbol}, adding to state")
-                                    
-                                    trade = TradeRecord(
-                                        symbol=symbol,
-                                        side=side,
-                                        entry_price=entry_price,
-                                        qty=size,
-                                        status="open",
-                                        model_name=self.state.symbol_models.get(symbol, "")
-                                    )
-                                    self.state.add_trade(trade)
-                                    
-                                    await self.notifier.medium(
-                                        f"🔄 СИНХРОНИЗАЦИЯ\nНайдена открытая позиция:\n{symbol} {side} | Размер: {size}"
-                                    )
+                    try:
+                        # Получаем позицию с биржи
+                        pos_info = await asyncio.to_thread(
+                            self.bybit.get_position_info,
+                            symbol=symbol
+                        )
+                        
+                        if pos_info and pos_info.get("retCode") == 0:
+                            result = pos_info.get("result")
+                            if result and isinstance(result, dict):
+                                list_data = result.get("list", [])
+                                if list_data and len(list_data) > 0:
+                                    position = list_data[0]
+                                    if position and isinstance(position, dict):
+                                        size = float(position.get("size", 0))
+                                        
+                                        if size > 0:
+                                            # Есть открытая позиция на бирже
+                                            side = position.get("side")
+                                            entry_price = float(position.get("avgPrice", 0))
+                                        
+                                        # Проверяем, есть ли она в локальном состоянии
+                                        local_pos = self.state.get_open_position(symbol)
+                                        
+                                        if not local_pos:
+                                            # Позиции нет в локальном состоянии, добавляем
+                                            logger.info(f"Found open position on exchange for {symbol}, adding to state")
+                                            
+                                            trade = TradeRecord(
+                                                symbol=symbol,
+                                                side=side,
+                                                entry_price=entry_price,
+                                                qty=size,
+                                                status="open",
+                                                model_name=self.state.symbol_models.get(symbol, "")
+                                            )
+                                            self.state.add_trade(trade)
+                                            
+                                            await self.notifier.medium(
+                                                f"🔄 СИНХРОНИЗАЦИЯ\nНайдена открытая позиция:\n{symbol} {side} | Размер: {size}"
+                                            )
+                                        else:
+                                            # Позиция есть, обновляем данные если нужно
+                                            if abs(local_pos.qty - size) > 0.0001 or abs(local_pos.entry_price - entry_price) > 0.01:
+                                                logger.info(f"Updating position data for {symbol}")
+                                                self.state.update_position(symbol, size, entry_price)
                                 else:
-                                    # Позиция есть, обновляем данные если нужно
-                                    if abs(local_pos.qty - size) > 0.0001 or abs(local_pos.entry_price - entry_price) > 0.01:
-                                        logger.info(f"Updating position data for {symbol}")
-                                        self.state.update_position(symbol, size, entry_price)
-                            else:
-                                # Позиции нет на бирже, но может быть в локальном состоянии
-                                local_pos = self.state.get_open_position(symbol)
-                                if local_pos:
-                                    # Закрываем локальную позицию
-                                    logger.warning(f"Position {symbol} closed on exchange but open locally, closing in state")
-                                    self.state.update_trade_on_close(symbol, 0, 0, 0)
+                                    # Позиции нет на бирже, но может быть в локальном состоянии
+                                    local_pos = self.state.get_open_position(symbol)
+                                    if local_pos:
+                                        # Закрываем локальную позицию
+                                        logger.warning(f"Position {symbol} closed on exchange but open locally, closing in state")
+                                        await self.handle_position_closed(symbol, local_pos)
                 
                 except Exception as e:
                     logger.error(f"Error syncing position for {symbol}: {e}")

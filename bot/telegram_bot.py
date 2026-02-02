@@ -402,12 +402,16 @@ class TelegramBot:
 
     async def show_stats(self, query):
         stats = self.state.get_stats()
-        closed_trades = [t for t in self.state.trades if t.status == "closed"]
+        all_trades = self.state.trades
+        closed_trades = [t for t in all_trades if t.status == "closed"]
+        open_trades = [t for t in all_trades if t.status == "open"]
         
         text = "📈 СТАТИСТИКА ТОРГОВЛИ:\n\n"
         text += f"💰 Общий PnL: {stats['total_pnl']:.2f} USD\n"
         text += f"📊 Винрейт: {stats['win_rate']:.1f}%\n"
-        text += f"🔢 Всего сделок: {stats['total_trades']}\n\n"
+        text += f"🔢 Всего сделок: {len(all_trades)}\n"
+        text += f"   • Закрыто: {len(closed_trades)}\n"
+        text += f"   • Открыто: {len(open_trades)}\n\n"
         
         if closed_trades:
             wins = [t for t in closed_trades if t.pnl_usd > 0]
@@ -420,6 +424,10 @@ class TelegramBot:
             if losses:
                 avg_loss = sum(t.pnl_usd for t in losses) / len(losses)
                 text += f"📉 Средний проигрыш: ${avg_loss:.2f}\n"
+        else:
+            text += "ℹ️ Нет закрытых сделок для расчета статистики.\n"
+            if open_trades:
+                text += f"\n⚠️ Есть {len(open_trades)} открытая(ых) позиция(ий), которая(ые) не учитывается(ются) в статистике до закрытия.\n"
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="status_info")],
