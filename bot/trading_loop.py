@@ -153,8 +153,14 @@ class TradingLoop:
 
             # 3. Генерируем сигнал
             strategy = self.strategies[symbol]
-            # row - последний бар
-            row = df.iloc[-1]
+            # ВАЖНО: Используем предпоследнюю закрытую свечу для предсказания
+            # Последняя свеча может быть незакрытой и меняться, что приводит к одинаковым предсказаниям
+            if len(df) >= 2:
+                row = df.iloc[-2]  # Предпоследняя закрытая свеча
+                current_price = df.iloc[-1]['close']  # Текущая цена из последней свечи
+            else:
+                row = df.iloc[-1]
+                current_price = row['close']
             
             # Проверяем позицию
             try:
@@ -186,9 +192,9 @@ class TradingLoop:
             try:
                 signal = strategy.generate_signal(
                     row=row,
-                    df=df,
+                    df=df.iloc[:-1] if len(df) >= 2 else df,  # Используем все данные кроме последней незакрытой свечи
                     has_position=has_pos,
-                    current_price=row["close"],
+                    current_price=current_price,  # Используем текущую цену из последней свечи
                     leverage=self.settings.leverage
                 )
             except Exception as e:
@@ -202,7 +208,7 @@ class TradingLoop:
             # Логируем каждый сигнал (для отладки)
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
-            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {row['close']:.2f} | Confidence: {confidence:.2%}")
+            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%}")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
