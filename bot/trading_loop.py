@@ -612,59 +612,59 @@ class TradingLoop:
         
         try:
             for symbol in self.state.active_symbols:
-                    try:
-                        # Получаем позицию с биржи
-                        pos_info = await asyncio.to_thread(
-                            self.bybit.get_position_info,
-                            symbol=symbol
-                        )
-                        
-                        if pos_info and pos_info.get("retCode") == 0:
-                            result = pos_info.get("result")
-                            if result and isinstance(result, dict):
-                                list_data = result.get("list", [])
-                                if list_data and len(list_data) > 0:
-                                    position = list_data[0]
-                                    if position and isinstance(position, dict):
-                                        size = float(position.get("size", 0))
+                try:
+                    # Получаем позицию с биржи
+                    pos_info = await asyncio.to_thread(
+                        self.bybit.get_position_info,
+                        symbol=symbol
+                    )
+                    
+                    if pos_info and pos_info.get("retCode") == 0:
+                        result = pos_info.get("result")
+                        if result and isinstance(result, dict):
+                            list_data = result.get("list", [])
+                            if list_data and len(list_data) > 0:
+                                position = list_data[0]
+                                if position and isinstance(position, dict):
+                                    size = float(position.get("size", 0))
+                                    
+                                    if size > 0:
+                                        # Есть открытая позиция на бирже
+                                        side = position.get("side")
+                                        entry_price = float(position.get("avgPrice", 0))
                                         
-                                        if size > 0:
-                                            # Есть открытая позиция на бирже
-                                            side = position.get("side")
-                                            entry_price = float(position.get("avgPrice", 0))
+                                        # Проверяем, есть ли она в локальном состоянии
+                                        local_pos = self.state.get_open_position(symbol)
+                                        
+                                        if not local_pos:
+                                            # Позиции нет в локальном состоянии, добавляем
+                                            logger.info(f"Found open position on exchange for {symbol}, adding to state")
                                             
-                                            # Проверяем, есть ли она в локальном состоянии
-                                            local_pos = self.state.get_open_position(symbol)
+                                            trade = TradeRecord(
+                                                symbol=symbol,
+                                                side=side,
+                                                entry_price=entry_price,
+                                                qty=size,
+                                                status="open",
+                                                model_name=self.state.symbol_models.get(symbol, "")
+                                            )
+                                            self.state.add_trade(trade)
                                             
-                                            if not local_pos:
-                                                # Позиции нет в локальном состоянии, добавляем
-                                                logger.info(f"Found open position on exchange for {symbol}, adding to state")
-                                                
-                                                trade = TradeRecord(
-                                                    symbol=symbol,
-                                                    side=side,
-                                                    entry_price=entry_price,
-                                                    qty=size,
-                                                    status="open",
-                                                    model_name=self.state.symbol_models.get(symbol, "")
-                                                )
-                                                self.state.add_trade(trade)
-                                                
-                                                await self.notifier.medium(
-                                                    f"🔄 СИНХРОНИЗАЦИЯ\nНайдена открытая позиция:\n{symbol} {side} | Размер: {size}"
-                                                )
-                                            else:
-                                                # Позиция есть, обновляем данные если нужно
-                                                if abs(local_pos.qty - size) > 0.0001 or abs(local_pos.entry_price - entry_price) > 0.01:
-                                                    logger.info(f"Updating position data for {symbol}")
-                                                    self.state.update_position(symbol, size, entry_price)
+                                            await self.notifier.medium(
+                                                f"🔄 СИНХРОНИЗАЦИЯ\nНайдена открытая позиция:\n{symbol} {side} | Размер: {size}"
+                                            )
                                         else:
-                                            # Позиции нет на бирже (size == 0), но может быть в локальном состоянии
-                                            local_pos = self.state.get_open_position(symbol)
-                                            if local_pos:
-                                                # Закрываем локальную позицию
-                                                logger.warning(f"Position {symbol} closed on exchange but open locally, closing in state")
-                                                await self.handle_position_closed(symbol, local_pos)
+                                            # Позиция есть, обновляем данные если нужно
+                                            if abs(local_pos.qty - size) > 0.0001 or abs(local_pos.entry_price - entry_price) > 0.01:
+                                                logger.info(f"Updating position data for {symbol}")
+                                                self.state.update_position(symbol, size, entry_price)
+                                    else:
+                                        # Позиции нет на бирже (size == 0), но может быть в локальном состоянии
+                                        local_pos = self.state.get_open_position(symbol)
+                                        if local_pos:
+                                            # Закрываем локальную позицию
+                                            logger.warning(f"Position {symbol} closed on exchange but open locally, closing in state")
+                                            await self.handle_position_closed(symbol, local_pos)
                 
                 except Exception as e:
                     logger.error(f"Error syncing position for {symbol}: {e}")
