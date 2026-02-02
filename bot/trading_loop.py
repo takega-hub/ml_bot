@@ -47,6 +47,9 @@ class TradingLoop:
 
                 for symbol in self.state.active_symbols:
                     await self.process_symbol(symbol)
+                    # Добавляем задержку между символами для снижения нагрузки на API
+                    if len(self.state.active_symbols) > 1:
+                        await asyncio.sleep(2)
                 
                 # Пауза между циклами (из настроек)
                 await asyncio.sleep(self.settings.live_poll_seconds)
@@ -65,21 +68,33 @@ class TradingLoop:
                     await asyncio.sleep(10)
                     continue
                 
-                for symbol in self.state.active_symbols:
-                    try:
-                        # Получаем информацию о позиции
-                        pos_info = await asyncio.to_thread(
-                            self.bybit.get_position_info,
-                            symbol=symbol
-                        )
-                        
-                        if pos_info and pos_info.get("retCode") == 0:
-                            result = pos_info.get("result")
-                            if result and isinstance(result, dict):
-                                list_data = result.get("list", [])
-                                if list_data and len(list_data) > 0:
-                                    position = list_data[0]
-                                    if position and isinstance(position, dict):
+                # ОПТИМИЗАЦИЯ: получаем ВСЕ позиции одним запросом вместо отдельных для каждого символа
+                # Это значительно снижает количество API запросов и предотвращает rate limit ошибки
+                try:
+                    all_positions = await asyncio.to_thread(
+                        self.bybit.get_position_info,
+                        settle_coin="USDT"  # Получаем все USDT позиции одним запросом
+                    )
+                    
+                    if all_positions and all_positions.get("retCode") == 0:
+                        result = all_positions.get("result")
+                        if result and isinstance(result, dict):
+                            list_data = result.get("list", [])
+                            
+                            # Создаем словарь позиций по символам для быстрого доступа
+                            positions_by_symbol = {}
+                            for pos in list_data:
+                                if pos and isinstance(pos, dict):
+                                    symbol = pos.get("symbol")
+                                    if symbol in self.state.active_symbols:
+                                        positions_by_symbol[symbol] = pos
+                            
+                            # Обрабатываем позиции для каждого активного символа
+                            for symbol in self.state.active_symbols:
+                                try:
+                                    position = positions_by_symbol.get(symbol)
+                                    
+                                    if position:
                                         size = float(position.get("size", 0))
                                         
                                         # Проверяем, закрылась ли позиция на бирже
@@ -96,18 +111,23 @@ class TradingLoop:
                                             
                                             # Обновляем trailing stop
                                             await self.update_trailing_stop(symbol, position)
-                                else:
-                                    # Нет позиции в списке, проверяем локальное состояние
-                                    local_pos = self.state.get_open_position(symbol)
-                                    if local_pos:
-                                        # Позиция закрылась на бирже
-                                        await self.handle_position_closed(symbol, local_pos)
-                    
-                    except Exception as e:
-                        logger.error(f"Error monitoring position for {symbol}: {e}")
+                                    else:
+                                        # Позиции нет в списке, проверяем локальное состояние
+                                        local_pos = self.state.get_open_position(symbol)
+                                        if local_pos:
+                                            # Позиция закрылась на бирже
+                                            await self.handle_position_closed(symbol, local_pos)
+                                
+                                except Exception as e:
+                                    logger.error(f"Error processing position for {symbol}: {e}")
+                    else:
+                        logger.warning(f"Failed to get positions: retCode={all_positions.get('retCode') if all_positions else 'None'}")
                 
-                # Проверяем позиции каждые 15 секунд
-                await asyncio.sleep(15)
+                except Exception as e:
+                    logger.error(f"Error getting all positions: {e}")
+                
+                # Проверяем позиции каждые 25 секунд (увеличено с 15 для снижения нагрузки на API)
+                await asyncio.sleep(25)
             
             except Exception as e:
                 logger.error(f"[trading_loop] Error in position monitoring loop: {e}")

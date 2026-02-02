@@ -207,7 +207,7 @@ class AppSettings:
     # Общие настройки
     timeframe: str = "15m"  # Таймфрейм для торговли
     leverage: int = 10  # Плечо
-    live_poll_seconds: int = 60  # Пауза между циклами
+    live_poll_seconds: int = 120  # Пауза между циклами (увеличено со 60 до 120 для снижения rate limit)
     kline_limit: int = 1000  # Количество свечей для анализа
     
     # Настройки мониторинга здоровья
