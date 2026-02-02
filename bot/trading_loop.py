@@ -167,14 +167,27 @@ class TradingLoop:
                 candle_timestamp = row.name
             
             # Проверяем, не обрабатывали ли мы уже эту свечу
-            if symbol in self.last_processed_candle:
-                if self.last_processed_candle[symbol] == candle_timestamp:
-                    # Эта свеча уже была обработана, пропускаем
-                    logger.debug(f"[{symbol}] Candle {candle_timestamp} already processed, skipping...")
-                    return
+            # ВАЖНО: Проверяем только если timestamp валиден
+            # ВРЕМЕННО: Отключаем проверку для диагностики - если сигналы не приходят, это может быть причиной
+            skip_duplicate_check = False  # Установите в True для включения проверки дубликатов
             
-            # Сохраняем timestamp обработанной свечи
-            self.last_processed_candle[symbol] = candle_timestamp
+            if not skip_duplicate_check:
+                # Пропускаем проверку, всегда генерируем сигналы
+                logger.debug(f"[{symbol}] Processing candle: {candle_timestamp} (duplicate check disabled)")
+            elif candle_timestamp is not None:
+                if symbol in self.last_processed_candle:
+                    last_timestamp = self.last_processed_candle[symbol]
+                    if last_timestamp is not None and last_timestamp == candle_timestamp:
+                        # Эта свеча уже была обработана, пропускаем
+                        logger.debug(f"[{symbol}] Candle {candle_timestamp} already processed, skipping signal generation...")
+                        return
+                
+                # Сохраняем timestamp обработанной свечи
+                self.last_processed_candle[symbol] = candle_timestamp
+                logger.debug(f"[{symbol}] Processing new candle: {candle_timestamp}")
+            else:
+                logger.warning(f"[{symbol}] Warning: candle_timestamp is None, proceeding anyway...")
+                # Если timestamp None, не сохраняем его, чтобы не блокировать следующие проверки
             
             # Проверяем позицию
             try:
@@ -222,7 +235,7 @@ class TradingLoop:
             # Логируем каждый сигнал (для отладки)
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
-            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%}")
+            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
