@@ -28,6 +28,7 @@ os.environ['XGB_SILENT'] = '1'
 os.environ['PYTHONWARNINGS'] = 'ignore'
 
 import pickle
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -39,6 +40,8 @@ from bot.ml.feature_engineering import FeatureEngineer
 from bot.config import StrategyParams
 # Импортируем классы ансамбля для корректной десериализации pickle
 from bot.ml.model_trainer import PreTrainedVotingEnsemble, WeightedEnsemble, TripleEnsemble
+
+logger = logging.getLogger(__name__)
 
 
 class MLStrategy:
@@ -113,19 +116,19 @@ class MLStrategy:
                         # LSTM обычно использует первые N фичей (например, 50)
                         self.model.lstm_trainer.feature_names = self.feature_names[:expected_features]
                         if not hasattr(self, '_lstm_feature_names_restored'):
-                            print(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features")
+                            logger.debug(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features")
                             self._lstm_feature_names_restored = True
                     elif self.feature_names:
                         # Если не можем определить из scaler, используем все feature_names
                         self.model.lstm_trainer.feature_names = self.feature_names
                         if not hasattr(self, '_lstm_feature_names_restored'):
-                            print(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features (from all features)")
+                            logger.debug(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features (from all features)")
                             self._lstm_feature_names_restored = True
                 elif self.feature_names:
                     # Если scaler недоступен, используем все feature_names
                     self.model.lstm_trainer.feature_names = self.feature_names
                     if not hasattr(self, '_lstm_feature_names_restored'):
-                        print(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features (scaler unavailable)")
+                        logger.debug(f"[ml_strategy] Restored LSTM feature_names: {len(self.model.lstm_trainer.feature_names)} features (scaler unavailable)")
                         self._lstm_feature_names_restored = True
         
         # Инициализируем feature engineer
@@ -156,7 +159,7 @@ class MLStrategy:
         if not hasattr(self, '_model_loaded_logged'):
             model_type = '🎯 ENSEMBLE' if self.is_ensemble else 'Single'
             cv_acc = self.model_data.get("metrics", {}).get('cv_mean', 0) if self.is_ensemble else 0
-            print(f"[ml] {symbol_from_model}: {model_type} (CV:{cv_acc:.3f}, conf:{confidence_threshold}, stab:{stability_filter})")
+            logger.info(f"[ml] {symbol_from_model}: {model_type} (CV:{cv_acc:.3f}, conf:{confidence_threshold}, stab:{stability_filter})")
             self._model_loaded_logged = True
     
     def _load_model(self) -> Dict[str, Any]:
@@ -211,21 +214,21 @@ class MLStrategy:
                     df_work.index = pd.to_datetime(df_work.index, errors='coerce')
             
             # Создаем все необходимые фичи через FeatureEngineer
-            print(f"[ml_strategy] Preparing features: input DataFrame has {len(df_work)} rows")
+            logger.debug(f"[ml_strategy] Preparing features: input DataFrame has {len(df_work)} rows")
             try:
                 df_with_features = self.feature_engineer.create_technical_indicators(df_work)
-                print(f"[ml_strategy] After create_technical_indicators: {len(df_with_features)} rows, {len(df_with_features.columns)} columns")
+                logger.debug(f"[ml_strategy] After create_technical_indicators: {len(df_with_features)} rows, {len(df_with_features.columns)} columns")
             except TypeError as e:
                 if "'>' not supported" in str(e) or "NoneType" in str(e):
-                    print(f"[ml_strategy] ❌ ERROR: Comparison with None detected in create_technical_indicators")
-                    print(f"[ml_strategy]   Error: {e}")
-                    print(f"[ml_strategy]   Checking for None values in DataFrame...")
+                    logger.error(f"[ml_strategy] ❌ ERROR: Comparison with None detected in create_technical_indicators")
+                    logger.error(f"[ml_strategy]   Error: {e}")
+                    logger.error(f"[ml_strategy]   Checking for None values in DataFrame...")
                     # Проверяем наличие None в ключевых колонках
                     for col in ["open", "high", "low", "close", "volume", "atr", "atr_pct", "rsi"]:
                         if col in df_work.columns:
                             none_count = df_work[col].isna().sum() + (df_work[col] == None).sum()
                             if none_count > 0:
-                                print(f"[ml_strategy]   Column '{col}' has {none_count} None/NaN values")
+                                logger.error(f"[ml_strategy]   Column '{col}' has {none_count} None/NaN values")
                     raise
                 raise
         
@@ -238,18 +241,18 @@ class MLStrategy:
             rows_after = len(df_with_features)
             # Логируем только если количество строк изменилось И это не skip_feature_creation (чтобы не засорять логи)
             if not skip_feature_creation and rows_before != rows_after:
-                print(f"[ml_strategy] After filtering key columns: {rows_before} -> {rows_after} rows")
+                logger.debug(f"[ml_strategy] After filtering key columns: {rows_before} -> {rows_after} rows")
         else:
             # Логируем предупреждение только если это не skip_feature_creation
             if not skip_feature_creation:
                 missing_key_cols = [col for col in key_columns if col not in df_with_features.columns]
-                print(f"[ml_strategy] ⚠️ WARNING: Missing key columns: {missing_key_cols}")
+                logger.warning(f"[ml_strategy] ⚠️ WARNING: Missing key columns: {missing_key_cols}")
         
         # Проверяем, что есть данные после фильтрации основных колонок
         if len(df_with_features) == 0:
-            print(f"[ml_strategy] ❌ ERROR: No rows after filtering key columns")
-            print(f"[ml_strategy]   Input DataFrame shape: {df_work.shape}")
-            print(f"[ml_strategy]   After create_technical_indicators shape: {df_with_features.shape if 'df_with_features' in locals() else 'N/A'}")
+            logger.error(f"[ml_strategy] ❌ ERROR: No rows after filtering key columns")
+            logger.error(f"[ml_strategy]   Input DataFrame shape: {df_work.shape}")
+            logger.error(f"[ml_strategy]   After create_technical_indicators shape: {df_with_features.shape if 'df_with_features' in locals() else 'N/A'}")
             raise ValueError("No data available after creating features (all rows contain NaN in key columns)")
         
         # ВАЖНО: Заполняем NaN в фичах нулями ПЕРЕД любыми другими операциями
@@ -271,11 +274,11 @@ class MLStrategy:
         if missing_features:
             # Выводим только один раз при первом обнаружении
             if not hasattr(self, "_missing_features_warned"):
-                print(
+                logger.warning(
                     f"[ml_strategy] ⚠️ WARNING: Missing {len(missing_features)} features: "
                     f"{missing_features[:10]}..."
                 )
-                print(
+                logger.warning(
                     f"[ml_strategy]   Expected {len(self.feature_names)} features, "
                     f"got {len(df_with_features.columns)}"
                 )
@@ -341,9 +344,9 @@ class MLStrategy:
                 try:
                     X_scaled = self.scaler.transform(X)
                 except ValueError as e2:
-                    print(f"[ml_strategy] ❌ ERROR: Still cannot transform after adjustment")
-                    print(f"[ml_strategy]   Scaler expects: {scaler_expected} features")
-                    print(f"[ml_strategy]   X has: {X.shape[1]} features")
+                    logger.error(f"[ml_strategy] ❌ ERROR: Still cannot transform after adjustment")
+                    logger.error(f"[ml_strategy]   Scaler expects: {scaler_expected} features")
+                    logger.error(f"[ml_strategy]   X has: {X.shape[1]} features")
                     raise ValueError(f"Feature count mismatch: Scaler expects {scaler_expected} features, but got {X.shape[1]}. "
                                    f"Please retrain the model with the current feature set.") from e2
             else:
@@ -383,15 +386,15 @@ class MLStrategy:
             
             # Создаем все необходимые фичи через FeatureEngineer
             if not skip_feature_creation:
-                print(f"[ml_strategy] Preparing features: input DataFrame has {len(df_work)} rows")
+                logger.debug(f"[ml_strategy] Preparing features: input DataFrame has {len(df_work)} rows")
             try:
                 df_with_features = self.feature_engineer.create_technical_indicators(df_work)
                 if not skip_feature_creation:
-                    print(f"[ml_strategy] After create_technical_indicators: {len(df_with_features)} rows, {len(df_with_features.columns)} columns")
+                    logger.debug(f"[ml_strategy] After create_technical_indicators: {len(df_with_features)} rows, {len(df_with_features.columns)} columns")
             except TypeError as e:
                 if "'>' not supported" in str(e) or "NoneType" in str(e):
-                    print(f"[ml_strategy] ❌ ERROR: Comparison with None detected in create_technical_indicators")
-                    print(f"[ml_strategy]   Error: {e}")
+                    logger.error(f"[ml_strategy] ❌ ERROR: Comparison with None detected in create_technical_indicators")
+                    logger.error(f"[ml_strategy]   Error: {e}")
                     raise
                 raise
         
@@ -483,7 +486,7 @@ class MLStrategy:
             # Берем последний образец
             X_last = X[-1:].reshape(1, -1)
         except Exception as e:
-            print(f"[ml_strategy] Error preparing features: {e}")
+            logger.error(f"[ml_strategy] Error preparing features: {e}")
             return 0, 0.0
         
         # Предсказание
@@ -502,7 +505,7 @@ class MLStrategy:
             if np.any(np.isnan(proba)) or not np.all(np.isfinite(proba)):
                 # Если proba содержит NaN, используем равномерное распределение
                 proba = np.array([0.33, 0.34, 0.33])  # SHORT, HOLD, LONG
-                print(f"[ml_strategy] Warning: proba contains NaN, using uniform distribution")
+                logger.warning(f"[ml_strategy] Warning: proba contains NaN, using uniform distribution")
             
             # Для ансамбля proba уже в правильном формате [-1, 0, 1]
             if self.is_ensemble:
@@ -1108,7 +1111,7 @@ class MLStrategy:
                 )
         
         except Exception as e:
-            print(f"[ml_strategy] Error generating signal: {e}")
+            logger.error(f"[ml_strategy] Error generating signal: {e}")
             import traceback
             traceback.print_exc()
             return Signal(
@@ -1174,7 +1177,7 @@ def build_ml_signals(
     # Убеждаемся, что есть необходимые колонки OHLCV
     required_cols = ["open", "high", "low", "close", "volume"]
     if not all(col in df_work.columns for col in required_cols):
-        print(f"[ml_strategy] Warning: Missing required columns. Available: {df_work.columns.tolist()}")
+        logger.warning(f"[ml_strategy] Warning: Missing required columns. Available: {df_work.columns.tolist()}")
         return [Signal(df_work.index[i] if len(df_work) > 0 else pd.Timestamp.now(), 
                        Action.HOLD, "ml_missing_data", 0.0) 
                 for i in range(len(df_work))]
@@ -1214,13 +1217,13 @@ def build_ml_signals(
                         df_with_features,
                         higher_timeframes,
                     )
-                    print(f"[ml_strategy] MTF features enabled for ML signals (1h/4h). Columns: {len(df_with_features.columns)}")
+                    logger.debug(f"[ml_strategy] MTF features enabled for ML signals (1h/4h). Columns: {len(df_with_features.columns)}")
                 else:
-                    print("[ml_strategy] MTF enabled but failed to build 1h/4h data – using 15m-only features")
+                    logger.warning("[ml_strategy] MTF enabled but failed to build 1h/4h data – using 15m-only features")
             except Exception as mtf_err:
-                print(f"[ml_strategy] Warning: failed to add MTF features in build_ml_signals: {mtf_err}")
+                logger.warning(f"[ml_strategy] Warning: failed to add MTF features in build_ml_signals: {mtf_err}")
     except Exception as e:
-        print(f"[ml_strategy] Error preparing features: {e}")
+        logger.error(f"[ml_strategy] Error preparing features: {e}")
         return [Signal(df_work.index[i] if len(df_work) > 0 else pd.Timestamp.now(), 
                        Action.HOLD, f"ml_error_{str(e)[:20]}", 0.0) 
                 for i in range(len(df_work))]
@@ -1247,7 +1250,7 @@ def build_ml_signals(
             )
             signals.append(signal)
         except Exception as e:
-            print(f"[ml_strategy] Error processing row {idx}: {e}")
+            logger.error(f"[ml_strategy] Error processing row {idx}: {e}")
             signals.append(Signal(idx, Action.HOLD, f"ml_error_{str(e)[:20]}", row.get("close", 0.0)))
     
     return signals

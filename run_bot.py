@@ -12,88 +12,102 @@ from bot.telegram_bot import TelegramBot
 from bot.trading_loop import TradingLoop
 from bot.health_monitor import HealthMonitor
 
-# Создаем директорию для логов
-logs_dir = Path("logs")
-logs_dir.mkdir(exist_ok=True)
+# Флаг для защиты от повторной настройки логирования
+_logging_configured = False
 
-# Настройка расширенного логирования
-# Основной лог с ротацией
-main_handler = RotatingFileHandler(
-    'logs/bot.log', 
-    maxBytes=10*1024*1024,  # 10 MB
-    backupCount=5,
-    encoding='utf-8'
-)
-main_handler.setLevel(logging.INFO)
+def setup_logging():
+    """Настройка логирования (вызывается один раз)"""
+    global _logging_configured
+    
+    # Если логирование уже настроено, пропускаем
+    if _logging_configured:
+        return logging.getLogger("main")
+    
+    # Создаем директорию для логов
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
 
-# Лог сделок
-trade_handler = RotatingFileHandler(
-    'logs/trades.log',
-    maxBytes=10*1024*1024,  # 10 MB
-    backupCount=5,
-    encoding='utf-8'
-)
-trade_handler.setLevel(logging.INFO)
+    # Настройка расширенного логирования
+    # Основной лог с ротацией
+    main_handler = RotatingFileHandler(
+        'logs/bot.log', 
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    main_handler.setLevel(logging.INFO)
 
-# Лог сигналов
-signal_handler = RotatingFileHandler(
-    'logs/signals.log',
-    maxBytes=10*1024*1024,  # 10 MB
-    backupCount=5,
-    encoding='utf-8'
-)
-signal_handler.setLevel(logging.INFO)
+    # Лог сделок
+    trade_handler = RotatingFileHandler(
+        'logs/trades.log',
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    trade_handler.setLevel(logging.INFO)
 
-# Лог ошибок
-error_handler = RotatingFileHandler(
-    'logs/errors.log',
-    maxBytes=10*1024*1024,  # 10 MB
-    backupCount=5,
-    encoding='utf-8'
-)
-error_handler.setLevel(logging.ERROR)
+    # Лог сигналов
+    signal_handler = RotatingFileHandler(
+        'logs/signals.log',
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    signal_handler.setLevel(logging.INFO)
 
-# Консольный вывод
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
+    # Лог ошибок
+    error_handler = RotatingFileHandler(
+        'logs/errors.log',
+        maxBytes=10*1024*1024,  # 10 MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    error_handler.setLevel(logging.ERROR)
 
-# Форматтер
-formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-main_handler.setFormatter(formatter)
-trade_handler.setFormatter(formatter)
-signal_handler.setFormatter(formatter)
-error_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
+    # Форматтер
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    main_handler.setFormatter(formatter)
+    trade_handler.setFormatter(formatter)
+    signal_handler.setFormatter(formatter)
+    error_handler.setFormatter(formatter)
 
-# Настраиваем root logger
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-# Очищаем существующие обработчики, чтобы избежать дублирования
-root_logger.handlers.clear()
-root_logger.addHandler(main_handler)
-root_logger.addHandler(console_handler)
-root_logger.addHandler(error_handler)
-# Отключаем propagate для root logger, чтобы избежать двойного логирования
-root_logger.propagate = False
+    # Настраиваем root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-# Настраиваем специализированные логгеры
-trade_logger = logging.getLogger("trades")
-trade_logger.handlers.clear()  # Очищаем существующие обработчики
-trade_logger.addHandler(trade_handler)
-trade_logger.propagate = False  # Отключаем propagate
+    # Очищаем существующие обработчики (на всякий случай)
+    root_logger.handlers.clear()
 
-signal_logger = logging.getLogger("signals")
-signal_logger.handlers.clear()  # Очищаем существующие обработчики
-signal_logger.addHandler(signal_handler)
-signal_logger.propagate = False  # Отключаем propagate
+    # Добавляем только file handlers (без console_handler, чтобы избежать дублирования)
+    root_logger.addHandler(main_handler)
+    root_logger.addHandler(error_handler)
 
-logger = logging.getLogger("main")
+    # Настраиваем специализированные логгеры
+    trade_logger = logging.getLogger("trades")
+    trade_logger.handlers.clear()
+    trade_logger.addHandler(trade_handler)
+    trade_logger.propagate = False
+
+    signal_logger = logging.getLogger("signals")
+    signal_logger.handlers.clear()
+    signal_logger.addHandler(signal_handler)
+    signal_logger.propagate = False
+    
+    # Отключаем логи библиотек (httpx, telegram)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    
+    _logging_configured = True
+    return logging.getLogger("main")
 
 async def main():
     try:
+        # Настраиваем логирование (защищено от повторного вызова)
+        logger = setup_logging()
         logger.info("Initializing ML Trading Bot Terminal...")
         
         # 1. Загрузка настроек
