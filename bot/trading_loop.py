@@ -537,50 +537,142 @@ class TradingLoop:
             logger.info(f"Position {symbol} closed on exchange, updating state...")
             
             # Пытаемся получить информацию о закрытии из истории исполнений
-            # Получаем последние исполнения за последние 5 минут
+            # Увеличиваем временной диапазон до 1 часа, чтобы найти закрытие
             import time
             from datetime import datetime, timedelta
             
             end_time = int(time.time() * 1000)
-            start_time = int((time.time() - 300) * 1000)  # 5 минут назад
+            start_time = int((time.time() - 3600) * 1000)  # 1 час назад (было 5 минут)
             
-            executions = await asyncio.to_thread(
-                self.bybit.get_execution_list,
-                symbol=symbol,
-                start_time=start_time,
-                end_time=end_time,
-                limit=10
-            )
-            
-            exit_price = local_pos.entry_price  # По умолчанию используем entry price
+            exit_price = None
             pnl_usd = 0.0
             pnl_pct = 0.0
             
-            # Пытаемся найти закрывающий ордер в истории
-            if executions and isinstance(executions, dict) and executions.get("retCode") == 0:
-                result = executions.get("result")
-                if result and isinstance(result, dict):
-                    exec_list = result.get("list", [])
-                    if exec_list and len(exec_list) > 0:
-                        # Берем последнее исполнение (закрывающий ордер)
-                        last_exec = exec_list[0]
-                        if last_exec and isinstance(last_exec, dict):
-                            exit_price = float(last_exec.get("execPrice", local_pos.entry_price))
+            # Метод 1: Пытаемся получить из закрытых позиций (closed PnL) - самый точный источник
+            try:
+                closed_pnl = await asyncio.to_thread(
+                    self.bybit.get_closed_pnl,
+                    symbol=symbol,
+                    start_time=start_time,
+                    end_time=end_time,
+                    limit=10
+                )
+                
+                if closed_pnl and isinstance(closed_pnl, dict) and closed_pnl.get("retCode") == 0:
+                    result = closed_pnl.get("result")
+                    if result and isinstance(result, dict):
+                        pnl_list = result.get("list", [])
+                        if pnl_list and len(pnl_list) > 0:
+                            # Ищем последнюю закрытую позицию для этого символа
+                            for pnl_item in pnl_list:
+                                if pnl_item and isinstance(pnl_item, dict):
+                                    pnl_symbol = pnl_item.get("symbol", "")
+                                    pnl_side = pnl_item.get("side", "")
+                                    # Проверяем, что это наша позиция (тот же символ и сторона)
+                                    if pnl_symbol == symbol and pnl_side == local_pos.side:
+                                        # Получаем точные данные из API
+                                        avg_exit_price = float(pnl_item.get("avgExitPrice", 0))
+                                        closed_pnl_value = float(pnl_item.get("closedPnl", 0))
+                                        
+                                        if avg_exit_price > 0:
+                                            exit_price = avg_exit_price
+                                            # Используем closedPnl из API, если доступен
+                                            if closed_pnl_value != 0:
+                                                pnl_usd = closed_pnl_value
+                                                # Рассчитываем процент PnL на основе closedPnl
+                                                margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                                                if margin > 0:
+                                                    pnl_pct = (pnl_usd / margin) * 100
+                                            logger.info(f"Found closed PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%")
+                                            break
+            except Exception as e:
+                logger.warning(f"Error getting closed PnL for {symbol}: {e}")
             
-            # Если не нашли в истории, используем текущую цену из свечей
-            if exit_price == local_pos.entry_price:
-                df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
-                if not df.empty:
-                    exit_price = float(df['close'].iloc[-1])
+            # Метод 2: Если не нашли в closed PnL, пытаемся получить из истории исполнений
+            try:
+                executions = await asyncio.to_thread(
+                    self.bybit.get_execution_list,
+                    symbol=symbol,
+                    start_time=start_time,
+                    end_time=end_time,
+                    limit=50  # Увеличиваем лимит
+                )
+                
+                if executions and isinstance(executions, dict) and executions.get("retCode") == 0:
+                    result = executions.get("result")
+                    if result and isinstance(result, dict):
+                        exec_list = result.get("list", [])
+                        if exec_list and len(exec_list) > 0:
+                            # Ищем закрывающий ордер (reduceOnly или противоположный side)
+                            close_side = "Sell" if local_pos.side == "Buy" else "Buy"
+                            for exec_item in exec_list:
+                                if exec_item and isinstance(exec_item, dict):
+                                    exec_side = exec_item.get("side", "")
+                                    # Ищем исполнение противоположного направления или reduceOnly
+                                    if exec_side == close_side or exec_item.get("reduceOnly", False):
+                                        exit_price = float(exec_item.get("execPrice", 0))
+                                        if exit_price > 0:
+                                            logger.info(f"Found exit price from execution list: {exit_price}")
+                                            break
+            except Exception as e:
+                logger.warning(f"Error getting execution list for {symbol}: {e}")
+            
+            # Метод 3: Если не нашли в closed PnL и execution list, пытаемся получить из текущей позиции
+            if exit_price is None or exit_price == 0:
+                try:
+                    # Получаем информацию о текущей позиции (может быть закрыта недавно)
+                    pos_info = await asyncio.to_thread(self.bybit.get_position_info, symbol=symbol)
+                    if pos_info and isinstance(pos_info, dict) and pos_info.get("retCode") == 0:
+                        result = pos_info.get("result")
+                        if result and isinstance(result, dict):
+                            list_data = result.get("list", [])
+                            if list_data and len(list_data) > 0:
+                                position = list_data[0]
+                                if position and isinstance(position, dict):
+                                    # Если позиция закрыта (size == 0), используем markPrice
+                                    size = float(position.get("size", 0))
+                                    if size == 0:
+                                        mark_price = float(position.get("markPrice", 0))
+                                        if mark_price > 0:
+                                            exit_price = mark_price
+                                            logger.info(f"Using markPrice as exit price: {exit_price}")
+                except Exception as e:
+                    logger.warning(f"Error getting position info for closed position {symbol}: {e}")
+            
+            # Метод 4: Если все еще не нашли, используем текущую цену из свечей
+            if exit_price is None or exit_price == 0:
+                try:
+                    df = self.bybit.get_kline_df(symbol, self.settings.timeframe, limit=1)
+                    if not df.empty:
+                        exit_price = float(df['close'].iloc[-1])
+                        logger.info(f"Using current price from candles as exit price: {exit_price}")
+                except Exception as e:
+                    logger.warning(f"Error getting current price for {symbol}: {e}")
+            
+            # Если все методы не сработали, используем entry_price (но это плохо)
+            if exit_price is None or exit_price == 0:
+                exit_price = local_pos.entry_price
+                logger.warning(f"Could not determine exit price for {symbol}, using entry_price: {exit_price}")
             
             # Рассчитываем PnL
-            if local_pos.side == "Buy":
-                pnl_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price) * 100
-            else:  # Sell
-                pnl_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price) * 100
+            # Используем правильную формулу с учетом плеча
+            # PnL% = ((exit_price - entry_price) / entry_price) * leverage * 100 для LONG
+            # PnL% = ((entry_price - exit_price) / entry_price) * leverage * 100 для SHORT
+            leverage = self.settings.leverage
             
-            # PnL в USD = (процент PnL / 100) * (entry_price * qty)
-            pnl_usd = (pnl_pct / 100) * (local_pos.entry_price * local_pos.qty)
+            if local_pos.side == "Buy":
+                price_diff_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price)
+                pnl_pct = price_diff_pct * leverage * 100
+            else:  # Sell
+                price_diff_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price)
+                pnl_pct = price_diff_pct * leverage * 100
+            
+            # PnL в USD = (процент PnL / 100) * маржа
+            # Маржа = entry_price * qty / leverage
+            margin = (local_pos.entry_price * local_pos.qty) / leverage
+            pnl_usd = (pnl_pct / 100) * margin
+            
+            logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.2f}%, pnl_usd={pnl_usd:.2f}")
             
             # Обновляем статус сделки
             self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
