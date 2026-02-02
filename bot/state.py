@@ -158,6 +158,7 @@ class BotState:
     
     def is_symbol_in_cooldown(self, symbol: str) -> bool:
         """Проверяет, находится ли символ в cooldown"""
+        should_save = False
         with self.lock:
             if symbol not in self.cooldowns:
                 return False
@@ -170,8 +171,12 @@ class BotState:
             else:
                 # Cooldown истек, удаляем
                 del self.cooldowns[symbol]
-                self.save()
-                return False
+                should_save = True
+        
+        if should_save:
+            # Сохраняем вне lock, чтобы избежать дедлока
+            self.save()
+        return False
     
     def set_cooldown(self, symbol: str, consecutive_losses: int, reason: str):
         """Устанавливает cooldown для символа на основе количества убытков подряд"""
