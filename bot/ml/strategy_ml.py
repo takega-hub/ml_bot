@@ -642,8 +642,8 @@ class MLStrategy:
         """
         Генерирует торговый сигнал на основе ML-предсказания.
         
-        ВАЖНО: SL фиксированный = 1% (10% от маржи при 10x плече)
-                TP = 2.5% (25% от маржи при 10x плече)
+        ВАЖНО: SL рассчитывается от значимых уровней (поддержка/сопротивление)
+                TP рассчитывается по RR 2-3:1 от SL
         
         Args:
             row: Текущий бар (pd.Series)
@@ -655,7 +655,7 @@ class MLStrategy:
             max_loss_pct_margin: Максимальный убыток от маржи в % (10%)
         
         Returns:
-            Signal объект с фиксированным SL=1%
+            Signal объект с уровневым SL и RR TP
         """
         try:
             # Определяем символ
@@ -679,81 +679,121 @@ class MLStrategy:
             # ВАЖНО: НЕ пропускаем создание фичей, чтобы индикаторы обновлялись для новых свечей
             prediction, confidence = self.predict(df, skip_feature_creation=False)
             
-            # === УЛУЧШЕННЫЙ РАСЧЕТ TP/SL (из успешного бэктеста) ===
-            # Базовые значения:
-            # SL = 10% от маржи / плечо = 10% / 10 = 1% от цены
-            # TP = 25% от маржи / плечо = 25% / 10 = 2.5% от цены
-            base_sl_pct = max_loss_pct_margin / leverage  # 10% / 10 = 0.01 (1%)
-            base_tp_pct = target_profit_pct_margin / leverage  # 25% / 10 = 0.025 (2.5%)
-            
-            # ВАЖНО: SL всегда фиксированный 1% (как в успешном бэктесте)
-            fixed_sl_pct = base_sl_pct  # 1%
-            
-            # УЛУЧШЕНИЕ: Используем ATR для более точной адаптации TP (из старого бэктеста)
-            tp_multiplier = 1.0
-            use_atr_based_tp = False
-            
-            try:
-                # Пробуем использовать ATR для динамических TP/SL (как в успешном бэктесте)
-                if 'atr' in df.columns and len(df) > 0:
-                    current_atr = df['atr'].iloc[-1]
-                    if pd.notna(current_atr) and current_atr > 0 and current_price > 0:
-                        atr_pct = (current_atr / current_price) * 100
-                        
-                        # УЛУЧШЕНИЕ: Более точная адаптация TP на основе ATR (из старого бэктеста)
-                        # Для волатильных рынков увеличиваем TP, для спокойных - уменьшаем
-                        if symbol in ("ETHUSDT", "SOLUSDT"):
-                            # Для волатильных символов - шире TP (как в успешном бэктесте)
-                            tp_multiplier = min(1.5, max(0.8, atr_pct / 0.5))
-                        elif symbol == "BTCUSDT":
-                            # Для BTC - умеренный TP (как в успешном бэктесте)
-                            tp_multiplier = min(1.3, max(0.9, atr_pct / 0.3))
-                        else:
-                            # Для остальных
-                            tp_multiplier = min(1.2, max(0.8, atr_pct / 0.4))
-                        
-                        use_atr_based_tp = True
-            except Exception:
-                pass  # В случае ошибки используем multiplier=1.0
-            
-            # Финальные значения процентов
-            # КРИТИЧНО: SL ВСЕГДА должен быть строго 1.0% (не 1.2%!)
-            sl_pct = fixed_sl_pct  # Всегда 1% = 0.01
-            # Убеждаемся, что SL точно 1.0%
-            if abs(sl_pct - 0.01) > 0.0001:  # Допуск для float
-                sl_pct = 0.01  # Принудительно 1.0%
-            
-            tp_pct = base_tp_pct * tp_multiplier  # Адаптивный TP (2.5% ± адаптация)
-            
-            # УЛУЧШЕНИЕ: Ограничения для TP (SL уже фиксирован на 1.0%)
-            # TP должен быть в диапазоне 2%-4% (как в успешном бэктесте)
-            tp_pct = max(0.02, min(tp_pct, 0.04))    # 2% - 4%
-            
-            # Рассчитываем цены TP/SL
-            if prediction == 1:  # LONG
-                tp_price = current_price * (1 + tp_pct)
-                sl_price = current_price * (1 - sl_pct)
-            elif prediction == -1:  # SHORT
-                tp_price = current_price * (1 - tp_pct)
-                sl_price = current_price * (1 + sl_pct)
-            else:
-                tp_price = None
-                sl_price = None
+            # === РАСЧЕТ SL ОТ УРОВНЕЙ + TP ПО RR 2-3:1 ===
+            sl_price = None
+            tp_price = None
+            sl_source = None
+            sl_level = None
+
+            def _is_finite_number(value: Any) -> bool:
+                try:
+                    return value is not None and np.isfinite(float(value))
+                except Exception:
+                    return False
+
+            def _collect_level_candidates(side: str) -> list[tuple[str, float]]:
+                candidates: list[tuple[str, float]] = []
+                if df is None or len(df) == 0:
+                    return candidates
+                lookback = min(60, len(df))
+                df_tail = df.iloc[-lookback:]
+
+                recent_low = df_tail["low"].min() if "low" in df_tail.columns else None
+                recent_high = df_tail["high"].max() if "high" in df_tail.columns else None
+
+                def add_candidate(name: str, value: Any, compare: str):
+                    if not _is_finite_number(value):
+                        return
+                    value_f = float(value)
+                    if compare == "below" and value_f < current_price:
+                        candidates.append((name, value_f))
+                    elif compare == "above" and value_f > current_price:
+                        candidates.append((name, value_f))
+
+                if side == "LONG":
+                    add_candidate("recent_low", recent_low, "below")
+                    add_candidate("bb_lower", row.get("bb_lower"), "below")
+                    add_candidate("sma_20", row.get("sma_20"), "below")
+                    add_candidate("ema_26", row.get("ema_26"), "below")
+                    add_candidate("ema_12", row.get("ema_12"), "below")
+                else:
+                    add_candidate("recent_high", recent_high, "above")
+                    add_candidate("bb_upper", row.get("bb_upper"), "above")
+                    add_candidate("sma_20", row.get("sma_20"), "above")
+                    add_candidate("ema_26", row.get("ema_26"), "above")
+                    add_candidate("ema_12", row.get("ema_12"), "above")
+
+                return candidates
+
+            def _calculate_sl_from_levels(side: str) -> tuple[Optional[float], Optional[str], Optional[float]]:
+                candidates = _collect_level_candidates(side)
+                if not candidates:
+                    return None, None, None
+                if side == "LONG":
+                    # Ближайшая поддержка (самая высокая ниже цены)
+                    selected = max(candidates, key=lambda x: x[1])
+                else:
+                    # Ближайшее сопротивление (самое низкое выше цены)
+                    selected = min(candidates, key=lambda x: x[1])
+
+                level_name, level_price = selected
+
+                # Буфер за уровнем (ATR или минимум 0.1%)
+                atr_value = row.get("atr")
+                if _is_finite_number(atr_value) and float(atr_value) > 0:
+                    buffer_value = max(current_price * 0.001, float(atr_value) * 0.2)
+                else:
+                    buffer_value = current_price * 0.001
+
+                if side == "LONG":
+                    sl = level_price - buffer_value
+                else:
+                    sl = level_price + buffer_value
+
+                if side == "LONG" and sl >= current_price:
+                    return None, None, None
+                if side == "SHORT" and sl <= current_price:
+                    return None, None, None
+
+                return sl, level_name, level_price
+
+            if prediction == 1:
+                sl_price, sl_source, sl_level = _calculate_sl_from_levels("LONG")
+            elif prediction == -1:
+                sl_price, sl_source, sl_level = _calculate_sl_from_levels("SHORT")
+
+            # Fallback SL если уровни недоступны
+            if prediction != 0 and sl_price is None:
+                fallback_sl_pct = 0.01
+                sl_price = current_price * (1 - fallback_sl_pct) if prediction == 1 else current_price * (1 + fallback_sl_pct)
+                sl_source = "fallback_1pct"
+                sl_level = None
+
+            # RR 2-3:1 (динамически от уверенности, но всегда в диапазоне)
+            rr = 2.0
+            if _is_finite_number(confidence):
+                rr = 2.0 + min(1.0, max(0.0, (confidence - 0.5) / 0.4))
+            rr = float(min(3.0, max(2.0, rr)))
+
+            if prediction == 1 and sl_price is not None:
+                risk = abs(current_price - sl_price)
+                tp_price = current_price + (risk * rr)
+            elif prediction == -1 and sl_price is not None:
+                risk = abs(sl_price - current_price)
+                tp_price = current_price - (risk * rr)
             
             # УЛУЧШЕНИЕ: Валидация TP/SL (из успешного бэктеста)
             # Проверяем корректность TP/SL для LONG
             if prediction == 1 and tp_price is not None and sl_price is not None:
                 if not (sl_price < current_price and tp_price > current_price):
-                    # Исправляем некорректные значения
-                    sl_price = current_price * 0.99  # 1% ниже
-                    tp_price = current_price * 1.025  # 2.5% выше
+                    sl_price = current_price * 0.99
+                    tp_price = current_price * 1.025
             
             # Проверяем корректность TP/SL для SHORT
             if prediction == -1 and tp_price is not None and sl_price is not None:
                 if not (sl_price > current_price and tp_price < current_price):
-                    # Исправляем некорректные значения
-                    sl_price = current_price * 1.01  # 1% выше
-                    tp_price = current_price * 0.975  # 2.5% ниже
+                    sl_price = current_price * 1.01
+                    tp_price = current_price * 0.975
             
             # УЛУЧШЕНИЕ: Финальная проверка на валидность (из успешного бэктеста)
             # ВАЖНО: Если TP/SL невалидны, мы их пересчитаем позже, но НЕ устанавливаем в None
@@ -798,8 +838,8 @@ class MLStrategy:
             
             # Формируем причину
             confidence_pct = int(confidence * 100) if np.isfinite(confidence) else 0
-            tp_pct_display = tp_pct * 100
-            sl_pct_display = sl_pct * 100
+            tp_pct_display = (abs(tp_price - current_price) / current_price) * 100 if tp_price else 0.0
+            sl_pct_display = (abs(current_price - sl_price) / current_price) * 100 if sl_price else 0.0
             
             # Проверяем количество сигналов за сегодня
             from datetime import datetime, timezone
@@ -896,10 +936,16 @@ class MLStrategy:
                 # Если TP/SL не установлены, пересчитываем их принудительно
                 if prediction == 1:  # LONG
                     sl_price = current_price * 0.99  # 1% ниже
-                    tp_price = current_price * (1 + tp_pct) if tp_pct > 0 else current_price * 1.025  # TP или 2.5%
+                    tp_price = current_price + (abs(current_price - sl_price) * rr)
+                    sl_source = sl_source or "fallback_1pct"
                 elif prediction == -1:  # SHORT
                     sl_price = current_price * 1.01  # 1% выше
-                    tp_price = current_price * (1 - tp_pct) if tp_pct > 0 else current_price * 0.975  # TP или 2.5%
+                    tp_price = current_price - (abs(sl_price - current_price) * rr)
+                    sl_source = sl_source or "fallback_1pct"
+
+            if prediction != 0:
+                tp_pct_display = (abs(tp_price - current_price) / current_price) * 100 if tp_price else 0.0
+                sl_pct_display = (abs(current_price - sl_price) / current_price) * 100 if sl_price else 0.0
             
             # Генерируем сигналы
             if prediction == 1:  # LONG
@@ -908,8 +954,6 @@ class MLStrategy:
                     # Принудительно устанавливаем TP/SL
                     sl_price = current_price * 0.99  # 1% ниже (строго 1.0%)
                     tp_price = current_price * 1.025  # 2.5% выше (базовый TP)
-                    sl_pct = 0.01  # Принудительно 1.0%
-                    tp_pct = 0.025  # Базовый TP
                     sl_pct_display = 1.0
                     tp_pct_display = 2.5
                 
@@ -947,8 +991,9 @@ class MLStrategy:
                     "has_position": has_position.value if has_position else None,
                     "stop_loss": sl_price,   # Цена SL
                     "take_profit": tp_price,  # Цена TP
-                    "use_atr_based_tp": use_atr_based_tp,  # Использовался ли ATR для TP
-                    "tp_multiplier": round(tp_multiplier, 3),  # Множитель TP
+                    "sl_source": sl_source,
+                    "sl_level": sl_level,
+                    "risk_reward": round(rr, 2),
                 }
                 
                 # УЛУЧШЕНИЕ: Добавляем ATR в indicators_info если доступен (из успешного бэктеста)
@@ -994,8 +1039,6 @@ class MLStrategy:
                     # Принудительно устанавливаем TP/SL
                     sl_price = current_price * 1.01  # 1% выше (строго 1.0%)
                     tp_price = current_price * 0.975  # 2.5% ниже (базовый TP)
-                    sl_pct = 0.01  # Принудительно 1.0%
-                    tp_pct = 0.025  # Базовый TP
                     sl_pct_display = 1.0
                     tp_pct_display = 2.5
                 
@@ -1033,8 +1076,9 @@ class MLStrategy:
                     "has_position": has_position.value if has_position else None,
                     "stop_loss": sl_price,   # Цена SL
                     "take_profit": tp_price,  # Цена TP
-                    "use_atr_based_tp": use_atr_based_tp,  # Использовался ли ATR для TP
-                    "tp_multiplier": round(tp_multiplier, 3),  # Множитель TP
+                    "sl_source": sl_source,
+                    "sl_level": sl_level,
+                    "risk_reward": round(rr, 2),
                 }
                 
                 # УЛУЧШЕНИЕ: Добавляем ATR в indicators_info если доступен (из успешного бэктеста)

@@ -492,12 +492,16 @@ class TradingLoop:
                 
                 # Округляем до tick size
                 new_sl = self.bybit.round_price(new_sl, symbol)
+                tick_size = self.bybit.get_price_step(symbol)
                 
                 # Проверяем, нужно ли обновлять SL
                 should_update = False
                 if current_sl:
                     current_sl_float = float(current_sl)
-                    if side == "Buy" and new_sl > current_sl_float:
+                    # Если новый SL совпадает с текущим (с учетом шага цены), не обновляем
+                    if tick_size > 0 and abs(new_sl - current_sl_float) < (tick_size / 2):
+                        should_update = False
+                    elif side == "Buy" and new_sl > current_sl_float:
                         should_update = True
                     elif side == "Sell" and new_sl < current_sl_float:
                         should_update = True
@@ -518,6 +522,10 @@ class TradingLoop:
                         )
         
         except Exception as e:
+            # Bybit возвращает "not modified" если стоп-лосс уже равен текущему
+            if "ErrCode: 34040" in str(e) or "not modified" in str(e).lower():
+                logger.info(f"{symbol} breakeven SL not modified (already set): {e}")
+                return
             logger.error(f"Error updating breakeven stop for {symbol}: {e}")
     
     async def update_trailing_stop(self, symbol: str, position_info: dict):
