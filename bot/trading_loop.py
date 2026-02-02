@@ -336,7 +336,10 @@ class TradingLoop:
     async def update_breakeven_stop(self, symbol: str, position_info: dict):
         """Перемещает SL в безубыток при достижении порога прибыли"""
         try:
-            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict):
+                return
+            
+            if not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))
@@ -408,7 +411,10 @@ class TradingLoop:
             if not self.settings.risk.enable_trailing_stop:
                 return
             
-            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict):
+                return
+            
+            if not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))
@@ -455,7 +461,10 @@ class TradingLoop:
             if not self.settings.risk.enable_partial_close:
                 return
             
-            if not position_info or not isinstance(position_info, dict) or not position_info.get("size"):
+            if not position_info or not isinstance(position_info, dict):
+                return
+            
+            if not position_info.get("size"):
                 return
             
             size = float(position_info.get("size", 0))

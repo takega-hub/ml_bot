@@ -85,46 +85,80 @@ signal_logger.addHandler(signal_handler)
 logger = logging.getLogger("main")
 
 async def main():
-    logger.info("Initializing ML Trading Bot Terminal...")
-    
-    # 1. Загрузка настроек
-    settings = load_settings()
-    if not settings.telegram_token:
-        logger.error("TELEGRAM_TOKEN not found in .env file!")
-        return
-
-    # 2. Инициализация состояния
-    state = BotState()
-    
-    # 3. Инициализация клиента биржи
-    bybit = BybitClient(settings.api)
-    
-    # 4. Инициализация менеджера моделей
-    model_manager = ModelManager(settings, state)
-    
-    # 5. Инициализация Telegram бота (передаем bybit для получения позиций)
-    tg_bot = TelegramBot(settings, state, model_manager, bybit)
-    
-    # 6. Инициализация торгового цикла
-    trading_loop = TradingLoop(settings, state, bybit, tg_bot)
-    
-    # 7. Инициализация Health Monitor
-    health_monitor = HealthMonitor(settings, state, bybit, tg_bot)
-    
-    # 8. Запуск компонентов
     try:
-        # Запускаем все компоненты параллельно
-        await asyncio.gather(
-            tg_bot.start(),
-            trading_loop.run(),
-            health_monitor.run()
-        )
-    except asyncio.CancelledError:
-        logger.info("Bot execution cancelled.")
+        logger.info("Initializing ML Trading Bot Terminal...")
+        
+        # 1. Загрузка настроек
+        try:
+            settings = load_settings()
+        except Exception as e:
+            logger.error(f"Failed to load settings: {e}", exc_info=True)
+            raise
+        
+        if not settings.telegram_token:
+            logger.error("TELEGRAM_TOKEN not found in .env file!")
+            return
+
+        # 2. Инициализация состояния
+        try:
+            state = BotState()
+        except Exception as e:
+            logger.error(f"Failed to initialize BotState: {e}", exc_info=True)
+            raise
+        
+        # 3. Инициализация клиента биржи
+        try:
+            bybit = BybitClient(settings.api)
+        except Exception as e:
+            logger.error(f"Failed to initialize BybitClient: {e}", exc_info=True)
+            raise
+        
+        # 4. Инициализация менеджера моделей
+        try:
+            model_manager = ModelManager(settings, state)
+        except Exception as e:
+            logger.error(f"Failed to initialize ModelManager: {e}", exc_info=True)
+            raise
+        
+        # 5. Инициализация Telegram бота (передаем bybit для получения позиций)
+        try:
+            tg_bot = TelegramBot(settings, state, model_manager, bybit)
+        except Exception as e:
+            logger.error(f"Failed to initialize TelegramBot: {e}", exc_info=True)
+            raise
+        
+        # 6. Инициализация торгового цикла
+        try:
+            trading_loop = TradingLoop(settings, state, bybit, tg_bot)
+        except Exception as e:
+            logger.error(f"Failed to initialize TradingLoop: {e}", exc_info=True)
+            raise
+        
+        # 7. Инициализация Health Monitor
+        try:
+            health_monitor = HealthMonitor(settings, state, bybit, tg_bot)
+        except Exception as e:
+            logger.error(f"Failed to initialize HealthMonitor: {e}", exc_info=True)
+            raise
+    
+        # 8. Запуск компонентов
+        try:
+            # Запускаем все компоненты параллельно
+            await asyncio.gather(
+                tg_bot.start(),
+                trading_loop.run(),
+                health_monitor.run()
+            )
+        except asyncio.CancelledError:
+            logger.info("Bot execution cancelled.")
+        except Exception as e:
+            logger.error(f"Fatal error during execution: {e}", exc_info=True)
+            raise
+        finally:
+            logger.info("Shutting down...")
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-    finally:
-        logger.info("Shutting down...")
+        logger.error(f"Fatal error during initialization: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     # Обработка прерываний (Ctrl+C)
