@@ -68,6 +68,11 @@ class BotState:
                 data = json.load(f)
                 self.is_running = data.get("is_running", False)
                 self.active_symbols = data.get("active_symbols", ["BTCUSDT"])
+                # Убираем некорректные символы (например, от старых callback конфликтов)
+                self.active_symbols = [
+                    s for s in self.active_symbols
+                    if isinstance(s, str) and s.endswith("USDT")
+                ]
                 self.symbol_models = data.get("symbol_models", {})
                 
                 # Load trades

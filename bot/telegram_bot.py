@@ -280,8 +280,15 @@ class TelegramBot:
             await self.show_status(query)
         elif query.data == "settings_pairs":
             await self.show_pairs_settings(query)
+        elif query.data.startswith("toggle_risk_"):
+            setting_name = query.data.replace("toggle_risk_", "")
+            await self.toggle_risk_setting(query, setting_name)
         elif query.data.startswith("toggle_"):
-            symbol = query.data.split("_")[1]
+            symbol = query.data.split("_", 1)[1]
+            # Защита от конфликтов с другими callback_data
+            if not symbol.endswith("USDT"):
+                await query.answer("⚠️ Некорректный символ", show_alert=True)
+                return
             res = self.state.toggle_symbol(symbol)
             if res is None:
                 await query.answer("⚠️ Достигнут лимит в 5 пар!", show_alert=True)
@@ -352,9 +359,6 @@ class TelegramBot:
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
-        elif query.data.startswith("toggle_risk_"):
-            setting_name = query.data.replace("toggle_risk_", "")
-            await self.toggle_risk_setting(query, setting_name)
         elif query.data == "reset_risk_defaults":
             await self.reset_risk_defaults(query)
         elif query.data == "risk_info":
@@ -368,8 +372,12 @@ class TelegramBot:
 
     async def show_pairs_settings(self, query):
         # Получаем все известные символы (из state и предопределенные)
-        all_possible = list(set(["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"] + 
-                                self.state.active_symbols))
+        all_possible = list(
+            set(
+                [s for s in (["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"] + self.state.active_symbols)
+                 if isinstance(s, str) and s.endswith("USDT")]
+            )
+        )
         all_possible.sort()
         
         keyboard = []
