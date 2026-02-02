@@ -52,12 +52,18 @@ class TradingLoop:
     async def _signal_processing_loop(self):
         """Основной цикл обработки сигналов"""
         logger.info("Starting Signal Processing Loop...")
+        iteration = 0
         while True:
             try:
+                iteration += 1
+                logger.debug(f"Signal Processing Loop: Iteration {iteration}, is_running={self.state.is_running}")
+                
                 if not self.state.is_running:
+                    logger.debug("Signal Processing Loop: Bot not running, sleeping...")
                     await asyncio.sleep(10)
                     continue
 
+                logger.debug(f"Signal Processing Loop: Processing {len(self.state.active_symbols)} symbols...")
                 for symbol in self.state.active_symbols:
                     await self.process_symbol(symbol)
                     # Добавляем задержку между символами для снижения нагрузки на API
@@ -65,7 +71,9 @@ class TradingLoop:
                         await asyncio.sleep(2)
                 
                 # Пауза между циклами (из настроек)
+                logger.debug(f"Signal Processing Loop: Completed iteration {iteration}, sleeping for {self.settings.live_poll_seconds}s...")
                 await asyncio.sleep(self.settings.live_poll_seconds)
+                logger.debug(f"Signal Processing Loop: Woke up from sleep, starting next iteration...")
             except Exception as e:
                 logger.error(f"[trading_loop] Error in signal processing loop: {e}")
                 await asyncio.sleep(30)
@@ -286,6 +294,7 @@ class TradingLoop:
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
             logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
+            logger.debug(f"[{symbol}] Signal generated, continuing processing...")
 
             # 4. Логируем сигнал в историю
             if signal.action != Action.HOLD:
