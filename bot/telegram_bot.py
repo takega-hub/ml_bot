@@ -445,7 +445,8 @@ class TelegramBot:
                 pnl_sign = "+" if t.pnl_usd >= 0 else ""
                 trade_idx = len(self.state.trades) - len(closed_trades) + idx
                 text += f"#{trade_idx} 🕒 {t.exit_time[11:19] if t.exit_time else 'N/A'} | {t.symbol} {t.side}\n"
-                text += f"   Вход: ${t.entry_price:.2f} | Выход: ${t.exit_price:.2f if t.exit_price else 0:.2f}\n"
+                exit_price = t.exit_price if t.exit_price else 0.0
+                text += f"   Вход: ${t.entry_price:.2f} | Выход: ${exit_price:.2f}\n"
                 text += f"   PnL: {pnl_sign}${t.pnl_usd:.2f} ({pnl_sign}{t.pnl_pct:.2f}%)\n\n"
         
         keyboard = [
