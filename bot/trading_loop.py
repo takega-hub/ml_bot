@@ -174,13 +174,8 @@ class TradingLoop:
             
             # Проверяем, не обрабатывали ли мы уже эту свечу
             # ВАЖНО: Проверяем только если timestamp валиден
-            # ВРЕМЕННО: Отключаем проверку для диагностики - если сигналы не приходят, это может быть причиной
-            skip_duplicate_check = False  # Установите в True для включения проверки дубликатов
-            
-            if not skip_duplicate_check:
-                # Пропускаем проверку, всегда генерируем сигналы
-                logger.debug(f"[{symbol}] Processing candle: {candle_timestamp} (duplicate check disabled)")
-            elif candle_timestamp is not None:
+            # Это предотвращает генерацию одинаковых сигналов для одной и той же закрытой свечи
+            if candle_timestamp is not None:
                 if symbol in self.last_processed_candle:
                     last_timestamp = self.last_processed_candle[symbol]
                     if last_timestamp is not None and last_timestamp == candle_timestamp:
