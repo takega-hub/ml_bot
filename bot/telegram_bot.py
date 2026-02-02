@@ -1124,6 +1124,7 @@ class TelegramBot:
             text += f"ℹ️ Используется меньшее значение\n"
             text += f"📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
             text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
+        text += f"💸 Комиссия (per side): {risk.fee_rate*100:.4f}%\n\n"
             text += f"🔄 Трейлинг стоп: {'✅ Включен' if risk.enable_trailing_stop else '❌ Выключен'}\n"
             text += f"   Активация: {risk.trailing_stop_activation_pct*100:.2f}%\n"
             text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
@@ -1236,6 +1237,7 @@ class TelegramBot:
                 "enable_breakeven": self.settings.risk.enable_breakeven,
                 "breakeven_activation_pct": self.settings.risk.breakeven_activation_pct,
                 "enable_loss_cooldown": self.settings.risk.enable_loss_cooldown,
+                "fee_rate": self.settings.risk.fee_rate,
             }
             
             with open(config_file, 'w', encoding='utf-8') as f:

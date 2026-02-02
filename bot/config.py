@@ -112,6 +112,9 @@ class RiskParams:
     # Безубыток
     enable_breakeven: bool = True
     breakeven_activation_pct: float = 0.005  # Активировать при прибыли 0.5%
+
+    # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
+    fee_rate: float = 0.0006
     
     # Динамическое изменение размера позиции
     enable_dynamic_position_sizing: bool = True
@@ -135,6 +138,8 @@ class RiskParams:
             self.profit_protection_retreat_pct /= 100.0
         if self.breakeven_activation_pct >= 1:
             self.breakeven_activation_pct /= 100.0
+        if self.fee_rate >= 1:
+            self.fee_rate /= 100.0
 
 
 @dataclass
@@ -387,6 +392,16 @@ def load_settings() -> AppSettings:
             settings.risk.take_profit_pct = value
         except ValueError:
             pass
+
+    fee_rate = os.getenv("FEE_RATE", "").strip()
+    if fee_rate:
+        try:
+            value = float(fee_rate)
+            if value >= 1:
+                value /= 100.0
+            settings.risk.fee_rate = value
+        except ValueError:
+            pass
     
     # Загружаем общие настройки
     timeframe = os.getenv("TIMEFRAME", "").strip()
@@ -581,6 +596,11 @@ def _load_risk_settings(settings: AppSettings) -> None:
             risk.breakeven_activation_pct = float(data["breakeven_activation_pct"])
         if "enable_loss_cooldown" in data:
             risk.enable_loss_cooldown = bool(data["enable_loss_cooldown"])
+        if "fee_rate" in data:
+            value = float(data["fee_rate"])
+            if value >= 1:
+                value /= 100.0
+            risk.fee_rate = value
         
         print(f"[config] Risk settings loaded from {settings_file}")
     except Exception as e:

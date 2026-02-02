@@ -527,6 +527,14 @@ class TradingLoop:
                 logger.info(f"{symbol} breakeven SL not modified (already set): {e}")
                 return
             logger.error(f"Error updating breakeven stop for {symbol}: {e}")
+
+    def _calculate_fees_usd(self, entry_price: float, exit_price: float, qty: float) -> float:
+        """Считает комиссию биржи в USD (per side) по notional на входе и выходе."""
+        fee_rate = self.settings.risk.fee_rate
+        if fee_rate <= 0:
+            return 0.0
+        notional = (entry_price + exit_price) * qty
+        return notional * fee_rate
     
     async def update_trailing_stop(self, symbol: str, position_info: dict):
         """Активирует трейлинг стоп при достижении порога прибыли"""
@@ -799,6 +807,16 @@ class TradingLoop:
             # Маржа = entry_price * qty / leverage
             margin = (local_pos.entry_price * local_pos.qty) / leverage
             pnl_usd = (pnl_pct / 100) * margin
+
+            # Учитываем комиссию биржи
+            fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
+            if fee_usd > 0:
+                pnl_usd -= fee_usd
+                if margin > 0:
+                    pnl_pct = (pnl_usd / margin) * 100
+                logger.info(
+                    f"Applied fees for {symbol}: fee_usd={fee_usd:.4f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%"
+                )
             
             logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.2f}%, pnl_usd={pnl_usd:.2f}")
             
@@ -836,7 +854,13 @@ class TradingLoop:
                         pnl_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price) * 100
                     else:
                         pnl_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price) * 100
-                    pnl_usd = (pnl_pct / 100) * (local_pos.entry_price * local_pos.qty)
+                    margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                    pnl_usd = (pnl_pct / 100) * margin
+                    fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
+                    if fee_usd > 0:
+                        pnl_usd -= fee_usd
+                        if margin > 0:
+                            pnl_pct = (pnl_usd / margin) * 100
                     self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
                 else:
                     # Если не удалось получить цену, используем entry_price с нулевым PnL
