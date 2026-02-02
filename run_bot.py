@@ -76,7 +76,7 @@ def setup_logging():
 
     # Настраиваем root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)  # Временно включаем DEBUG для диагностики
+    root_logger.setLevel(logging.INFO)  # INFO уровень для production (было DEBUG для диагностики)
 
     # Очищаем существующие обработчики (на всякий случай)
     root_logger.handlers.clear()
@@ -96,10 +96,13 @@ def setup_logging():
     signal_logger.addHandler(signal_handler)
     signal_logger.propagate = False
     
-    # Отключаем логи библиотек (httpx, telegram)
+    # Отключаем шумные логи библиотек
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
     logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+    logging.getLogger("pybit").setLevel(logging.INFO)  # Только важные сообщения от pybit
     
     _logging_configured = True
     return logging.getLogger("main")

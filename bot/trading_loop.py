@@ -135,11 +135,8 @@ class TradingLoop:
 
     async def process_symbol(self, symbol: str):
         try:
-            logger.debug(f"[{symbol}] Processing symbol...")
-            
             # 0. Проверяем cooldown
             if self.state.is_symbol_in_cooldown(symbol):
-                logger.debug(f"Symbol {symbol} is in cooldown, skipping...")
                 return
             
             # 1. Получаем данные
@@ -147,7 +144,6 @@ class TradingLoop:
             if df.empty:
                 logger.warning(f"[{symbol}] No data received from exchange")
                 return
-            logger.debug(f"[{symbol}] Received {len(df)} candles, last close: {df['close'].iloc[-1]:.2f}")
 
             # 2. Инициализируем стратегию если нужно
             if symbol not in self.strategies:
@@ -200,12 +196,10 @@ class TradingLoop:
                     last_timestamp = self.last_processed_candle[symbol]
                     if last_timestamp is not None and last_timestamp == candle_timestamp:
                         # Эта свеча уже была обработана, пропускаем
-                        logger.debug(f"[{symbol}] Candle {candle_timestamp} already processed, skipping signal generation...")
                         return
                 
                 # Сохраняем timestamp обработанной свечи
                 self.last_processed_candle[symbol] = candle_timestamp
-                logger.debug(f"[{symbol}] Processing new candle: {candle_timestamp}")
             else:
                 logger.warning(f"[{symbol}] Warning: candle_timestamp is None, proceeding anyway...")
                 # Если timestamp None, не сохраняем его, чтобы не блокировать следующие проверки
