@@ -802,11 +802,23 @@ class MLStrategy:
             
             if prediction != 0 and confidence < min_strength:
                 logger.debug(f"Signal rejected: confidence {confidence:.2%} < min_strength {min_strength:.2%}")
+                # Собираем информацию для ML (даже для отклоненных сигналов)
+                indicators_info = {
+                    "strategy": "ML",
+                    "prediction": "HOLD",
+                    "confidence": round(confidence, 4),
+                    "confidence_pct": confidence_pct,
+                    "strength": strength,
+                    "leverage": leverage,
+                    "has_position": has_position.value if has_position else None,
+                    "rejected_reason": f"confidence_too_low_min_{int(min_strength*100)}%"
+                }
                 return Signal(
-                    row.name, 
-                    Action.HOLD, 
-                    f"ml_сила_слишком_слабая_{strength}_{confidence_pct}%_мин_{int(min_strength*100)}%", 
-                    current_price
+                    timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
+                    action=Action.HOLD, 
+                    reason=f"ml_сила_слишком_слабая_{strength}_{confidence_pct}%_мин_{int(min_strength*100)}%", 
+                    price=current_price,
+                    indicators_info=indicators_info
                 )
             
             # Фильтр стабильности: если есть противоположная позиция, требуем больше уверенности
@@ -1014,11 +1026,23 @@ class MLStrategy:
                 if len(self.signal_history) > self.max_signal_history:
                     self.signal_history.pop(0)
                 
+                # Собираем информацию для ML (даже для HOLD)
+                indicators_info = {
+                    "strategy": "ML",
+                    "prediction": "HOLD",
+                    "confidence": round(confidence, 4),
+                    "confidence_pct": confidence_pct,
+                    "strength": strength,
+                    "leverage": leverage,
+                    "has_position": has_position.value if has_position else None,
+                }
+                
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
                     action=Action.HOLD,
                     reason=reason,
-                    price=current_price
+                    price=current_price,
+                    indicators_info=indicators_info
                 )
         
         except Exception as e:
