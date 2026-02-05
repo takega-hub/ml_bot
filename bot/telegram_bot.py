@@ -247,6 +247,16 @@ class TelegramBot:
                         status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
                     else:
                         status_text += f"Пара: {symbol} | Модель: ❌ Не найдена\n"
+                
+                # Проверяем cooldown для пары
+                cooldown_info = self.state.get_cooldown_info(symbol)
+                if cooldown_info and cooldown_info["active"]:
+                    hours_left = cooldown_info["hours_left"]
+                    if hours_left < 1:
+                        minutes_left = int(hours_left * 60)
+                        status_text += f"   ❄️ Cooldown: {cooldown_info['reason']} | Разморозка через {minutes_left} мин\n"
+                    else:
+                        status_text += f"   ❄️ Cooldown: {cooldown_info['reason']} | Разморозка через {hours_left:.1f} ч\n"
         
         # Overall Stats
         stats = self.state.get_stats()

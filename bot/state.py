@@ -238,6 +238,38 @@ class BotState:
             self.save()
         return False
     
+    def get_cooldown_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Получает информацию о cooldown для символа (если есть)"""
+        should_save = False
+        with self.lock:
+            if symbol not in self.cooldowns:
+                return None
+            
+            cooldown = self.cooldowns[symbol]
+            cooldown_until = datetime.fromisoformat(cooldown.cooldown_until)
+            now = datetime.now()
+            
+            if now < cooldown_until:
+                # Cooldown активен
+                time_left = cooldown_until - now
+                hours_left = time_left.total_seconds() / 3600
+                return {
+                    "active": True,
+                    "cooldown_until": cooldown_until,
+                    "hours_left": hours_left,
+                    "consecutive_losses": cooldown.consecutive_losses,
+                    "reason": cooldown.reason
+                }
+            else:
+                # Cooldown истек, удаляем
+                del self.cooldowns[symbol]
+                should_save = True
+        
+        if should_save:
+            # Сохраняем вне lock, чтобы избежать дедлока
+            self.save()
+        return None
+    
     def set_cooldown(self, symbol: str, consecutive_losses: int, reason: str):
         """Устанавливает cooldown для символа на основе количества убытков подряд"""
         # Определяем длительность cooldown
