@@ -762,6 +762,24 @@ class MLStrategy:
             elif prediction == -1:
                 sl_price, sl_source, sl_level = _calculate_sl_from_levels("SHORT")
 
+            # Проверяем, не слишком ли далеко SL от цены (максимум 3% для защиты от экстремальных уровней)
+            max_sl_distance_pct = 0.03  # 3% максимум
+            if prediction != 0 and sl_price is not None:
+                if prediction == 1:  # LONG
+                    sl_distance_pct = (current_price - sl_price) / current_price
+                    if sl_distance_pct > max_sl_distance_pct:
+                        # SL слишком далеко, используем fallback
+                        sl_price = current_price * (1 - 0.01)  # 1% SL
+                        sl_source = "fallback_max_distance"
+                        sl_level = None
+                else:  # SHORT
+                    sl_distance_pct = (sl_price - current_price) / current_price
+                    if sl_distance_pct > max_sl_distance_pct:
+                        # SL слишком далеко, используем fallback
+                        sl_price = current_price * (1 + 0.01)  # 1% SL
+                        sl_source = "fallback_max_distance"
+                        sl_level = None
+
             # Fallback SL если уровни недоступны
             if prediction != 0 and sl_price is None:
                 fallback_sl_pct = 0.01
