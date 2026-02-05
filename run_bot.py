@@ -127,6 +127,7 @@ async def main():
         # 2. Инициализация состояния
         try:
             state = BotState()
+            state.ensure_known_symbols(settings.symbols)
         except Exception as e:
             logger.error(f"Failed to initialize BotState: {e}", exc_info=True)
             raise

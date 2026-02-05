@@ -371,14 +371,16 @@ class TelegramBot:
             await self.show_dashboard(query)
 
     async def show_pairs_settings(self, query):
-        # Получаем все известные символы (из state и предопределенные)
-        all_possible = list(
-            set(
-                [s for s in (["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"] + self.state.active_symbols)
-                 if isinstance(s, str) and s.endswith("USDT")]
-            )
-        )
-        all_possible.sort()
+        # Получаем все известные символы (из state)
+        all_possible = [
+            s for s in self.state.known_symbols
+            if isinstance(s, str) and s.endswith("USDT")
+        ]
+        # Гарантируем присутствие активных пар
+        for s in self.state.active_symbols:
+            if s not in all_possible:
+                all_possible.append(s)
+        all_possible = sorted(set(all_possible))
         
         keyboard = []
         for s in all_possible:
@@ -573,15 +575,6 @@ class TelegramBot:
                 )
                 return
             
-            # Проверяем, не превышен ли лимит
-            if len(self.state.active_symbols) >= self.state.max_active_symbols:
-                await update.message.reply_text(
-                    f"⚠️ Достигнут лимит в {self.state.max_active_symbols} активных пар!\n"
-                    "Сначала отключите одну из текущих пар.",
-                    reply_markup=self.get_main_keyboard()
-                )
-                return
-            
             # Проверяем, не добавлена ли уже эта пара
             if text in self.state.active_symbols:
                 await update.message.reply_text(
@@ -604,8 +597,35 @@ class TelegramBot:
                     )
                     return
                 
-                # Символ валиден, добавляем в список
-                self.state.toggle_symbol(text)
+                was_known = text in self.state.known_symbols
+                # Символ валиден, добавляем в список известных
+                self.state.add_known_symbol(text)
+                
+                # Включаем пару (если лимит)
+                enable_result = self.state.enable_symbol(text)
+                if enable_result is None:
+                    await update.message.reply_text(
+                        f"⚠️ Пара {text} сохранена, но лимит активных пар достигнут.\n"
+                        "Отключите одну из активных пар и включите эту из списка.",
+                        reply_markup=self.get_main_keyboard()
+                    )
+                    return
+                
+                # Проверяем, есть ли уже модели для пары
+                has_models = False
+                model_path = self.state.symbol_models.get(text)
+                if model_path and Path(model_path).exists():
+                    has_models = True
+                if not has_models:
+                    has_models = bool(self.model_manager.find_models_for_symbol(text))
+                
+                if has_models:
+                    await update.message.reply_text(
+                        f"✅ Пара {text} включена.\n"
+                        "Модели уже существуют — обучение не требуется.",
+                        reply_markup=self.get_main_keyboard()
+                    )
+                    return
                 
                 # Запускаем процесс обучения модели в фоне
                 await update.message.reply_text(

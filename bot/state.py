@@ -48,6 +48,7 @@ class BotState:
         # Default state
         self.is_running: bool = False
         self.active_symbols: List[str] = ["BTCUSDT"]
+        self.known_symbols: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
         self.symbol_models: Dict[str, str] = {}  # symbol -> model_path
         self.max_active_symbols: int = 5
         
@@ -68,11 +69,23 @@ class BotState:
                 data = json.load(f)
                 self.is_running = data.get("is_running", False)
                 self.active_symbols = data.get("active_symbols", ["BTCUSDT"])
+                self.known_symbols = data.get(
+                    "known_symbols",
+                    ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
+                )
                 # Убираем некорректные символы (например, от старых callback конфликтов)
                 self.active_symbols = [
                     s for s in self.active_symbols
                     if isinstance(s, str) and s.endswith("USDT")
                 ]
+                self.known_symbols = [
+                    s for s in self.known_symbols
+                    if isinstance(s, str) and s.endswith("USDT")
+                ]
+                # Гарантируем, что активные пары присутствуют в списке известных
+                for s in self.active_symbols:
+                    if s not in self.known_symbols:
+                        self.known_symbols.append(s)
                 self.symbol_models = data.get("symbol_models", {})
                 
                 # Load trades
@@ -95,6 +108,7 @@ class BotState:
                 data = {
                     "is_running": self.is_running,
                     "active_symbols": self.active_symbols,
+                    "known_symbols": self.known_symbols,
                     "symbol_models": self.symbol_models,
                     "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
                     "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
@@ -123,6 +137,45 @@ class BotState:
                 res = True
         self.save()
         return res
+
+    def ensure_known_symbols(self, symbols: List[str]) -> None:
+        """Объединяет известные пары с указанными и сохраняет."""
+        normalized = [s for s in symbols if isinstance(s, str) and s.endswith("USDT")]
+        changed = False
+        with self.lock:
+            for s in normalized:
+                if s not in self.known_symbols:
+                    self.known_symbols.append(s)
+                    changed = True
+            for s in self.active_symbols:
+                if s not in self.known_symbols:
+                    self.known_symbols.append(s)
+                    changed = True
+        if changed:
+            self.save()
+
+    def add_known_symbol(self, symbol: str) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            if symbol not in self.known_symbols:
+                self.known_symbols.append(symbol)
+                should_save = True
+            else:
+                should_save = False
+        if should_save:
+            self.save()
+
+    def enable_symbol(self, symbol: str) -> bool:
+        """Включает пару, если возможно. True=включена, False=уже включена, None=лимит."""
+        symbol = symbol.upper()
+        with self.lock:
+            if symbol in self.active_symbols:
+                return False
+            if len(self.active_symbols) >= self.max_active_symbols:
+                return None
+            self.active_symbols.append(symbol)
+        self.save()
+        return True
 
     def add_signal(self, symbol: str, action: str, price: float, confidence: float, reason: str, indicators: Dict[str, Any] = None):
         signal = SignalRecord(

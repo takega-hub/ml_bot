@@ -166,26 +166,41 @@ class DataCollector:
 
 
 def main():
-    """Пример использования для сбора данных."""
+    """CLI для сбора данных."""
+    import argparse
     from bot.config import load_settings
+    
+    parser = argparse.ArgumentParser(description="Collect historical klines from Bybit")
+    parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol, e.g. BTCUSDT")
+    parser.add_argument("--interval", type=str, default="15", help="Interval: 15, 60, 240")
+    parser.add_argument("--years", type=int, default=2, help="How many years back to collect")
+    parser.add_argument("--end-date", type=str, default=None, help="End date YYYY-MM-DD (optional)")
+    parser.add_argument("--save", action="store_true", help="Save to CSV")
+    
+    args = parser.parse_args()
     
     settings = load_settings()
     collector = DataCollector(settings.api)
     
-    # Собираем данные для ETH/USDT за последние 6 месяцев
-    symbol = "ETHUSDT"
-    interval = "15"  # 15 минут
+    if args.end_date:
+        end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
+    else:
+        end_date = datetime.now()
+    
+    start_date = end_date - timedelta(days=args.years * 365)
     
     df = collector.collect_klines(
-        symbol=symbol,
-        interval=interval,
-        start_date=None,  # Автоматически 6 месяцев назад
-        end_date=None,    # До текущего момента
+        symbol=args.symbol,
+        interval=args.interval,
+        start_date=start_date,
+        end_date=end_date,
+        save_to_file=args.save,
     )
     
     print(f"\nCollected {len(df)} candles")
-    print(df.head())
-    print(df.tail())
+    if len(df) > 0:
+        print(df.head())
+        print(df.tail())
 
 
 if __name__ == "__main__":
