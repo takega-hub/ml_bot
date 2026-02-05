@@ -52,12 +52,27 @@ def backtest_ppo_v2(
     # Временная среда для размеров
     temp_env = TradingEnvV2(df.iloc[:100], initial_capital=initial_capital, allowed_side=allowed_side)
     state_size = temp_env.get_state_size()
-    action_size = temp_env.get_action_size()
+    action_size_env = temp_env.get_action_size()
     
-    logger.info(f"State size: {state_size}, Action size: {action_size}")
-    
-    # Загрузка модели
+    # Загружаем checkpoint чтобы узнать action_size модели
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+    # Определяем action_size модели из checkpoint
+    if "agent_state_dict" in checkpoint:
+        actor_weight = checkpoint["agent_state_dict"].get("actor.weight")
+        if actor_weight is not None:
+            action_size_model = actor_weight.shape[0]
+        else:
+            action_size_model = action_size_env
+    else:
+        action_size_model = action_size_env
+    
+    # Используем action_size модели (не среды)
+    action_size = action_size_model
+    logger.info(f"State size: {state_size}, Action size (model): {action_size}, Action size (env): {action_size_env}")
+    
+    # Создаём агента с action_size модели
     agent = ActorCritic(state_size=state_size, action_size=action_size)
     trainer = PPOTrainer(agent=agent, device=device)
     

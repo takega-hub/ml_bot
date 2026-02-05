@@ -346,11 +346,13 @@ class TradingLoop:
                 indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
                 signal_tp = signal.take_profit or indicators_info.get('take_profit')
                 signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
+                tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
+                sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
                 logger.info(
                     f"[{symbol}] 🔍 TRADE DECISION: action={signal.action.value}, "
                     f"has_pos={has_pos}, local_pos={local_pos is not None}, "
                     f"signal_side={signal_side}, confidence={confidence:.2%}, "
-                    f"TP={signal_tp:.2f if signal_tp else 'None'}, SL={signal_sl:.2f if signal_sl else 'None'}, "
+                    f"TP={tp_str}, SL={sl_str}, "
                     f"price={current_price:.2f}"
                 )
 
@@ -430,7 +432,9 @@ class TradingLoop:
                 )
                 return
             
-            logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={signal_tp:.2f if signal_tp else 'None'}, SL={signal_sl:.2f if signal_sl else 'None'}")
+            tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
+            sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
+            logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={tp_str}, SL={sl_str}")
             
             # Получаем qtyStep для символа
             qty_step = self.bybit.get_qty_step(symbol)
