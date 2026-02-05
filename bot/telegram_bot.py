@@ -3,6 +3,7 @@ import asyncio
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+    from telegram.error import BadRequest
 except ImportError as e:
     raise ImportError(
         "python-telegram-bot не установлен. Установите его командой: pip install python-telegram-bot\n"
@@ -62,6 +63,17 @@ class TelegramBot:
             await update.message.reply_text("⛔ Доступ запрещен. Ваш ID не в вайтлисте.")
             return False
         return True
+    
+    async def safe_edit_message(self, query, text: str, reply_markup=None):
+        """Безопасное редактирование сообщения с обработкой ошибки 'Message is not modified'"""
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+        except BadRequest as e:
+            # Игнорируем ошибку "Message is not modified" - это нормально, если содержимое не изменилось
+            if "Message is not modified" in str(e):
+                logger.debug(f"Message not modified (non-critical): {e}")
+            else:
+                raise
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.check_auth(update): return
@@ -390,7 +402,7 @@ class TelegramBot:
         keyboard.append([InlineKeyboardButton("➕ Добавить новую пару", callback_data="add_pair")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="status_info")])
         keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-        await query.edit_message_text("⚙️ Настройка активных пар (макс 5):", reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, "⚙️ Настройка активных пар (макс 5):", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_history_menu(self, query):
         keyboard = [

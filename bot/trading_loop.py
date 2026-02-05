@@ -251,12 +251,14 @@ class TradingLoop:
                     last_timestamp = self.last_processed_candle[symbol]
                     if last_timestamp is not None and last_timestamp == candle_timestamp:
                         # Эта свеча уже была обработана, пропускаем
+                        logger.info(f"[{symbol}] ⏭️ Candle already processed: {candle_timestamp}, skipping signal generation")
                         return
                 
                 # Сохраняем timestamp обработанной свечи
                 self.last_processed_candle[symbol] = candle_timestamp
+                logger.debug(f"[{symbol}] ✅ New candle timestamp saved: {candle_timestamp}")
             else:
-                logger.warning(f"[{symbol}] Warning: candle_timestamp is None, proceeding anyway...")
+                logger.warning(f"[{symbol}] ⚠️ Warning: candle_timestamp is None, proceeding anyway...")
                 # Если timestamp None, не сохраняем его, чтобы не блокировать следующие проверки
             
             # Проверяем позицию
@@ -339,6 +341,18 @@ class TradingLoop:
             # 5. Исполнение сделок
             if signal.action in (Action.LONG, Action.SHORT):
                 signal_side = Bias.LONG if signal.action == Action.LONG else Bias.SHORT
+                
+                # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ для диагностики
+                indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+                signal_tp = signal.take_profit or indicators_info.get('take_profit')
+                signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
+                logger.info(
+                    f"[{symbol}] 🔍 TRADE DECISION: action={signal.action.value}, "
+                    f"has_pos={has_pos}, local_pos={local_pos is not None}, "
+                    f"signal_side={signal_side}, confidence={confidence:.2%}, "
+                    f"TP={signal_tp:.2f if signal_tp else 'None'}, SL={signal_sl:.2f if signal_sl else 'None'}, "
+                    f"price={current_price:.2f}"
+                )
 
                 # Если позиция уже есть, решаем: игнорировать реверс или усреднять
                 if has_pos is not None and local_pos:
@@ -381,9 +395,13 @@ class TradingLoop:
 
                 # Открываем позицию, если ее нет или она в другую сторону (для short_term)
                 if signal.action == Action.LONG and has_pos != Bias.LONG:
+                    logger.info(f"[{symbol}] ✅ Opening LONG position (no position or opposite)")
                     await self.execute_trade(symbol, "Buy", signal)
                 elif signal.action == Action.SHORT and has_pos != Bias.SHORT:
+                    logger.info(f"[{symbol}] ✅ Opening SHORT position (no position or opposite)")
                     await self.execute_trade(symbol, "Sell", signal)
+                else:
+                    logger.info(f"[{symbol}] ⏭️ Skipping trade: action={signal.action.value}, has_pos={has_pos}")
 
         except Exception as e:
             logger.error(f"[trading_loop] Error processing {symbol}: {e}")
@@ -397,6 +415,23 @@ class TradingLoop:
         position_horizon: Optional[str] = None,
     ):
         try:
+            logger.info(f"[{symbol}] 🚀 execute_trade() called: side={side}, is_add={is_add}, price={signal.price:.2f}")
+            
+            # Проверяем наличие TP/SL в сигнале (критично для открытия позиции)
+            indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+            signal_tp = signal.take_profit or indicators_info.get('take_profit')
+            signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
+            
+            if not is_add and (not signal_tp or not signal_sl):
+                logger.warning(
+                    f"[{symbol}] ❌ Cannot open position: missing TP/SL! "
+                    f"TP={signal_tp}, SL={signal_sl}, signal.take_profit={signal.take_profit}, "
+                    f"signal.stop_loss={signal.stop_loss}, indicators_info={indicators_info}"
+                )
+                return
+            
+            logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={signal_tp:.2f if signal_tp else 'None'}, SL={signal_sl:.2f if signal_sl else 'None'}")
+            
             # Получаем qtyStep для символа
             qty_step = self.bybit.get_qty_step(symbol)
             
@@ -432,8 +467,10 @@ class TradingLoop:
                                     balance = float(balance_str) if balance_str and balance_str != "" else 0.0
             
             if balance <= 0:
-                logger.error(f"Cannot get balance or balance is zero for {symbol}")
+                logger.error(f"[{symbol}] ❌ Cannot get balance or balance is zero: {balance}")
                 return
+            
+            logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
             
             # РАСЧЕТ 1: margin_pct_balance% от баланса с использованием плеча
             # Маржа = баланс * margin_pct_balance
@@ -473,6 +510,12 @@ class TradingLoop:
             # Форматируем до нужной точности
             qty = float(f"{qty:.{precision}f}")
             
+            if qty <= 0:
+                logger.error(f"[{symbol}] ❌ Calculated qty is zero or negative: {qty}")
+                return
+            
+            logger.info(f"[{symbol}] ✅ Position size calculated: qty={qty:.6f}, placing order...")
+            
             resp = self.bybit.place_order(
                 symbol=symbol,
                 side=side,
@@ -481,6 +524,14 @@ class TradingLoop:
                 take_profit=None if is_add else signal.take_profit,
                 stop_loss=None if is_add else signal.stop_loss,
             )
+            
+            # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ответа от биржи
+            if resp:
+                ret_code = resp.get("retCode") if isinstance(resp, dict) else None
+                ret_msg = resp.get("retMsg", "") if isinstance(resp, dict) else ""
+                logger.info(f"[{symbol}] 📡 Order response: retCode={ret_code}, retMsg={ret_msg}, full_response={resp}")
+            else:
+                logger.error(f"[{symbol}] ❌ Order response is None or empty!")
             
             if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                 if is_add:
@@ -523,9 +574,18 @@ class TradingLoop:
                     )
                     self.state.add_trade(trade)
             else:
-                logger.error(f"Failed to place order: {resp}")
+                ret_code = resp.get("retCode") if resp and isinstance(resp, dict) else "unknown"
+                ret_msg = resp.get("retMsg", "") if resp and isinstance(resp, dict) else ""
+                logger.error(
+                    f"[{symbol}] ❌ Failed to open {side} position: "
+                    f"retCode={ret_code}, retMsg={ret_msg}, "
+                    f"qty={qty:.6f}, price={signal.price:.2f}, "
+                    f"TP={signal.take_profit if not is_add else 'N/A'}, "
+                    f"SL={signal.stop_loss if not is_add else 'N/A'}, "
+                    f"full_response={resp}"
+                )
         except Exception as e:
-            logger.error(f"Error executing trade: {e}")
+            logger.error(f"[{symbol}] ❌ Exception in execute_trade: {e}", exc_info=True)
     
     async def update_breakeven_stop(self, symbol: str, position_info: dict):
         """Перемещает SL в безубыток при достижении порога прибыли"""
