@@ -305,6 +305,15 @@ class TelegramBot:
         elif query.data.startswith("toggle_risk_"):
             setting_name = query.data.replace("toggle_risk_", "")
             await self.toggle_risk_setting(query, setting_name)
+        elif query.data.startswith("remove_cooldown_"):
+            symbol = query.data.replace("remove_cooldown_", "")
+            # Защита от конфликтов
+            if not symbol.endswith("USDT"):
+                await query.answer("⚠️ Некорректный символ", show_alert=True)
+                return
+            self.state.remove_cooldown(symbol)
+            await query.answer(f"✅ Разморозка снята для {symbol}", show_alert=True)
+            await self.show_pairs_settings(query)
         elif query.data.startswith("toggle_"):
             symbol = query.data.split("_", 1)[1]
             # Защита от конфликтов с другими callback_data
@@ -407,7 +416,27 @@ class TelegramBot:
         keyboard = []
         for s in all_possible:
             status = "✅" if s in self.state.active_symbols else "❌"
-            keyboard.append([InlineKeyboardButton(f"{status} {s}", callback_data=f"toggle_{s}")])
+            button_text = f"{status} {s}"
+            
+            # Проверяем, есть ли cooldown для этой пары
+            cooldown_info = self.state.get_cooldown_info(s)
+            if cooldown_info and cooldown_info.get("active"):
+                # Добавляем индикатор cooldown
+                hours_left = cooldown_info.get("hours_left", 0)
+                if hours_left < 1:
+                    minutes_left = int(hours_left * 60)
+                    button_text += f" ❄️({minutes_left}м)"
+                else:
+                    button_text += f" ❄️({hours_left:.1f}ч)"
+            
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"toggle_{s}")])
+            
+            # Если пара в cooldown, добавляем кнопку для снятия разморозки
+            if cooldown_info and cooldown_info.get("active"):
+                keyboard.append([InlineKeyboardButton(
+                    f"🔥 Снять разморозку {s}", 
+                    callback_data=f"remove_cooldown_{s}"
+                )])
         
         keyboard.append([InlineKeyboardButton("➕ Добавить новую пару", callback_data="add_pair")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="status_info")])

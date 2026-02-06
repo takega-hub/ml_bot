@@ -291,6 +291,13 @@ class BotState:
             )
         self.save()
     
+    def remove_cooldown(self, symbol: str):
+        """Удаляет cooldown для символа (ручное снятие разморозки)"""
+        with self.lock:
+            if symbol in self.cooldowns:
+                del self.cooldowns[symbol]
+        self.save()
+    
     def get_consecutive_losses(self, symbol: str) -> int:
         """Получает количество последовательных убытков для символа"""
         with self.lock:

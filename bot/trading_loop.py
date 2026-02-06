@@ -264,11 +264,12 @@ class TradingLoop:
                     if last_timestamp is not None and last_timestamp == candle_timestamp:
                         # Эта свеча уже была обработана, пропускаем
                         logger.info(f"[{symbol}] ⏭️ Candle already processed: {candle_timestamp}, skipping signal generation")
+                        logger.debug(f"[{symbol}] Last processed: {last_timestamp}, Current: {candle_timestamp}")
                         return
                 
-                # Сохраняем timestamp обработанной свечи
-                self.last_processed_candle[symbol] = candle_timestamp
-                logger.debug(f"[{symbol}] ✅ New candle timestamp saved: {candle_timestamp}")
+                # ВАЖНО: НЕ сохраняем timestamp здесь, а только после успешной обработки сигнала
+                # Это позволит повторить обработку при ошибке
+                logger.debug(f"[{symbol}] 📝 New candle detected: {candle_timestamp} (will save after successful processing)")
             else:
                 logger.warning(f"[{symbol}] ⚠️ Warning: candle_timestamp is None, proceeding anyway...")
                 # Если timestamp None, не сохраняем его, чтобы не блокировать следующие проверки
@@ -416,9 +417,16 @@ class TradingLoop:
                     await self.execute_trade(symbol, "Sell", signal)
                 else:
                     logger.info(f"[{symbol}] ⏭️ Skipping trade: action={signal.action.value}, has_pos={has_pos}")
+            
+            # Сохраняем timestamp обработанной свечи ТОЛЬКО после успешной обработки сигнала
+            # Это позволяет повторить обработку, если произошла ошибка при открытии позиции
+            if candle_timestamp is not None:
+                self.last_processed_candle[symbol] = candle_timestamp
+                logger.debug(f"[{symbol}] ✅ Candle timestamp saved after successful processing: {candle_timestamp}")
 
         except Exception as e:
             logger.error(f"[trading_loop] Error processing {symbol}: {e}")
+            # При ошибке НЕ сохраняем timestamp, чтобы можно было повторить обработку
 
     async def execute_trade(
         self,
