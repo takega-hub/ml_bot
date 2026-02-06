@@ -238,10 +238,10 @@ class MLBacktestSimulator:
         else:
             # HOLD сигналы не должны иметь TP/SL - это нормально
             if signal.action != Action.HOLD:
-            self.signal_stats.signals_without_tp_sl += 1
+                self.signal_stats.signals_without_tp_sl += 1
                 # Логируем только первые 3 LONG/SHORT сигнала без TP/SL
-            if self.signal_stats.signals_without_tp_sl <= 3:
-                print(f"❌ Сигнал БЕЗ TP/SL: {signal.action.value} @ {current_price:.2f}")
+                if self.signal_stats.signals_without_tp_sl <= 3:
+                    print(f"❌ Сигнал БЕЗ TP/SL: {signal.action.value} @ {current_price:.2f}")
                 print(f"   Причина: {signal.reason}")
         
         # Записываем в историю
