@@ -254,45 +254,44 @@ class MLBacktestSimulator:
             'confidence': signal.indicators_info.get('confidence', 0) if signal.indicators_info else 0
         })
     
-    def calculate_position_size(self, entry_price: float, stop_loss: float, action: Action) -> Tuple[float, float]:
+    def calculate_position_size(self, entry_price: float, stop_loss: float, action: Action, 
+                               margin_pct_balance: float = 0.20, base_order_usd: float = 50.0) -> Tuple[float, float]:
         """
         Рассчитывает размер позиции ТОЧНО как реальный бот.
         
-        Реальный бот использует stop_loss из сигнала, даже если он не 1%!
+        Реальный бот использует:
+        1. margin_pct_balance% от баланса (по умолчанию 20%)
+        2. Фиксированную сумму base_order_usd (по умолчанию $50)
+        3. Берет минимум из двух вариантов
         """
-        # Рассчитываем риск на единицу
-        if action == Action.LONG:
-            risk_per_unit = abs(entry_price - stop_loss)
-        else:  # SHORT
-            risk_per_unit = abs(stop_loss - entry_price)
+        # РАСЧЕТ 1: margin_pct_balance% от баланса с использованием плеча
+        # Маржа = баланс * margin_pct_balance
+        # Количество = (маржа * leverage) / цена
+        margin_from_percentage = self.balance * margin_pct_balance
+        qty_from_percentage = (margin_from_percentage * self.leverage) / entry_price
         
-        if risk_per_unit <= 0:
-            print(f"⚠️  Нулевой или отрицательный риск: entry={entry_price}, SL={stop_loss}")
-            return 0.0, 0.0
+        # РАСЧЕТ 2: Фиксированная сумма
+        # Количество = base_order_usd / цена
+        qty_from_fixed = base_order_usd / entry_price
         
-        # Риск в процентах (реальный бот так считает)
-        risk_pct = risk_per_unit / entry_price
+        # Используем минимум из двух вариантов (как реальный бот)
+        total_qty = min(qty_from_percentage, qty_from_fixed)
         
-        # Сумма риска на сделку
-        risk_amount = self.balance * self.risk_per_trade
-        
-        # Размер позиции в USD
-        position_size = risk_amount / risk_pct
-        
-        # Максимальный размер позиции
-        max_position = self.balance * self.max_position_size_pct * self.leverage
-        position_size = min(position_size, max_position)
+        # Размер позиции в USD (notional value)
+        position_size_usd = total_qty * entry_price
         
         # Требуемая маржа
-        margin_required = position_size / self.leverage
+        margin_required = position_size_usd / self.leverage
         
-        # Проверяем маржу
+        # Проверяем, что маржа не превышает баланс
         if margin_required > self.balance:
-            # Реальный бот уменьшит размер позиции
-            position_size = self.balance * self.leverage
-            margin_required = self.balance
+            # Если маржа больше баланса, уменьшаем размер позиции
+            # Максимальная маржа = баланс
+            max_margin = self.balance
+            position_size_usd = max_margin * self.leverage
+            margin_required = max_margin
         
-        return position_size, margin_required
+        return position_size_usd, margin_required
     
     def open_position(self, signal: Signal, current_time: datetime, symbol: str) -> bool:
         """
@@ -322,9 +321,15 @@ class MLBacktestSimulator:
             print(f"   Причина: {signal.reason}")
             return False
         
-        # 4. Рассчитываем размер позиции (с реальными TP/SL из сигнала)
+        # 4. Рассчитываем размер позиции (ТОЧНО как реальный бот)
+        # Используем настройки из settings (если доступны) или значения по умолчанию
+        margin_pct_balance = getattr(self, '_margin_pct_balance', 0.20)
+        base_order_usd = getattr(self, '_base_order_usd', 50.0)
+        
         position_size_usd, margin_required = self.calculate_position_size(
-            signal.price, stop_loss, signal.action
+            signal.price, stop_loss, signal.action,
+            margin_pct_balance=margin_pct_balance,
+            base_order_usd=base_order_usd
         )
         
         if position_size_usd <= 0 or margin_required > self.balance:
@@ -804,6 +809,10 @@ def run_exact_backtest(
         leverage=leverage,
         max_position_hours=48.0,
     )
+    
+    # Передаем настройки размера позиции в симулятор (как в реальном боте)
+    simulator._margin_pct_balance = settings.risk.margin_pct_balance  # 20% от баланса
+    simulator._base_order_usd = settings.risk.base_order_usd  # $50 фиксированная сумма
     
     # Запускаем бэктест
     print(f"\n📈 Запуск точного бэктеста...")
