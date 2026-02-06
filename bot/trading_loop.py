@@ -92,12 +92,18 @@ class TradingLoop:
             raise
         logger.info("Position Monitoring Loop: Initial delay completed, starting main loop...")
         
+        cycle_count = 0
         while True:
             try:
                 if not self.state.is_running:
                     logger.debug("Bot is not running, waiting...")
                     await asyncio.sleep(10)
                     continue
+                
+                cycle_count += 1
+                # Логируем каждые 10 циклов (примерно каждые 4 минуты), чтобы видеть, что цикл работает
+                if cycle_count % 10 == 0:
+                    logger.info(f"📊 Position Monitoring Loop: Cycle {cycle_count} (checking positions every 25s)")
                 
                 # ОПТИМИЗАЦИЯ: получаем ВСЕ позиции одним запросом вместо отдельных для каждого символа
                 # Это значительно снижает количество API запросов и предотвращает rate limit ошибки
@@ -117,6 +123,11 @@ class TradingLoop:
                         result = all_positions.get("result")
                         if result and isinstance(result, dict):
                             list_data = result.get("list", [])
+                            
+                            # Логируем начало цикла мониторинга позиций
+                            open_count = sum(1 for pos in list_data if pos and isinstance(pos, dict) and float(pos.get("size", 0)) > 0)
+                            if open_count > 0:
+                                logger.info(f"📊 Position Monitoring: Checking {open_count} open position(s)...")
                             
                             # Создаем словарь позиций по символам для быстрого доступа
                             positions_by_symbol = {}
@@ -168,6 +179,7 @@ class TradingLoop:
                 # Проверяем позиции каждые 25 секунд (увеличено с 15 для снижения нагрузки на API)
                 logger.debug("Position monitoring cycle completed, sleeping for 25 seconds...")
                 await asyncio.sleep(25)
+                logger.debug("Position Monitoring Loop: Woke up from sleep, starting next cycle...")
             
             except Exception as e:
                 logger.error(f"[trading_loop] Error in position monitoring loop: {e}")

@@ -837,19 +837,23 @@ class TelegramBot:
                 model_name = model_path.stem
                 await self.send_notification(f"🧪 Тестирую {model_name}...")
                 
-                results = self.model_manager.test_model(model_path, symbol, days=14)
-                
-                if results:
-                    self.model_manager.save_model_test_result(symbol, str(model_path), results)
-                    tested += 1
-                    await self.send_notification(
-                        f"✅ {model_name}:\n"
-                        f"PnL: {results['total_pnl_pct']:+.2f}% | "
-                        f"WR: {results['win_rate']:.1f}% | "
-                        f"Сделок: {results['total_trades']} ({results['trades_per_day']:.1f}/день)"
-                    )
-                else:
-                    await self.send_notification(f"❌ Ошибка при тестировании {model_name}")
+                try:
+                    results = self.model_manager.test_model(model_path, symbol, days=14)
+                    
+                    if results:
+                        self.model_manager.save_model_test_result(symbol, str(model_path), results)
+                        tested += 1
+                        await self.send_notification(
+                            f"✅ {model_name}:\n"
+                            f"PnL: {results['total_pnl_pct']:+.2f}% | "
+                            f"WR: {results['win_rate']:.1f}% | "
+                            f"Сделок: {results['total_trades']} ({results['trades_per_day']:.1f}/день)"
+                        )
+                    else:
+                        await self.send_notification(f"❌ Ошибка при тестировании {model_name}\n(проверьте логи для деталей)")
+                except Exception as e:
+                    logger.error(f"Error testing {model_name}: {e}", exc_info=True)
+                    await self.send_notification(f"❌ Ошибка при тестировании {model_name}:\n{str(e)[:200]}")
             
             await self.send_notification(
                 f"✅ Тестирование завершено!\n"

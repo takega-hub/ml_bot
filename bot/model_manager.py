@@ -100,8 +100,14 @@ class ModelManager:
 
     def test_model(self, model_path: str, symbol: str, days: int = 14) -> Optional[Dict[str, Any]]:
         """Тестирует модель на исторических данных и возвращает метрики"""
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        
         try:
             from backtest_ml_strategy import run_exact_backtest
+            
+            logger.info(f"[test_model] Starting backtest for {model_path} on {symbol} ({days} days)")
             
             metrics = run_exact_backtest(
                 model_path=str(model_path),
@@ -114,6 +120,7 @@ class ModelManager:
             )
             
             if metrics:
+                logger.info(f"[test_model] Backtest completed successfully for {model_path}")
                 return {
                     "total_pnl_pct": metrics.total_pnl_pct,
                     "win_rate": metrics.win_rate,
@@ -123,10 +130,17 @@ class ModelManager:
                     "max_drawdown_pct": metrics.max_drawdown_pct,
                     "sharpe_ratio": metrics.sharpe_ratio,
                 }
+            else:
+                logger.warning(f"[test_model] Backtest returned None for {model_path}")
+                return None
         except Exception as e:
-            print(f"[model_manager] Error testing model {model_path}: {e}")
+            error_msg = str(e)
+            error_traceback = traceback.format_exc()
+            logger.error(f"[model_manager] Error testing model {model_path}: {error_msg}")
+            logger.error(f"[model_manager] Traceback: {error_traceback}")
+            print(f"[model_manager] Error testing model {model_path}: {error_msg}")
+            print(f"[model_manager] Traceback: {error_traceback}")
             return None
-        return None
 
     def get_model_test_results(self, symbol: str) -> Dict[str, Dict[str, Any]]:
         """Получает сохраненные результаты тестов для всех моделей символа"""
