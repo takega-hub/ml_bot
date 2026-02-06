@@ -160,26 +160,209 @@ class FeatureEngineer:
         
         # === 5. ВЗАИМОДЕЙСТВИЯ ИНДИКАТОРОВ ===
         
-        # RSI уровни
-        df["rsi_oversold"] = (df["rsi"] < 30).astype(int)
-        df["rsi_overbought"] = (df["rsi"] > 70).astype(int)
+        # RSI уровни (очищаем от None перед сравнением)
+        rsi_clean = pd.to_numeric(df["rsi"], errors='coerce').fillna(50.0)
+        df["rsi_oversold"] = (rsi_clean < 30).astype(int)
+        df["rsi_overbought"] = (rsi_clean > 70).astype(int)
         
-        # Тренд по MA
-        df["ema12_above_ema26"] = (df["ema_12"] > df["ema_26"]).astype(int)
+        # Тренд по MA (очищаем от None перед сравнением)
+        ema12_clean = pd.to_numeric(df["ema_12"], errors='coerce').fillna(0.0)
+        ema26_clean = pd.to_numeric(df["ema_26"], errors='coerce').fillna(0.0)
+        df["ema12_above_ema26"] = (ema12_clean > ema26_clean).astype(int)
         
-        # ББ положение
+        # ББ положение (очищаем от None перед сравнением)
         if all(col in df.columns for col in ["bb_upper", "bb_lower", "close"]):
-            df["bb_position"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"]).replace(0, 1)
-            df["near_bb_upper"] = (df["close"] > df["bb_upper"] * 0.95).astype(int)
-            df["near_bb_lower"] = (df["close"] < df["bb_lower"] * 1.05).astype(int)
+            bb_upper_clean = pd.to_numeric(df["bb_upper"], errors='coerce').fillna(df["close"])
+            bb_lower_clean = pd.to_numeric(df["bb_lower"], errors='coerce').fillna(df["close"])
+            close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
+            
+            bb_range = (bb_upper_clean - bb_lower_clean).replace(0, 1)
+            df["bb_position"] = (close_clean - bb_lower_clean) / bb_range
+            df["near_bb_upper"] = (close_clean > bb_upper_clean * 0.95).astype(int)
+            df["near_bb_lower"] = (close_clean < bb_lower_clean * 1.05).astype(int)
         
-        # === 6. ОБРАБОТКА NaN ===
+        # === 6. НОВЫЕ ФИЧИ: ВОЛАТИЛЬНОСТЬ ===
+        
+        # Realized volatility (rolling std returns)
+        df["realized_volatility_10"] = df["price_change"].rolling(window=10, min_periods=3).std()
+        df["realized_volatility_20"] = df["price_change"].rolling(window=20, min_periods=5).std()
+        
+        # Parkinson volatility (high-low based)
+        df["parkinson_vol"] = np.sqrt((1 / (4 * np.log(2))) * (np.log(df["high"] / df["low"])) ** 2)
+        df["parkinson_vol_pct"] = (df["parkinson_vol"] / df["close"]) * 100
+        
+        # Volatility ratio (short-term / long-term)
+        vol10_clean = pd.to_numeric(df["realized_volatility_10"], errors='coerce').fillna(0.0)
+        vol20_clean = pd.to_numeric(df["realized_volatility_20"], errors='coerce').fillna(0.0)
+        df["volatility_ratio"] = np.where(
+            vol20_clean > 0,
+            vol10_clean / vol20_clean,
+            1.0
+        )
+        
+        # === 7. НОВЫЕ ФИЧИ: МИКРОСТРУКТУРА РЫНКА ===
+        
+        # Bid-ask spread proxy (high - low) / close
+        df["spread_proxy"] = ((df["high"] - df["low"]) / df["close"]) * 100
+        
+        # Volume imbalance за последние N свечей
+        for window in [5, 10]:
+            df[f"volume_imbalance_{window}"] = (
+                df["volume"].rolling(window=window, min_periods=2).apply(
+                    lambda x: (x.iloc[-1] - x.mean()) / x.mean() if x.mean() > 0 else 0
+                )
+            )
+        
+        # Price momentum на разных таймфреймах
+        for period in [3, 5, 10]:
+            df[f"momentum_{period}"] = df["close"].pct_change(periods=period)
+        
+        # === 8. НОВЫЕ ФИЧИ: ТРЕНДОВЫЕ ===
+        
+        # ADX + DI направление (если доступно)
+        try:
+            # Сначала убеждаемся, что входные данные не содержат None
+            high_clean = df["high"].fillna(0.0).replace([None], 0.0)
+            low_clean = df["low"].fillna(0.0).replace([None], 0.0)
+            close_clean = df["close"].fillna(0.0).replace([None], 0.0)
+            
+            adx_full = ta.adx(high_clean, low_clean, close_clean, length=14)
+            if adx_full is not None and len(adx_full.columns) >= 3:
+                di_plus_raw = adx_full.iloc[:, 1] if len(adx_full.columns) > 1 else pd.Series([0.0] * len(df), index=df.index)
+                di_minus_raw = adx_full.iloc[:, 2] if len(adx_full.columns) > 2 else pd.Series([0.0] * len(df), index=df.index)
+                
+                # Заполняем и NaN, и None перед сравнением
+                df["di_plus"] = di_plus_raw.fillna(0.0).replace([None], 0.0)
+                df["di_minus"] = di_minus_raw.fillna(0.0).replace([None], 0.0)
+                
+                # Убеждаемся, что это числовые значения (не None)
+                df["di_plus"] = pd.to_numeric(df["di_plus"], errors='coerce').fillna(0.0)
+                df["di_minus"] = pd.to_numeric(df["di_minus"], errors='coerce').fillna(0.0)
+                
+                # Теперь безопасное сравнение
+                df["adx_trend_up"] = (df["di_plus"] > df["di_minus"]).astype(int)
+            else:
+                df["di_plus"] = 0.0
+                df["di_minus"] = 0.0
+                df["adx_trend_up"] = 0
+        except Exception as e:
+            print(f"[WARNING] Ошибка при создании ADX фичей: {e}")
+            df["di_plus"] = 0.0
+            df["di_minus"] = 0.0
+            df["adx_trend_up"] = 0
+        
+        # === 9. НОВЫЕ ФИЧИ: ПАТТЕРНЫ СВЕЧЕЙ ===
+        
+        # ВАЖНО: Очищаем OHLCV от None перед вычислениями
+        for col in ['open', 'high', 'low', 'close']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).replace([None], 0.0)
+        
+        # Body и wick размеры
+        df["body_size"] = abs(df["close"] - df["open"]).fillna(0.0)
+        df["upper_wick"] = (df["high"] - df[["open", "close"]].max(axis=1)).fillna(0.0)
+        df["lower_wick"] = (df[["open", "close"]].min(axis=1) - df["low"]).fillna(0.0)
+        df["total_range"] = (df["high"] - df["low"]).fillna(0.0)
+        
+        # Защита от деления на ноль
+        df["total_range"] = df["total_range"].replace(0.0, 1.0)  # Минимум 1.0 для избежания деления на 0
+        
+        # Body/wick ratio
+        wick_sum = (df["upper_wick"] + df["lower_wick"]).fillna(0.0)
+        df["body_wick_ratio"] = np.where(
+            wick_sum > 0,
+            df["body_size"] / wick_sum,
+            0.0
+        )
+        
+        # Doji (body < 20% от range)
+        range_ratio = (df["body_size"] / df["total_range"]).fillna(0.0)
+        df["is_doji"] = (range_ratio < 0.2).astype(int)
+        
+        # Hammer (маленький body, длинная нижняя тень, короткая верхняя)
+        body_size_clean = df["body_size"].fillna(0.0)
+        lower_wick_clean = df["lower_wick"].fillna(0.0)
+        upper_wick_clean = df["upper_wick"].fillna(0.0)
+        df["is_hammer"] = (
+            (range_ratio < 0.3) &
+            (lower_wick_clean > body_size_clean * 2) &
+            (upper_wick_clean < body_size_clean)
+        ).astype(int)
+        
+        # Shooting Star (маленький body, длинная верхняя тень, короткая нижняя)
+        df["is_shooting_star"] = (
+            (range_ratio < 0.3) &
+            (upper_wick_clean > body_size_clean * 2) &
+            (lower_wick_clean < body_size_clean)
+        ).astype(int)
+        
+        # Bullish/Bearish Engulfing
+        close_clean = df["close"].fillna(0.0)
+        open_clean = df["open"].fillna(0.0)
+        close_prev = df["close"].shift(1).fillna(0.0)
+        open_prev = df["open"].shift(1).fillna(0.0)
+        
+        df["is_bullish_engulfing"] = (
+            (close_clean > open_clean) &  # Текущая свеча бычья
+            (close_prev < open_prev) &  # Предыдущая медвежья
+            (open_clean < close_prev) &  # Текущий open ниже предыдущего close
+            (close_clean > open_prev)  # Текущий close выше предыдущего open
+        ).astype(int)
+        
+        df["is_bearish_engulfing"] = (
+            (close_clean < open_clean) &  # Текущая свеча медвежья
+            (close_prev > open_prev) &  # Предыдущая бычья
+            (open_clean > close_prev) &  # Текущий open выше предыдущего close
+            (close_clean < open_prev)  # Текущий close ниже предыдущего open
+        ).astype(int)
+        
+        # === 10. НОВЫЕ ФИЧИ: УРОВНИ ПОДДЕРЖКИ/СОПРОТИВЛЕНИЯ ===
+        
+        # Расстояние до nearest S/R level (упрощенная версия)
+        # Используем локальные минимумы/максимумы как S/R
+        lookback = 20
+        df["local_low"] = df["low"].rolling(window=lookback, min_periods=5).min()
+        df["local_high"] = df["high"].rolling(window=lookback, min_periods=5).max()
+        
+        # Расстояние до поддержки (в %)
+        local_low_clean = pd.to_numeric(df["local_low"], errors='coerce').fillna(0.0)
+        close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
+        df["dist_to_support_pct"] = np.where(
+            (local_low_clean > 0) & (close_clean > 0),
+            ((close_clean - local_low_clean) / close_clean) * 100,
+            0.0
+        )
+        
+        # Расстояние до сопротивления (в %)
+        local_high_clean = pd.to_numeric(df["local_high"], errors='coerce').fillna(0.0)
+        df["dist_to_resistance_pct"] = np.where(
+            (local_high_clean > 0) & (close_clean > 0),
+            ((local_high_clean - close_clean) / close_clean) * 100,
+            0.0
+        )
+        
+        # Расстояние до S/R в ATR
+        atr_clean = pd.to_numeric(df["atr"], errors='coerce').fillna(0.0)
+        df["dist_to_support_atr"] = np.where(
+            atr_clean > 0,
+            (close_clean - local_low_clean) / atr_clean,
+            0.0
+        )
+        df["dist_to_resistance_atr"] = np.where(
+            atr_clean > 0,
+            (local_high_clean - close_clean) / atr_clean,
+            0.0
+        )
+        
+        # === 11. ОБРАБОТКА NaN ===
         
         # Сначала forward fill, потом backward fill
         df = df.ffill().bfill()
         
-        # Заполняем оставшиеся NaN нулями
-        df = df.fillna(0)
+        # Заполняем оставшиеся NaN нулями (с явным указанием downcast=None для избежания предупреждений)
+        df = df.fillna(0, downcast=None)
+        # Восстанавливаем типы после fillna
+        df = df.infer_objects(copy=False)
         
         # Удаляем строки где основные цены NaN
         price_cols = ["open", "high", "low", "close"]
@@ -189,7 +372,11 @@ class FeatureEngineer:
         original_cols = ["open", "high", "low", "close", "volume", "timestamp"]
         self.feature_names = [col for col in df.columns if col not in original_cols]
         
-        print(f"[INFO] Создано {len(self.feature_names)} фичей")
+        # Логирование отключено для производительности (вызывается тысячи раз в бэктесте)
+        # Раскомментируйте для отладки:
+        # if not hasattr(self, '_features_logged'):
+        #     print(f"[INFO] Создано {len(self.feature_names)} фичей (включая новые: волатильность, микроструктура, паттерны, S/R)")
+        #     self._features_logged = True
         
         return df
     
@@ -215,26 +402,58 @@ class FeatureEngineer:
             
             try:
                 # Вычисляем фичи для HTF
+                # ВАЖНО: Сначала проверяем и очищаем входные данные от None
+                htf_df_clean = htf_df.copy()
+                # Заполняем все None/NaN в OHLCV перед созданием фичей
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    if col in htf_df_clean.columns:
+                        htf_df_clean[col] = htf_df_clean[col].fillna(0.0)
+                        # Заменяем None на 0.0
+                        htf_df_clean[col] = htf_df_clean[col].replace([None], 0.0)
+                
                 fe_htf = FeatureEngineer()
-                htf_with_features = fe_htf.create_technical_indicators(htf_df)
+                htf_with_features = fe_htf.create_technical_indicators(htf_df_clean)
                 
                 if htf_with_features is None or htf_with_features.empty:
                     continue
+                
+                # Дополнительная очистка: заменяем все None на 0.0 во всех колонках
+                htf_with_features = htf_with_features.fillna(0.0)
+                for col in htf_with_features.columns:
+                    htf_with_features[col] = htf_with_features[col].replace([None], 0.0)
                 
                 # Выбираем нужные фичи
                 for feature in mtf_features:
                     if feature in htf_with_features.columns:
                         col_name = f"{feature}_{tf_name}"
-                        htf_series = htf_with_features[feature]
+                        htf_series = htf_with_features[feature].copy()
+                        
+                        # Заполняем NaN перед использованием
+                        htf_series = htf_series.fillna(0.0)
                         
                         # Ресемплируем на базовый ТФ
                         if isinstance(df.index, pd.DatetimeIndex) and isinstance(htf_series.index, pd.DatetimeIndex):
                             # Переиндексируем с forward fill
-                            htf_aligned = htf_series.reindex(df.index, method='ffill')
-                            df[col_name] = htf_aligned
+                            try:
+                                htf_aligned = htf_series.reindex(df.index, method='ffill')
+                                # Заполняем оставшиеся NaN
+                                htf_aligned = htf_aligned.fillna(0.0)
+                                df[col_name] = htf_aligned
+                            except Exception as e:
+                                print(f"[WARNING] Ошибка при реиндексации {col_name}: {e}")
+                                # Fallback: просто заполняем нулями
+                                df[col_name] = 0.0
                         else:
                             # Просто берем значения
-                            df[col_name] = htf_series.values[:len(df)] if len(htf_series) >= len(df) else 0
+                            if len(htf_series) >= len(df):
+                                df[col_name] = htf_series.values[:len(df)]
+                            else:
+                                # Дополняем нулями если не хватает данных
+                                values = list(htf_series.values) + [0.0] * (len(df) - len(htf_series))
+                                df[col_name] = values[:len(df)]
+                        
+                        # Заполняем финальные NaN
+                        df[col_name] = df[col_name].fillna(0.0)
                         
                         if col_name not in self.feature_names:
                             self.feature_names.append(col_name)
@@ -243,8 +462,9 @@ class FeatureEngineer:
                 print(f"[WARNING] Ошибка при добавлении MTF фичей для {tf_name}: {e}")
                 continue
         
-        # Заполняем NaN
-        df = df.ffill().bfill().fillna(0)
+        # Заполняем NaN (с явным указанием downcast=None для избежания предупреждений)
+        df = df.ffill().bfill().fillna(0, downcast=None)
+        df = df.infer_objects(copy=False)
         
         return df
     

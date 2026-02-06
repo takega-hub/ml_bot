@@ -944,6 +944,17 @@ def run_exact_backtest(
     print(f"   Средний SL в сигналах: {metrics.avg_sl_distance_pct:.2f}%")
     print(f"   Средний TP в сигналах: {metrics.avg_tp_distance_pct:.2f}%")
     print(f"   Средний R/R: {metrics.avg_rr_ratio:.2f}")
+
+    # ТОП причин сигналов (особенно полезно при отсутствии сделок)
+    if simulator.signal_stats.reasons:
+        print(f"\n🧾 ТОП причин сигналов:")
+        top_reasons = sorted(
+            simulator.signal_stats.reasons.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:10]
+        for reason, count in top_reasons:
+            print(f"   {count:4d}x - {reason}")
     
     print(f"\n📊 Размер позиций:")
     print(f"   Средний размер: ${metrics.avg_position_size_usd:.2f}")

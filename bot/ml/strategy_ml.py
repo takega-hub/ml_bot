@@ -397,6 +397,35 @@ class MLStrategy:
                     logger.error(f"[ml_strategy]   Error: {e}")
                     raise
                 raise
+
+            # Добавляем MTF фичи, если включено
+            import os
+            ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
+            ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
+            if ml_mtf_enabled and isinstance(df_work.index, pd.DatetimeIndex):
+                try:
+                    ohlcv_agg = {
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                    }
+                    df_1h = df_work.resample("60min").agg(ohlcv_agg).dropna()
+                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
+                    higher_timeframes = {}
+                    if not df_1h.empty:
+                        higher_timeframes["60"] = df_1h
+                    if not df_4h.empty:
+                        higher_timeframes["240"] = df_4h
+                    if higher_timeframes:
+                        df_with_features = self.feature_engineer.add_mtf_features(
+                            df_with_features,
+                            higher_timeframes,
+                        )
+                        logger.debug(f"[ml_strategy] MTF features enabled in prepare_features_with_df. Columns: {len(df_with_features.columns)}")
+                except Exception as mtf_err:
+                    logger.warning(f"[ml_strategy] Warning: failed to add MTF features in prepare_features_with_df: {mtf_err}")
         
         # Проверяем, что есть хотя бы основные данные (OHLCV)
         key_columns = ["open", "high", "low", "close", "volume"]
@@ -679,6 +708,53 @@ class MLStrategy:
             # ВАЖНО: НЕ пропускаем создание фичей, чтобы индикаторы обновлялись для новых свечей
             prediction, confidence = self.predict(df, skip_feature_creation=False)
             
+            # === ДИНАМИЧЕСКИЙ CONFIDENCE THRESHOLD ===
+            # Адаптируем порог на основе рыночных условий
+            effective_threshold = self.confidence_threshold
+            
+            if self.use_dynamic_threshold and prediction != 0:
+                # Получаем рыночные индикаторы
+                atr_pct = row.get("atr_pct", np.nan)
+                adx = row.get("adx", np.nan)
+                
+                # Адаптация на основе волатильности (ATR)
+                if np.isfinite(atr_pct):
+                    # Высокая волатильность = выше порог (больше шума)
+                    # Низкая волатильность = ниже порог (меньше шума)
+                    if atr_pct > 1.5:  # Высокая волатильность
+                        effective_threshold = self.confidence_threshold * 1.2
+                    elif atr_pct < 0.5:  # Низкая волатильность
+                        effective_threshold = self.confidence_threshold * 0.9
+                
+                # Адаптация на основе силы тренда (ADX)
+                if np.isfinite(adx):
+                    # Слабый тренд (ADX < 20) = выше порог (меньше уверенности)
+                    # Сильный тренд (ADX > 25) = ниже порог (больше уверенности)
+                    if adx < 20:  # Слабый тренд
+                        effective_threshold = max(effective_threshold, self.confidence_threshold * 1.15)
+                    elif adx > 25:  # Сильный тренд
+                        effective_threshold = min(effective_threshold, self.confidence_threshold * 0.95)
+                
+                # Ограничиваем диапазон (0.3 - 0.8)
+                effective_threshold = max(0.3, min(0.8, effective_threshold))
+            
+            # Применяем динамический порог
+            if prediction != 0 and confidence < effective_threshold:
+                # Сигнал отклонен из-за низкой уверенности (с учетом динамического порога)
+                return Signal(
+                    timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
+                    action=Action.HOLD,
+                    reason=f"ml_низкая_уверенность_{int(confidence*100)}%_порог_{int(effective_threshold*100)}%",
+                    price=current_price,
+                    indicators_info={
+                        "strategy": "ML",
+                        "prediction": "HOLD",
+                        "confidence": round(confidence, 4),
+                        "threshold": round(effective_threshold, 4),
+                        "rejected_reason": "dynamic_threshold"
+                    }
+                )
+            
             # === РАСЧЕТ SL ОТ УРОВНЕЙ + TP ПО RR 2-3:1 ===
             sl_price = None
             tp_price = None
@@ -757,35 +833,36 @@ class MLStrategy:
 
                 return sl, level_name, level_price
 
+            # КРИТИЧНО: ВСЕГДА используем SL=1% (строгое требование)
+            # Уровни S/R используем только для информации, но не для расчета SL
             if prediction == 1:
-                sl_price, sl_source, sl_level = _calculate_sl_from_levels("LONG")
-            elif prediction == -1:
-                sl_price, sl_source, sl_level = _calculate_sl_from_levels("SHORT")
-
-            # Проверяем, не слишком ли далеко SL от цены (максимум 3% для защиты от экстремальных уровней)
-            max_sl_distance_pct = 0.03  # 3% максимум
-            if prediction != 0 and sl_price is not None:
-                if prediction == 1:  # LONG
-                    sl_distance_pct = (current_price - sl_price) / current_price
-                    if sl_distance_pct > max_sl_distance_pct:
-                        # SL слишком далеко, используем fallback
-                        sl_price = current_price * (1 - 0.01)  # 1% SL
-                        sl_source = "fallback_max_distance"
-                        sl_level = None
-                else:  # SHORT
-                    sl_distance_pct = (sl_price - current_price) / current_price
-                    if sl_distance_pct > max_sl_distance_pct:
-                        # SL слишком далеко, используем fallback
-                        sl_price = current_price * (1 + 0.01)  # 1% SL
-                        sl_source = "fallback_max_distance"
-                        sl_level = None
-
-            # Fallback SL если уровни недоступны
-            if prediction != 0 and sl_price is None:
-                fallback_sl_pct = 0.01
-                sl_price = current_price * (1 - fallback_sl_pct) if prediction == 1 else current_price * (1 + fallback_sl_pct)
-                sl_source = "fallback_1pct"
+                # LONG: SL = цена * 0.99 (строго 1% ниже)
+                sl_price = current_price * 0.99
+                sl_source = "fixed_1pct"
                 sl_level = None
+            elif prediction == -1:
+                # SHORT: SL = цена * 1.01 (строго 1% выше)
+                sl_price = current_price * 1.01
+                sl_source = "fixed_1pct"
+                sl_level = None
+            
+            # Опционально: проверяем уровни S/R для валидации (но не используем для SL)
+            if prediction != 0:
+                sl_from_levels, _, _ = _calculate_sl_from_levels("LONG" if prediction == 1 else "SHORT")
+                if sl_from_levels is not None:
+                    # Проверяем, близок ли SL от уровней к 1% (в пределах ±0.2%)
+                    if prediction == 1:
+                        sl_distance_from_levels = (current_price - sl_from_levels) / current_price
+                        if 0.008 <= sl_distance_from_levels <= 0.012:  # 0.8% - 1.2%
+                            # SL от уровней близок к 1%, можно использовать его (но это опционально)
+                            # Для строгости оставляем фиксированный 1%
+                            pass
+                    else:  # SHORT
+                        sl_distance_from_levels = (sl_from_levels - current_price) / current_price
+                        if 0.008 <= sl_distance_from_levels <= 0.012:  # 0.8% - 1.2%
+                            # SL от уровней близок к 1%, можно использовать его (но это опционально)
+                            # Для строгости оставляем фиксированный 1%
+                            pass
 
             # RR 2-3:1 (динамически от уверенности, но всегда в диапазоне)
             rr = 2.0

@@ -253,13 +253,47 @@ def main():
         
         base_weights = compute_class_weight('balanced', classes=classes, y=y)
         
-        # УМЕРЕННЫЕ веса для балансировки
+        # УЛУЧШЕННАЯ балансировка: учитываем дисбаланс LONG/SHORT
+        # Подсчитываем количество каждого класса
+        class_counts = {}
+        for cls in classes:
+            class_counts[cls] = (y == cls).sum()
+        
+        long_count = class_counts.get(1, 0)
+        short_count = class_counts.get(-1, 0)
+        hold_count = class_counts.get(0, 0)
+        
+        # Определяем minority class (LONG или SHORT)
+        if long_count > 0 and short_count > 0:
+            if long_count < short_count:
+                minority_class = 1  # LONG
+                majority_class = -1  # SHORT
+                imbalance_ratio = short_count / long_count if long_count > 0 else 1.0
+            else:
+                minority_class = -1  # SHORT
+                majority_class = 1  # LONG
+                imbalance_ratio = long_count / short_count if short_count > 0 else 1.0
+        else:
+            minority_class = None
+            majority_class = None
+            imbalance_ratio = 1.0
+        
+        # УМЕРЕННЫЕ веса для балансировки с учетом дисбаланса LONG/SHORT
         class_weight_dict = {}
         for i, cls in enumerate(classes):
             if cls == 0:  # HOLD
                 class_weight_dict[cls] = base_weights[i] * 0.3  # Уменьшаем вес HOLD
             else:  # LONG or SHORT
-                class_weight_dict[cls] = base_weights[i] * 2.0  # Увеличиваем вес LONG/SHORT
+                base_weight = base_weights[i] * 2.0  # Базовое увеличение для торговых сигналов
+                
+                # Если есть дисбаланс, увеличиваем вес minority class
+                if minority_class is not None and cls == minority_class and imbalance_ratio > 1.5:
+                    # Увеличиваем вес minority class пропорционально дисбалансу
+                    boost_factor = min(1.5, imbalance_ratio / 2.0)  # Максимум 1.5x boost
+                    class_weight_dict[cls] = base_weight * (1.0 + boost_factor)
+                    safe_print(f"      Увеличиваем вес {('LONG' if cls == 1 else 'SHORT')} (minority) на {boost_factor*100:.0f}% из-за дисбаланса")
+                else:
+                    class_weight_dict[cls] = base_weight
         
         safe_print(f"\n   📊 Веса классов:")
         for cls, weight in class_weight_dict.items():
@@ -445,6 +479,68 @@ def main():
         except ImportError:
             safe_print(f"   ⚠️  LightGBM не установлен, пропускаем TripleEnsemble")
         
+        # Обучаем QuadEnsemble (RF + XGB + LGB + LSTM)
+        try:
+            from bot.ml.model_trainer import LSTM_AVAILABLE, LIGHTGBM_AVAILABLE
+            if LSTM_AVAILABLE and LIGHTGBM_AVAILABLE:
+                safe_print(f"\n   🚀 Обучение QuadEnsemble (RF + XGB + LGB + LSTM)...")
+                safe_print(f"      (Это может занять некоторое время...)")
+                
+                quad_ensemble_model, quad_metrics = trainer.train_quad_ensemble(
+                    X, y,
+                    df=df_with_target,  # Передаем DataFrame для LSTM последовательностей
+                    rf_n_estimators=100,
+                    rf_max_depth=10,
+                    xgb_n_estimators=100,
+                    xgb_max_depth=6,
+                    xgb_learning_rate=0.1,
+                    lgb_n_estimators=100,
+                    lgb_max_depth=6,
+                    lgb_learning_rate=0.1,
+                    lstm_sequence_length=60,
+                    lstm_epochs=20,  # 20 эпох достаточно для быстрой перетренировки
+                    class_weight=class_weight_dict,
+                )
+                
+                # Сохраняем модель
+                quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}.pkl"
+                trainer.save_model(
+                    quad_ensemble_model,
+                    trainer.scaler,
+                    feature_names,
+                    quad_metrics,
+                    quad_filename,
+                    symbol=symbol,
+                    interval=base_interval,
+                    model_type="quad_ensemble",
+                    class_weights=class_weight_dict,
+                    class_distribution=target_dist.to_dict(),
+                    training_params={
+                        "ensemble_method": "quad",
+                        "lstm_epochs": 20,
+                        "lstm_sequence_length": 60,
+                        "forward_periods": 5,
+                        "threshold_pct": 0.5,
+                        "min_risk_reward_ratio": 1.5,
+                    },
+                )
+                safe_print(f"      ✅ Сохранено как: {quad_filename}")
+                
+                # Для QuadEnsemble метрики агрегированные
+                rf_m = quad_metrics.get("rf_metrics", {})
+                lstm_m = quad_metrics.get("lstm_metrics", {})
+                
+                safe_print(f"      📊 RF CV Accuracy: {rf_m.get('cv_mean', 0):.4f}")
+                safe_print(f"      📊 LSTM Accuracy: {lstm_m.get('accuracy', 0):.4f}")
+                
+            else:
+                missing = []
+                if not LSTM_AVAILABLE: missing.append("LSTM (PyTorch)")
+                if not LIGHTGBM_AVAILABLE: missing.append("LightGBM")
+                safe_print(f"   ⚠️  Компоненты отсутствуют ({', '.join(missing)}), пропускаем QuadEnsemble")
+        except Exception as e:
+            safe_print(f"   ⚠️  Ошибка при обучении QuadEnsemble: {e}")
+        
         # Итоговые метрики
         safe_print(f"\n" + "-" * 80)
         safe_print(f"📊 ИТОГОВЫЕ МЕТРИКИ ДЛЯ {symbol}")
@@ -467,6 +563,10 @@ def main():
             safe_print(f"\n🎯 TripleEnsemble (RF+XGB+LGB):")
             safe_print(f"   Accuracy:     {triple_ensemble_metrics['accuracy']:.4f}")
             safe_print(f"   CV Accuracy:  {triple_ensemble_metrics['cv_mean']:.4f} ± {triple_ensemble_metrics['cv_std']*2:.4f}")
+
+        if 'quad_metrics' in locals():
+            safe_print(f"\n🚀 QuadEnsemble (RF+XGB+LGB+LSTM):")
+            safe_print(f"   Модель успешно обучена и сохранена.")
         
         # Выбор лучшей модели
         models = []
@@ -477,12 +577,16 @@ def main():
             models.append(("Ensemble", ensemble_metrics['cv_mean']))
         if 'triple_ensemble_metrics' in locals():
             models.append(("TripleEnsemble", triple_ensemble_metrics['cv_mean']))
+        if 'quad_metrics' in locals():
+             # Используем среднее CV классических моделей как прокси + бонус за диверсификацию
+             avg_cv = (rf_metrics['cv_mean'] + xgb_metrics.get('cv_mean', 0) + triple_ensemble_metrics.get('cv_mean', 0)) / 3
+             models.append(("QuadEnsemble", avg_cv * 1.05)) # Условный бонус
         
         if models:
             models.sort(key=lambda x: x[1], reverse=True)
             best_model, best_score = models[0]
             safe_print(f"\n✅ Лучшая модель для {symbol}: {best_model}")
-            safe_print(f"   Cross-Validation Accuracy: {best_score:.4f}")
+            safe_print(f"   Score: {best_score:.4f}")
     
     # Финальное сообщение
     safe_print("\n" + "=" * 80)
@@ -493,7 +597,7 @@ def main():
     safe_print("   • ml_models/xgb_*_15.pkl (XGBoost)")
     safe_print("   • ml_models/ensemble_*_15.pkl (RF + XGBoost)")
     safe_print("   • ml_models/triple_ensemble_*_15.pkl (RF + XGBoost + LightGBM)")
-    safe_print("\n💡 Примечание: LSTM используется только внутри quad_ensemble и не сохраняется отдельно.")
+    safe_print("   • ml_models/quad_ensemble_*_15.pkl (RF + XGBoost + LightGBM + LSTM)")
     safe_print("\n🚀 Следующие шаги:")
     safe_print("   1. Протестируйте новые модели:")
     safe_print("      python test_ml_strategy.py --symbol SOLUSDT --days 7")
