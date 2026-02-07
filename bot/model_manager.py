@@ -135,6 +135,10 @@ class ModelManager:
             
             if metrics:
                 logger.info(f"[test_model] Backtest completed successfully for {model_path}")
+                logger.info(
+                    f"[test_model] Results: PnL={metrics.total_pnl_pct:.2f}%, "
+                    f"WR={metrics.win_rate:.1f}%, Trades={metrics.total_trades}"
+                )
                 return {
                     "total_pnl_pct": metrics.total_pnl_pct,
                     "win_rate": metrics.win_rate,
@@ -145,7 +149,15 @@ class ModelManager:
                     "sharpe_ratio": metrics.sharpe_ratio,
                 }
             else:
-                logger.warning(f"[test_model] Backtest returned None for {model_path}")
+                logger.warning(
+                    f"[test_model] Backtest returned None for {model_path}. "
+                    f"Possible reasons: "
+                    f"1) Model file not found or corrupted, "
+                    f"2) No historical data available, "
+                    f"3) Error during strategy initialization, "
+                    f"4) Model failed to generate any valid signals. "
+                    f"Check the backtest output above for detailed error messages."
+                )
                 return None
         except Exception as e:
             error_msg = str(e)

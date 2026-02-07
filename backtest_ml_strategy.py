@@ -684,401 +684,414 @@ def run_exact_backtest(
         leverage: Плечо
     
     Returns:
-        BacktestMetrics с результатами
+        BacktestMetrics с результатами или None при ошибке
     """
-    print("=" * 80)
-    print("🚀 ТОЧНЫЙ БЭКТЕСТ (полная имитация продакшена)")
-    print("=" * 80)
-    print(f"Модель: {Path(model_path).name}")
-    print(f"Символ: {symbol}")
-    print(f"Дней: {days_back}")
-    print(f"Интервал: {interval}")
-    print(f"Начальный баланс: ${initial_balance:.2f}")
-    print(f"Риск на сделку: {risk_per_trade*100:.1f}%")
-    print(f"Плечо: {leverage}x")
-    print("=" * 80)
-    print("✅ БЭКТЕСТ ИСПОЛЬЗУЕТ ТОЧНО ТЕ ЖЕ МЕТОДЫ, ЧТО И РЕАЛЬНЫЙ БОТ:")
-    print("   - MLStrategy.generate_signal() - идентично продакшену")
-    print("   - Те же параметры из config.py")
-    print("   - Те же фильтры (стабильность, RSI, объем)")
-    print("   - Тот же расчет TP/SL")
-    print("   - То же окно данных (все данные до текущего момента)")
-    print("=" * 80)
-    print("⚠️  ВАЖНО: Бэктест НЕ исправляет ошибки стратегии!")
-    print("          Показывает КАК стратегия работает на самом деле.")
-    print("          Результаты бэктеста = результаты на реальных данных.")
-    print("=" * 80)
+    import traceback
     
-    # Проверка модели
-    model_file = Path(model_path)
-    if not model_file.exists():
-        model_file = Path("ml_models") / model_path
+    try:
+        print("=" * 80)
+        print("🚀 ТОЧНЫЙ БЭКТЕСТ (полная имитация продакшена)")
+        print("=" * 80)
+        print(f"Модель: {Path(model_path).name}")
+        print(f"Символ: {symbol}")
+        print(f"Дней: {days_back}")
+        print(f"Интервал: {interval}")
+        print(f"Начальный баланс: ${initial_balance:.2f}")
+        print(f"Риск на сделку: {risk_per_trade*100:.1f}%")
+        print(f"Плечо: {leverage}x")
+        print("=" * 80)
+        print("✅ БЭКТЕСТ ИСПОЛЬЗУЕТ ТОЧНО ТЕ ЖЕ МЕТОДЫ, ЧТО И РЕАЛЬНЫЙ БОТ:")
+        print("   - MLStrategy.generate_signal() - идентично продакшену")
+        print("   - Те же параметры из config.py")
+        print("   - Те же фильтры (стабильность, RSI, объем)")
+        print("   - Тот же расчет TP/SL")
+        print("   - То же окно данных (все данные до текущего момента)")
+        print("=" * 80)
+        print("⚠️  ВАЖНО: Бэктест НЕ исправляет ошибки стратегии!")
+        print("          Показывает КАК стратегия работает на самом деле.")
+        print("          Результаты бэктеста = результаты на реальных данных.")
+        print("=" * 80)
+        
+        # Проверка модели
+        model_file = Path(model_path)
         if not model_file.exists():
-            print(f"❌ Файл модели не найден: {model_path}")
-            return None
-    
-    # Загружаем настройки
-    try:
-        settings = load_settings()
-    except Exception as e:
-        print(f"❌ Ошибка загрузки настроек: {e}")
-        return None
-    
-    # Создаем клиент
-    client = BybitClient(settings.api)
-    
-    # Получаем исторические данные
-    print(f"\n📊 Загрузка исторических данных...")
-    try:
-        if interval.endswith("m"):
-            bybit_interval = interval[:-1]
-        else:
-            bybit_interval = interval
+            model_file = Path("ml_models") / model_path
+            if not model_file.exists():
+                print(f"❌ Файл модели не найден: {model_path}")
+                return None
         
-        interval_min = int(bybit_interval)
-        candles_per_day = (24 * 60) // interval_min
-        total_candles = days_back * candles_per_day
-        
-        df = client.get_kline_df(symbol, bybit_interval, limit=total_candles)
-        
-        if df.empty:
-            print(f"❌ Нет данных для {symbol}")
-            return None
-        
-        print(f"✅ Загружено {len(df)} свечей")
-        print(f"   Период: {df.index[0]} до {df.index[-1]}")
-    except Exception as e:
-        print(f"❌ Ошибка загрузки данных: {e}")
-        return None
-    
-    # Определяем, является ли модель MTF (multi-timeframe)
-    # и устанавливаем переменную окружения если нужно
-    model_name = model_file.stem
-    is_mtf_model = "_mtf" in model_name.lower()
-    if is_mtf_model:
-        os.environ["ML_MTF_ENABLED"] = "1"
-        print(f"🔧 MTF модель обнаружена, включен MTF режим")
-    else:
-        # Убеждаемся, что MTF отключен для не-MTF моделей
-        os.environ["ML_MTF_ENABLED"] = "0"
-    
-    # Подготавливаем индикаторы
-    print(f"\n🔧 Подготовка индикаторов...")
-    try:
-        df_with_indicators = prepare_with_indicators(df.copy())
-        print(f"✅ Индикаторы подготовлены")
-    except Exception as e:
-        print(f"❌ Ошибка подготовки индикаторов: {e}")
-        return None
-    
-    # Готовим ML стратегию (ТОЧНО как реальный бот)
-    print(f"\n🤖 Подготовка ML стратегии...")
-    try:
-        # ВАЖНО: Используем те же параметры, что и реальный бот
-        strategy = MLStrategy(
-            model_path=str(model_file),
-            confidence_threshold=settings.ml_strategy.confidence_threshold,
-            min_signal_strength=settings.ml_strategy.min_signal_strength,
-            stability_filter=settings.ml_strategy.stability_filter,
-            min_signals_per_day=settings.ml_strategy.min_signals_per_day,
-            max_signals_per_day=settings.ml_strategy.max_signals_per_day
-        )
-        
-        # Подготавливаем данные (как реальный бот)
-        df_work = df_with_indicators.copy()
-        if "timestamp" in df_work.columns:
-            df_work = df_work.set_index("timestamp")
-        
-        # Создаем технические индикаторы (как реальный бот)
-        df_with_features = strategy.feature_engineer.create_technical_indicators(df_work)
-        
-        # ВАЛИДАЦИЯ: Проверяем, что стратегия инициализирована правильно
-        print(f"   Параметры стратегии:")
-        print(f"   - Confidence threshold: {strategy.confidence_threshold}")
-        print(f"   - Min signal strength: {strategy.min_signal_strength}")
-        print(f"   - Stability filter: {strategy.stability_filter}")
-        print(f"   - Min signals/day: {strategy.min_signals_per_day}")
-        print(f"   - Max signals/day: {strategy.max_signals_per_day}")
-        print(f"   - Target profit (margin): {settings.ml_strategy.target_profit_pct_margin}%")
-        print(f"   - Max loss (margin): {settings.ml_strategy.max_loss_pct_margin}%")
-        print(f"   - Leverage: {leverage}x")
-        print(f"   ✅ Стратегия готова (идентична продакшену)")
-    except Exception as e:
-        print(f"❌ Ошибка подготовки стратегии: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
-    # Создаем симулятор
-    simulator = MLBacktestSimulator(
-        initial_balance=initial_balance,
-        risk_per_trade=risk_per_trade,
-        leverage=leverage,
-        max_position_hours=48.0,
-    )
-    
-    # Передаем настройки размера позиции в симулятор (как в реальном боте)
-    simulator._margin_pct_balance = settings.risk.margin_pct_balance  # 20% от баланса
-    # Передаем настройки размера позиции в симулятор (как в реальном боте)
-    # Используем фиксированную сумму $100 с учетом плеча
-    simulator._base_order_usd = 100.0  # Фиксированная сумма позиции $100
-    
-    # Запускаем бэктест
-    print(f"\n📈 Запуск точного бэктеста...")
-    print(f"   Имитация работы реального бота на сервере")
-    print(f"   Используются те же параметры и методы, что и в продакшене")
-    
-    # Минимальное окно данных для расчета всех индикаторов (как в реальном боте)
-    # MLStrategy требует минимум 200 баров для корректной работы
-    min_window_size = 200
-    
-    # ВАЖНО: Используем все данные до текущего момента (как реальный бот)
-    # Реальный бот на каждой итерации использует ВСЕ доступные исторические данные
-    total_bars = len(df_with_features)
-    processed_bars = 0
-    
-    # Прогресс-бар для отслеживания процесса
-    try:
-        from tqdm import tqdm
-        progress_bar = tqdm(
-            range(min_window_size, total_bars),
-            desc=f"Бэктест {symbol}",
-            unit="бар",
-            ncols=100
-        )
-    except ImportError:
-        progress_bar = range(min_window_size, total_bars)
-    
-    for idx in progress_bar:
-        # Пропускаем первые N баров, чтобы накопить достаточно данных для индикаторов
-        if idx < min_window_size:
-            continue
-        
-        current_time = df_with_features.index[idx]
-        row = df_with_features.iloc[idx]
-        current_price = row['close']
-        high = row['high']
-        low = row['low']
-        
-        # ВАЖНО: Реальный бот использует ВСЕ данные до текущего момента
-        # Это критично для правильной работы индикаторов и ML модели
-        # Используем данные от начала до текущего индекса (включительно)
-        # ОПТИМИЗАЦИЯ: Используем view вместо copy для ускорения (но нужно быть осторожным)
-        df_window = df_with_features.iloc[:idx+1]
-        
-        # Определяем текущую позицию (как реальный бот)
-        has_position = None
-        if simulator.current_position is not None:
-            has_position = Bias.LONG if simulator.current_position.action == Action.LONG else Bias.SHORT
-        
-        # ВАЖНО: Генерируем сигнал ТОЧНО как реальный бот
-        # Используем те же параметры из настроек
-        # ВАЛИДАЦИЯ: Проверяем, что используем правильный метод
-        assert hasattr(strategy, 'generate_signal'), "MLStrategy должен иметь метод generate_signal"
-        assert callable(strategy.generate_signal), "generate_signal должен быть вызываемым"
-        
+        # Загружаем настройки
         try:
-            # ВАЖНО: Вызываем ТОЧНО тот же метод, что и реальный бот
-            signal = strategy.generate_signal(
-                row=row,
-                df=df_window,  # Все данные до текущего момента (как реальный бот)
-                has_position=has_position,
-                current_price=current_price,
-                leverage=leverage,
-                target_profit_pct_margin=settings.ml_strategy.target_profit_pct_margin,
-                max_loss_pct_margin=settings.ml_strategy.max_loss_pct_margin,
-            )
-            
-            # ВАЛИДАЦИЯ: Проверяем, что сигнал имеет правильный тип
-            assert isinstance(signal, Signal), f"Сигнал должен быть типа Signal, получен {type(signal)}"
-            
-        except AssertionError as e:
-            # Критическая ошибка валидации
-            print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ВАЛИДАЦИИ: {e}")
-            raise
+            settings = load_settings()
         except Exception as e:
-            # Если ошибка при генерации сигнала, логируем и пропускаем
-            # (это может происходить в реальном боте тоже)
-            if idx < 10:  # Логируем только первые 10 ошибок
-                print(f"⚠️  Ошибка генерации сигнала на {current_time}: {e}")
-            signal = Signal(
-                timestamp=current_time,
-                action=Action.HOLD,
-                reason=f"ml_ошибка_генерации_{str(e)[:30]}",
-                price=current_price
+            print(f"❌ Ошибка загрузки настроек: {e}")
+            return None
+        
+        # Создаем клиент
+        client = BybitClient(settings.api)
+    
+        # Получаем исторические данные
+        print(f"\n📊 Загрузка исторических данных...")
+        try:
+            if interval.endswith("m"):
+                bybit_interval = interval[:-1]
+            else:
+                bybit_interval = interval
+            
+            interval_min = int(bybit_interval)
+            candles_per_day = (24 * 60) // interval_min
+            total_candles = days_back * candles_per_day
+            
+            df = client.get_kline_df(symbol, bybit_interval, limit=total_candles)
+            
+            if df.empty:
+                print(f"❌ Нет данных для {symbol}")
+                return None
+            
+            print(f"✅ Загружено {len(df)} свечей")
+            print(f"   Период: {df.index[0]} до {df.index[-1]}")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки данных: {e}")
+            return None
+        
+        # Определяем, является ли модель MTF (multi-timeframe)
+        # и устанавливаем переменную окружения если нужно
+        model_name = model_file.stem
+        is_mtf_model = "_mtf" in model_name.lower()
+        if is_mtf_model:
+            os.environ["ML_MTF_ENABLED"] = "1"
+            print(f"🔧 MTF модель обнаружена, включен MTF режим")
+        else:
+            # Убеждаемся, что MTF отключен для не-MTF моделей
+            os.environ["ML_MTF_ENABLED"] = "0"
+        
+        # Подготавливаем индикаторы
+        print(f"\n🔧 Подготовка индикаторов...")
+        try:
+            df_with_indicators = prepare_with_indicators(df.copy())
+            print(f"✅ Индикаторы подготовлены")
+        except Exception as e:
+            print(f"❌ Ошибка подготовки индикаторов: {e}")
+            return None
+        
+        # Готовим ML стратегию (ТОЧНО как реальный бот)
+        print(f"\n🤖 Подготовка ML стратегии...")
+        try:
+            # ВАЖНО: Используем те же параметры, что и реальный бот
+            strategy = MLStrategy(
+                model_path=str(model_file),
+                confidence_threshold=settings.ml_strategy.confidence_threshold,
+                min_signal_strength=settings.ml_strategy.min_signal_strength,
+                stability_filter=settings.ml_strategy.stability_filter,
+                min_signals_per_day=settings.ml_strategy.min_signals_per_day,
+                max_signals_per_day=settings.ml_strategy.max_signals_per_day
             )
+            
+            # Подготавливаем данные (как реальный бот)
+            df_work = df_with_indicators.copy()
+            if "timestamp" in df_work.columns:
+                df_work = df_work.set_index("timestamp")
+            
+            # Создаем технические индикаторы (как реальный бот)
+            df_with_features = strategy.feature_engineer.create_technical_indicators(df_work)
+            
+            # ВАЛИДАЦИЯ: Проверяем, что стратегия инициализирована правильно
+            print(f"   Параметры стратегии:")
+            print(f"   - Confidence threshold: {strategy.confidence_threshold}")
+            print(f"   - Min signal strength: {strategy.min_signal_strength}")
+            print(f"   - Stability filter: {strategy.stability_filter}")
+            print(f"   - Min signals/day: {strategy.min_signals_per_day}")
+            print(f"   - Max signals/day: {strategy.max_signals_per_day}")
+            print(f"   - Target profit (margin): {settings.ml_strategy.target_profit_pct_margin}%")
+            print(f"   - Max loss (margin): {settings.ml_strategy.max_loss_pct_margin}%")
+            print(f"   - Leverage: {leverage}x")
+            print(f"   ✅ Стратегия готова (идентична продакшену)")
+        except Exception as e:
+            print(f"❌ Ошибка подготовки стратегии: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
         
-        # Анализируем сигнал (только статистика, без изменений)
-        simulator.analyze_signal(signal, current_price)
+        # Создаем симулятор
+        simulator = MLBacktestSimulator(
+            initial_balance=initial_balance,
+            risk_per_trade=risk_per_trade,
+            leverage=leverage,
+            max_position_hours=48.0,
+        )
         
-        # ВАЖНО: Сначала проверяем выход из позиции (как реальный бот)
-        # Это важно, так как может быть сигнал на закрытие текущей позиции
-        if simulator.current_position is not None:
-            exited = simulator.check_exit(current_time, current_price, high, low)
-            # Если позиция закрыта, не открываем новую на этой же итерации
-            if exited:
+        # Передаем настройки размера позиции в симулятор (как в реальном боте)
+        simulator._margin_pct_balance = settings.risk.margin_pct_balance  # 20% от баланса
+        # Передаем настройки размера позиции в симулятор (как в реальном боте)
+        # Используем фиксированную сумму $100 с учетом плеча
+        simulator._base_order_usd = 100.0  # Фиксированная сумма позиции $100
+        
+        # Запускаем бэктест
+        print(f"\n📈 Запуск точного бэктеста...")
+        print(f"   Имитация работы реального бота на сервере")
+        print(f"   Используются те же параметры и методы, что и в продакшене")
+        
+        # Минимальное окно данных для расчета всех индикаторов (как в реальном боте)
+        # MLStrategy требует минимум 200 баров для корректной работы
+        min_window_size = 200
+        
+        # ВАЖНО: Используем все данные до текущего момента (как реальный бот)
+        # Реальный бот на каждой итерации использует ВСЕ доступные исторические данные
+        total_bars = len(df_with_features)
+        processed_bars = 0
+        
+        # Прогресс-бар для отслеживания процесса
+        try:
+            from tqdm import tqdm
+            progress_bar = tqdm(
+                range(min_window_size, total_bars),
+                desc=f"Бэктест {symbol}",
+                unit="бар",
+                ncols=100
+            )
+        except ImportError:
+            progress_bar = range(min_window_size, total_bars)
+        
+        for idx in progress_bar:
+            # Пропускаем первые N баров, чтобы накопить достаточно данных для индикаторов
+            if idx < min_window_size:
                 continue
+            
+            current_time = df_with_features.index[idx]
+            row = df_with_features.iloc[idx]
+            current_price = row['close']
+            high = row['high']
+            low = row['low']
+            
+            # ВАЖНО: Реальный бот использует ВСЕ данные до текущего момента
+            # Это критично для правильной работы индикаторов и ML модели
+            # Используем данные от начала до текущего индекса (включительно)
+            # ОПТИМИЗАЦИЯ: Используем view вместо copy для ускорения (но нужно быть осторожным)
+            df_window = df_with_features.iloc[:idx+1]
+            
+            # Определяем текущую позицию (как реальный бот)
+            has_position = None
+            if simulator.current_position is not None:
+                has_position = Bias.LONG if simulator.current_position.action == Action.LONG else Bias.SHORT
+            
+            # ВАЖНО: Генерируем сигнал ТОЧНО как реальный бот
+            # Используем те же параметры из настроек
+            # ВАЛИДАЦИЯ: Проверяем, что используем правильный метод
+            assert hasattr(strategy, 'generate_signal'), "MLStrategy должен иметь метод generate_signal"
+            assert callable(strategy.generate_signal), "generate_signal должен быть вызываемым"
+            
+            try:
+                # ВАЖНО: Вызываем ТОЧНО тот же метод, что и реальный бот
+                signal = strategy.generate_signal(
+                    row=row,
+                    df=df_window,  # Все данные до текущего момента (как реальный бот)
+                    has_position=has_position,
+                    current_price=current_price,
+                    leverage=leverage,
+                    target_profit_pct_margin=settings.ml_strategy.target_profit_pct_margin,
+                    max_loss_pct_margin=settings.ml_strategy.max_loss_pct_margin,
+                )
+                
+                # ВАЛИДАЦИЯ: Проверяем, что сигнал имеет правильный тип
+                assert isinstance(signal, Signal), f"Сигнал должен быть типа Signal, получен {type(signal)}"
+                
+            except AssertionError as e:
+                # Критическая ошибка валидации
+                print(f"❌ КРИТИЧЕСКАЯ ОШИБКА ВАЛИДАЦИИ: {e}")
+                raise
+            except Exception as e:
+                # Если ошибка при генерации сигнала, логируем и пропускаем
+                # (это может происходить в реальном боте тоже)
+                if idx < 10:  # Логируем только первые 10 ошибок
+                    print(f"⚠️  Ошибка генерации сигнала на {current_time}: {e}")
+                signal = Signal(
+                    timestamp=current_time,
+                    action=Action.HOLD,
+                    reason=f"ml_ошибка_генерации_{str(e)[:30]}",
+                    price=current_price
+                )
+            
+            # Анализируем сигнал (только статистика, без изменений)
+            simulator.analyze_signal(signal, current_price)
+            
+            # ВАЖНО: Сначала проверяем выход из позиции (как реальный бот)
+            # Это важно, так как может быть сигнал на закрытие текущей позиции
+            if simulator.current_position is not None:
+                exited = simulator.check_exit(current_time, current_price, high, low)
+                # Если позиция закрыта, не открываем новую на этой же итерации
+                if exited:
+                    continue
+            
+            # Проверяем вход в позицию (только если нет открытой позиции)
+            if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
+                simulator.open_position(signal, current_time, symbol)
+            
+            # Периодический вывод прогресса в прогресс-бар (каждые 500 баров)
+            processed_bars += 1
+            if processed_bars % 500 == 0 and hasattr(progress_bar, 'set_postfix'):
+                trades_count = len(simulator.trades)
+                progress_bar.set_postfix({
+                    'Сделок': trades_count,
+                    'Баланс': f'${simulator.balance:.2f}'
+                })
         
-        # Проверяем вход в позицию (только если нет открытой позиции)
-        if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
-            simulator.open_position(signal, current_time, symbol)
+        # Закрываем все позиции
+        if simulator.current_position is not None:
+            final_price = df_with_features['close'].iloc[-1]
+            final_time = df_with_features.index[-1]
+            simulator.close_all_positions(final_time, final_price)
         
-        # Периодический вывод прогресса в прогресс-бар (каждые 500 баров)
-        processed_bars += 1
-        if processed_bars % 500 == 0 and hasattr(progress_bar, 'set_postfix'):
-            trades_count = len(simulator.trades)
-            progress_bar.set_postfix({
-                'Сделок': trades_count,
-                'Баланс': f'${simulator.balance:.2f}'
-            })
+        # Рассчитываем метрики
+        print(f"\n📊 Расчет метрик...")
+        model_name = model_file.stem
+        metrics = simulator.calculate_metrics(symbol, model_name, days_back=days_back)
     
-    # Закрываем все позиции
-    if simulator.current_position is not None:
-        final_price = df_with_features['close'].iloc[-1]
-        final_time = df_with_features.index[-1]
-        simulator.close_all_positions(final_time, final_price)
-    
-    # Рассчитываем метрики
-    print(f"\n📊 Расчет метрик...")
-    model_name = model_file.stem
-    metrics = simulator.calculate_metrics(symbol, model_name, days_back=days_back)
-    
-    # Выводим результаты
-    print("\n" + "=" * 80)
-    print("📈 РЕЗУЛЬТАТЫ ТОЧНОГО БЭКТЕСТА")
-    print("=" * 80)
-    print(f"Символ: {metrics.symbol}")
-    print(f"Модель: {metrics.model_name}")
-    
-    print(f"\n💰 Финансовые метрики:")
-    print(f"   Начальный баланс: ${initial_balance:.2f}")
-    print(f"   Конечный баланс: ${initial_balance + metrics.total_pnl:.2f}")
-    print(f"   Общий PnL: ${metrics.total_pnl:.2f} ({metrics.total_pnl_pct:+.2f}%)")
-    print(f"   Макс. просадка: ${metrics.max_drawdown:.2f} ({metrics.max_drawdown_pct:.2f}%)")
-    
-    print(f"\n📊 Статистика сделок:")
-    print(f"   Всего сделок: {metrics.total_trades}")
-    print(f"   Прибыльных: {metrics.winning_trades}")
-    print(f"   Убыточных: {metrics.losing_trades}")
-    print(f"   Win Rate: {metrics.win_rate:.2f}%")
-    print(f"   Profit Factor: {metrics.profit_factor:.2f}")
-    print(f"   Средний выигрыш: ${metrics.avg_win:.2f}")
-    print(f"   Средний проигрыш: ${metrics.avg_loss:.2f}")
-    
-    print(f"\n🎯 АНАЛИЗ СИГНАЛОВ СТРАТЕГИИ:")
-    print(f"   Всего сигналов: {metrics.total_signals}")
-    print(f"   LONG сигналов: {metrics.long_signals}")
-    print(f"   SHORT сигналов: {metrics.short_signals}")
-    tradable_count = metrics.long_signals + metrics.short_signals
-    if tradable_count > 0:
-        print(f"   Сигналов с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}% (от {tradable_count} LONG/SHORT)")
-    else:
-        print(f"   Сигналов с TP/SL: N/A (нет LONG/SHORT сигналов)")
-    print(f"   Сигналов с SL=1%: {metrics.signals_with_correct_sl_pct:.1f}%")
-    print(f"   Средний SL в сигналах: {metrics.avg_sl_distance_pct:.2f}%")
-    print(f"   Средний TP в сигналах: {metrics.avg_tp_distance_pct:.2f}%")
-    print(f"   Средний R/R: {metrics.avg_rr_ratio:.2f}")
-
-    # ТОП причин сигналов (особенно полезно при отсутствии сделок)
-    if simulator.signal_stats.reasons:
-        print(f"\n🧾 ТОП причин сигналов:")
-        top_reasons = sorted(
-            simulator.signal_stats.reasons.items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )[:10]
-        for reason, count in top_reasons:
-            print(f"   {count:4d}x - {reason}")
-    
-    print(f"\n📊 Размер позиций:")
-    print(f"   Средний размер: ${metrics.avg_position_size_usd:.2f}")
-    print(f"   Риск на сделку: {risk_per_trade*100:.1f}% от баланса")
-    
-    print(f"\n📈 Коэффициенты:")
-    print(f"   Sharpe Ratio: {metrics.sharpe_ratio:.2f}")
-    print(f"   Calmar Ratio: {metrics.calmar_ratio:.2f}")
-    print(f"   Recovery Factor: {metrics.recovery_factor:.2f}")
-    
-    print("\n" + "=" * 80)
-    
-    # КРИТИЧЕСКИЙ АНАЛИЗ СТРАТЕГИИ
-    print(f"\n🔍 КРИТИЧЕСКИЙ АНАЛИЗ СТРАТЕГИИ:")
-    print(f"   (Анализ основан на ТОЧНОЙ симуляции работы реального бота)")
-    
-    # Проверяем процент только для LONG/SHORT сигналов (HOLD не должны иметь TP/SL)
-    tradable_signals_count = metrics.long_signals + metrics.short_signals
-    if tradable_signals_count > 0 and metrics.signals_with_tp_sl_pct < 90:
-        print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_tp_sl_pct:.1f}% LONG/SHORT сигналов имеют TP/SL")
-        print(f"   Реальная стратегия на сервере НЕ сможет открыть {100-metrics.signals_with_tp_sl_pct:.1f}% позиций!")
-        print(f"   ⚠️  Это означает, что на реальных данных будет такая же проблема!")
-    elif tradable_signals_count == 0:
-        print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Нет LONG/SHORT сигналов для анализа TP/SL")
-        print(f"   Всего сигналов: {metrics.total_signals}, из них HOLD: {metrics.total_signals}")
-    
-    if metrics.signals_with_correct_sl_pct < 90:
-        print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_correct_sl_pct:.1f}% сигналов имеют SL=1%")
-        print(f"   Стратегия НЕ следует правилу SL=1%!")
-        print(f"   Средний SL: {metrics.avg_sl_distance_pct:.2f}% (должен быть 1.0%)")
-        print(f"   ⚠️  На реальных данных будет такой же SL!")
-    
-    if metrics.avg_sl_distance_pct > 2.0:
-        print(f"🚨 ОПАСНО: Средний SL {metrics.avg_sl_distance_pct:.2f}% СЛИШКОМ ВЕЛИК!")
-        print(f"   Риск на сделку ВЫШЕ чем планировалось!")
-        print(f"   ⚠️  На реальных данных риск будет таким же!")
-    
-    if metrics.avg_rr_ratio < 1.5:
-        print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Средний R/R {metrics.avg_rr_ratio:.2f} слишком низкий")
-        print(f"   Нужно R/R > 2.0 для прибыльной торговли")
-    
-    if metrics.win_rate < 40 and metrics.profit_factor < 1.5:
-        print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Низкий Win Rate ({metrics.win_rate:.1f}%) и Profit Factor ({metrics.profit_factor:.2f})")
-        print(f"   Стратегия может быть убыточной на реальных данных")
-    
-    # РЕКОМЕНДАЦИИ
-    print(f"\n📋 РЕКОМЕНДАЦИИ ДЛЯ УЛУЧШЕНИЯ СТРАТЕГИИ:")
-    
-    if metrics.signals_with_correct_sl_pct < 90:
-        print(f"1. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать SL=1%")
-        print(f"   Текущий код должен гарантировать: sl_pct = max_loss_pct_margin / leverage")
-    
-    tradable_count = metrics.long_signals + metrics.short_signals
-    if tradable_count > 0 and metrics.signals_with_tp_sl_pct < 90:
-        print(f"2. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать TP/SL в сигналах")
-        print(f"   Все сигналы LONG/SHORT должны содержать stop_loss и take_profit")
-    
-    if metrics.total_trades == 0:
-        print(f"3. ❗ СТРАТЕГИЯ НЕ РАБОТАЕТ: 0 сделок за {days_back} дней")
-        print(f"   Проверьте:")
-        print(f"   - Правильность загрузки модели")
-        print(f"   - Пороги confidence_threshold и min_signal_strength")
-        print(f"   - Фильтры стратегии (стабильность, RSI, объем)")
-    
-    # ФИНАЛЬНЫЙ ВЕРДИКТ
-    print(f"\n🎯 ФИНАЛЬНЫЙ ВЕРДИКТ:")
-    if (metrics.win_rate > 50 and 
-        metrics.profit_factor > 2.0 and 
-        metrics.signals_with_correct_sl_pct >= 90 and
-        (metrics.long_signals + metrics.short_signals == 0 or metrics.signals_with_tp_sl_pct >= 90) and
-        metrics.total_trades > 0):
-        print(f"✅ СТРАТЕГИЯ ГОТОВА К ПРОДАКШЕНУ!")
-        print(f"   Win Rate: {metrics.win_rate:.1f}%")
-        print(f"   Profit Factor: {metrics.profit_factor:.2f}")
-        print(f"   Правильный SL: {metrics.signals_with_correct_sl_pct:.1f}% сигналов")
-        print(f"   Сигналы с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}%")
+        # Выводим результаты
+        print("\n" + "=" * 80)
+        print("📈 РЕЗУЛЬТАТЫ ТОЧНОГО БЭКТЕСТА")
+        print("=" * 80)
+        print(f"Символ: {metrics.symbol}")
+        print(f"Модель: {metrics.model_name}")
+        
+        print(f"\n💰 Финансовые метрики:")
+        print(f"   Начальный баланс: ${initial_balance:.2f}")
+        print(f"   Конечный баланс: ${initial_balance + metrics.total_pnl:.2f}")
+        print(f"   Общий PnL: ${metrics.total_pnl:.2f} ({metrics.total_pnl_pct:+.2f}%)")
+        print(f"   Макс. просадка: ${metrics.max_drawdown:.2f} ({metrics.max_drawdown_pct:.2f}%)")
+        
+        print(f"\n📊 Статистика сделок:")
         print(f"   Всего сделок: {metrics.total_trades}")
-        print(f"   📊 Результаты бэктеста = ожидаемые результаты на реальных данных")
-    else:
-        print(f"🚫 СТРАТЕГИЯ НЕ ГОТОВА К ПРОДАКШЕНУ")
-        print(f"   Исправьте проблемы выше и запустите бэктест снова")
-        print(f"   ⚠️  Результаты на реальных данных будут аналогичными бэктесту")
+        print(f"   Прибыльных: {metrics.winning_trades}")
+        print(f"   Убыточных: {metrics.losing_trades}")
+        print(f"   Win Rate: {metrics.win_rate:.2f}%")
+        print(f"   Profit Factor: {metrics.profit_factor:.2f}")
+        print(f"   Средний выигрыш: ${metrics.avg_win:.2f}")
+        print(f"   Средний проигрыш: ${metrics.avg_loss:.2f}")
+        
+        print(f"\n🎯 АНАЛИЗ СИГНАЛОВ СТРАТЕГИИ:")
+        print(f"   Всего сигналов: {metrics.total_signals}")
+        print(f"   LONG сигналов: {metrics.long_signals}")
+        print(f"   SHORT сигналов: {metrics.short_signals}")
+        tradable_count = metrics.long_signals + metrics.short_signals
+        if tradable_count > 0:
+            print(f"   Сигналов с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}% (от {tradable_count} LONG/SHORT)")
+        else:
+            print(f"   Сигналов с TP/SL: N/A (нет LONG/SHORT сигналов)")
+        print(f"   Сигналов с SL=1%: {metrics.signals_with_correct_sl_pct:.1f}%")
+        print(f"   Средний SL в сигналах: {metrics.avg_sl_distance_pct:.2f}%")
+        print(f"   Средний TP в сигналах: {metrics.avg_tp_distance_pct:.2f}%")
+        print(f"   Средний R/R: {metrics.avg_rr_ratio:.2f}")
+
+        # ТОП причин сигналов (особенно полезно при отсутствии сделок)
+        if simulator.signal_stats.reasons:
+            print(f"\n🧾 ТОП причин сигналов:")
+            top_reasons = sorted(
+                simulator.signal_stats.reasons.items(),
+                key=lambda x: x[1],
+                reverse=True,
+            )[:10]
+            for reason, count in top_reasons:
+                print(f"   {count:4d}x - {reason}")
+        
+        print(f"\n📊 Размер позиций:")
+        print(f"   Средний размер: ${metrics.avg_position_size_usd:.2f}")
+        print(f"   Риск на сделку: {risk_per_trade*100:.1f}% от баланса")
+        
+        print(f"\n📈 Коэффициенты:")
+        print(f"   Sharpe Ratio: {metrics.sharpe_ratio:.2f}")
+        print(f"   Calmar Ratio: {metrics.calmar_ratio:.2f}")
+        print(f"   Recovery Factor: {metrics.recovery_factor:.2f}")
+        
+        print("\n" + "=" * 80)
+        
+        # КРИТИЧЕСКИЙ АНАЛИЗ СТРАТЕГИИ
+        print(f"\n🔍 КРИТИЧЕСКИЙ АНАЛИЗ СТРАТЕГИИ:")
+        print(f"   (Анализ основан на ТОЧНОЙ симуляции работы реального бота)")
+        
+        # Проверяем процент только для LONG/SHORT сигналов (HOLD не должны иметь TP/SL)
+        tradable_signals_count = metrics.long_signals + metrics.short_signals
+        if tradable_signals_count > 0 and metrics.signals_with_tp_sl_pct < 90:
+            print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_tp_sl_pct:.1f}% LONG/SHORT сигналов имеют TP/SL")
+            print(f"   Реальная стратегия на сервере НЕ сможет открыть {100-metrics.signals_with_tp_sl_pct:.1f}% позиций!")
+            print(f"   ⚠️  Это означает, что на реальных данных будет такая же проблема!")
+        elif tradable_signals_count == 0:
+            print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Нет LONG/SHORT сигналов для анализа TP/SL")
+            print(f"   Всего сигналов: {metrics.total_signals}, из них HOLD: {metrics.total_signals}")
+        
+        if metrics.signals_with_correct_sl_pct < 90:
+            print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_correct_sl_pct:.1f}% сигналов имеют SL=1%")
+            print(f"   Стратегия НЕ следует правилу SL=1%!")
+            print(f"   Средний SL: {metrics.avg_sl_distance_pct:.2f}% (должен быть 1.0%)")
+            print(f"   ⚠️  На реальных данных будет такой же SL!")
+        
+        if metrics.avg_sl_distance_pct > 2.0:
+            print(f"🚨 ОПАСНО: Средний SL {metrics.avg_sl_distance_pct:.2f}% СЛИШКОМ ВЕЛИК!")
+            print(f"   Риск на сделку ВЫШЕ чем планировалось!")
+            print(f"   ⚠️  На реальных данных риск будет таким же!")
+        
+        if metrics.avg_rr_ratio < 1.5:
+            print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Средний R/R {metrics.avg_rr_ratio:.2f} слишком низкий")
+            print(f"   Нужно R/R > 2.0 для прибыльной торговли")
+        
+        if metrics.win_rate < 40 and metrics.profit_factor < 1.5:
+            print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Низкий Win Rate ({metrics.win_rate:.1f}%) и Profit Factor ({metrics.profit_factor:.2f})")
+            print(f"   Стратегия может быть убыточной на реальных данных")
+        
+        # РЕКОМЕНДАЦИИ
+        print(f"\n📋 РЕКОМЕНДАЦИИ ДЛЯ УЛУЧШЕНИЯ СТРАТЕГИИ:")
+        
+        if metrics.signals_with_correct_sl_pct < 90:
+            print(f"1. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать SL=1%")
+            print(f"   Текущий код должен гарантировать: sl_pct = max_loss_pct_margin / leverage")
+        
+        tradable_count = metrics.long_signals + metrics.short_signals
+        if tradable_count > 0 and metrics.signals_with_tp_sl_pct < 90:
+            print(f"2. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать TP/SL в сигналах")
+            print(f"   Все сигналы LONG/SHORT должны содержать stop_loss и take_profit")
+        
+        if metrics.total_trades == 0:
+            print(f"3. ❗ СТРАТЕГИЯ НЕ РАБОТАЕТ: 0 сделок за {days_back} дней")
+            print(f"   Проверьте:")
+            print(f"   - Правильность загрузки модели")
+            print(f"   - Пороги confidence_threshold и min_signal_strength")
+            print(f"   - Фильтры стратегии (стабильность, RSI, объем)")
+        
+        # ФИНАЛЬНЫЙ ВЕРДИКТ
+        print(f"\n🎯 ФИНАЛЬНЫЙ ВЕРДИКТ:")
+        if (metrics.win_rate > 50 and 
+            metrics.profit_factor > 2.0 and 
+            metrics.signals_with_correct_sl_pct >= 90 and
+            (metrics.long_signals + metrics.short_signals == 0 or metrics.signals_with_tp_sl_pct >= 90) and
+            metrics.total_trades > 0):
+            print(f"✅ СТРАТЕГИЯ ГОТОВА К ПРОДАКШЕНУ!")
+            print(f"   Win Rate: {metrics.win_rate:.1f}%")
+            print(f"   Profit Factor: {metrics.profit_factor:.2f}")
+            print(f"   Правильный SL: {metrics.signals_with_correct_sl_pct:.1f}% сигналов")
+            print(f"   Сигналы с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}%")
+            print(f"   Всего сделок: {metrics.total_trades}")
+            print(f"   📊 Результаты бэктеста = ожидаемые результаты на реальных данных")
+        else:
+            print(f"🚫 СТРАТЕГИЯ НЕ ГОТОВА К ПРОДАКШЕНУ")
+            print(f"   Исправьте проблемы выше и запустите бэктест снова")
+            print(f"   ⚠️  Результаты на реальных данных будут аналогичными бэктесту")
+        
+        print("\n" + "=" * 80)
+        print("📝 ВАЖНО: Этот бэктест ТОЧНО симулирует работу реального бота.")
+        print("          Все методы, параметры и логика идентичны продакшену.")
+        print("          Результаты бэктеста = результаты на реальных данных.")
+        print("=" * 80)
+        
+        return metrics
     
-    print("\n" + "=" * 80)
-    print("📝 ВАЖНО: Этот бэктест ТОЧНО симулирует работу реального бота.")
-    print("          Все методы, параметры и логика идентичны продакшену.")
-    print("          Результаты бэктеста = результаты на реальных данных.")
-    print("=" * 80)
-    
-    return metrics
+    except Exception as e:
+        error_msg = str(e)
+        error_traceback = traceback.format_exc()
+        print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В БЭКТЕСТЕ:")
+        print(f"   {error_msg}")
+        print(f"\n📋 Полный traceback:")
+        print(error_traceback)
+        print("=" * 80)
+        return None
 
 
 def main():
