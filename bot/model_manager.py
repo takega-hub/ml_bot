@@ -16,13 +16,21 @@ class ModelManager:
         self.models_dir = Path("ml_models")
         self.models_dir.mkdir(exist_ok=True)
 
-    def train_and_compare(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def train_and_compare(self, symbol: str, use_mtf: Optional[bool] = None) -> Optional[Dict[str, Any]]:
         """
         Запускает переобучение моделей для символа и возвращает отчет.
         Это обертка над существующими скриптами обучения.
+        
+        Args:
+            symbol: Торговая пара
+            use_mtf: Использовать MTF фичи (None = из настроек, True/False = явно)
         """
         symbol = symbol.upper()
         print(f"[model_manager] Starting training for {symbol}...")
+        
+        # Определяем, использовать ли MTF
+        if use_mtf is None:
+            use_mtf = self.settings.ml_strategy.mtf_enabled
         
         # Вызываем существующий оптимизированный скрипт обучения
         # Мы используем subprocess для изоляции процесса обучения
@@ -30,6 +38,12 @@ class ModelManager:
             # Нам нужно убедиться, что venv используется
             python_exe = sys.executable
             cmd = [python_exe, "retrain_ml_optimized.py", "--symbol", symbol]
+            
+            # Добавляем параметр MTF
+            if use_mtf:
+                cmd.append("--mtf")
+            else:
+                cmd.append("--no-mtf")
             
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             print(f"[model_manager] Training output: {result.stdout[-500:]}") # Последние 500 символов

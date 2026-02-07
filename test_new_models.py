@@ -46,7 +46,7 @@ def main():
                 symbol=symbol,
                 days_back=14,
                 interval="15",
-                initial_balance=1000.0,
+                initial_balance=100.0,
                 risk_per_trade=0.02, # В коде берется из config (20%), это значение может игнорироваться
                 leverage=10,
             )

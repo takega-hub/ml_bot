@@ -31,7 +31,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     """Параметры ML-стратегии"""
     
     # Основные параметры стратегии
-    confidence_threshold: float = 0.5  # Минимальная уверенность модели для открытия позиции
+    confidence_threshold: float = 0.45  # Минимальная уверенность модели для открытия позиции (снижено для больше сигналов)
     min_signal_strength: str = "слабое"  # Минимальная сила сигнала
     stability_filter: bool = True  # Фильтр стабильности сигналов
     
@@ -56,7 +56,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
         """Валидация значений"""
         # Убедимся, что confidence_threshold в пределах [0, 1]
         if not 0 <= self.confidence_threshold <= 1:
-            self.confidence_threshold = 0.5
+            self.confidence_threshold = 0.45
         
         # Убедимся, что min_signal_strength валиден
         valid_strengths = ["слабое", "умеренное", "среднее", "сильное", "очень_сильное"]

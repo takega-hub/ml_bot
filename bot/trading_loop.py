@@ -496,29 +496,34 @@ class TradingLoop:
             
             logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
             
-            # РАСЧЕТ 1: margin_pct_balance% от баланса с использованием плеча
-            # Маржа = баланс * margin_pct_balance
+            # РАСЧЕТ: Фиксированная сумма маржи с учетом плеча
+            # base_order_usd - это маржа в USD
+            # Размер позиции в USD = маржа * leverage
             # Количество = (маржа * leverage) / цена
-            margin_from_percentage = balance * self.settings.risk.margin_pct_balance
-            qty_from_percentage = (margin_from_percentage * self.settings.leverage) / signal.price
-            
-            # РАСЧЕТ 2: Фиксированная сумма
-            # Количество = base_order_usd / цена
             fixed_margin_usd = (
                 self.settings.risk.add_order_usd if is_add else self.settings.risk.base_order_usd
             )
-            qty_from_fixed = fixed_margin_usd / signal.price
             
-            # Используем минимум из двух вариантов
-            total_qty = min(qty_from_percentage, qty_from_fixed)
-            used_method = "percentage" if qty_from_percentage < qty_from_fixed else "fixed"
+            # Проверяем, что маржа не превышает баланс
+            if fixed_margin_usd > balance:
+                logger.warning(
+                    f"[{symbol}] ⚠️ Fixed margin ${fixed_margin_usd:.2f} exceeds balance ${balance:.2f}, "
+                    f"using available balance"
+                )
+                fixed_margin_usd = balance
+            
+            # Размер позиции в USD = маржа * leverage
+            position_size_usd = fixed_margin_usd * self.settings.leverage
+            
+            # Количество монет = размер позиции / цена
+            total_qty = position_size_usd / signal.price
             
             logger.info(
                 f"Position size for {symbol}: "
                 f"balance=${balance:.2f}, "
-                f"percentage_margin=${margin_from_percentage:.2f} ({self.settings.risk.margin_pct_balance*100}%) -> qty={qty_from_percentage:.6f}, "
-                f"fixed=${fixed_margin_usd:.2f} -> qty={qty_from_fixed:.6f}, "
-                f"selected={used_method}, final_qty={total_qty:.6f}, leverage={self.settings.leverage}x"
+                f"margin=${fixed_margin_usd:.2f}, "
+                f"position_size_usd=${position_size_usd:.2f}, "
+                f"qty={total_qty:.6f}, leverage={self.settings.leverage}x"
             )
             
             # Округляем вниз до ближайшего кратного qtyStep (как в примере кода)

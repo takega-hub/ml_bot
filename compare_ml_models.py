@@ -10,17 +10,29 @@
 3. Дополнительные метрики анализа
 4. Визуализация результатов
 5. Проверка на переобучение
+6. Сравнение с предыдущими результатами (до/после переобучения)
+7. Детальный анализ сигналов, качества TP/SL, конверсии
+8. Анализ распределения сигналов (LONG/SHORT/HOLD)
 
 Использование:
+    # Базовое использование
     python compare_ml_models.py
+    
+    # После переобучения - сравнение с предыдущими результатами
+    python compare_ml_models.py --compare-with ml_models_comparison_20260205_120000.csv --detailed-analysis
+    
+    # Полный анализ с визуализацией
+    python compare_ml_models.py --output all --detailed-analysis --check-overfitting
 
 Опции:
-    --days 30           # Сколько дней тестировать (по умолчанию 30)
-    --symbols BTCUSDT,ETHUSDT,SOLUSDT  # Ограничить список символов
-    --models-dir ml_models             # Путь к директории с моделями
+    --days 30                           # Сколько дней тестировать (по умолчанию 30)
+    --symbols BTCUSDT,ETHUSDT,SOLUSDT   # Ограничить список символов
+    --models-dir ml_models              # Путь к директории с моделями
     --output all                        # Сохранить результаты (csv, plots, all)
     --workers 4                         # Количество параллельных процессов
     --check-overfitting                 # Проверить модели на переобучение
+    --compare-with <file.csv>          # Сравнить с предыдущими результатами
+    --detailed-analysis                 # Запустить детальный анализ
 """
 
 import argparse
@@ -142,6 +154,33 @@ def metrics_to_dict(m: BacktestMetrics, model_path: Path) -> Dict[str, Any]:
         result["trades_per_day"] = m.total_trades / (args.days if 'args' in globals() else 30)
         result["expectancy_usd"] = (m.win_rate/100 * m.avg_win) - ((1 - m.win_rate/100) * abs(m.avg_loss))
     
+    # Добавляем все доступные метрики из BacktestMetrics
+    additional_metrics = {
+        "sortino_ratio": getattr(m, 'sortino_ratio', 0.0),
+        "calmar_ratio": getattr(m, 'calmar_ratio', 0.0),
+        "total_signals": getattr(m, 'total_signals', 0),
+        "avg_mfe": getattr(m, 'avg_mfe', 0.0),
+        "avg_mae": getattr(m, 'avg_mae', 0.0),
+        "mfe_mae_ratio": getattr(m, 'mfe_mae_ratio', 0.0),
+        "var_95": getattr(m, 'var_95', 0.0),
+        "cvar_95": getattr(m, 'cvar_95', 0.0),
+        "recovery_factor": getattr(m, 'recovery_factor', 0.0),
+        "expectancy_usd": getattr(m, 'expectancy_usd', 0.0),
+        "risk_reward_ratio": getattr(m, 'risk_reward_ratio', 0.0),
+        "trade_frequency_per_day": getattr(m, 'trade_frequency_per_day', 0.0),
+        "profitable_days_pct": getattr(m, 'profitable_days_pct', 0.0),
+        "ulcer_index": getattr(m, 'ulcer_index', 0.0),
+        "kelly_criterion": getattr(m, 'kelly_criterion', 0.0),
+        "avg_tp_distance_pct": getattr(m, 'avg_tp_distance_pct', 0.0),
+        "avg_sl_distance_pct": getattr(m, 'avg_sl_distance_pct', 0.0),
+        "avg_rr_ratio": getattr(m, 'avg_rr_ratio', 0.0),
+        "signal_quality_score": getattr(m, 'signal_quality_score', 0.0),
+        "signals_with_tp_sl_pct": getattr(m, 'signals_with_tp_sl_pct', 100.0),
+        "signals_with_correct_sl_pct": getattr(m, 'signals_with_correct_sl_pct', 100.0),
+        "avg_position_size_usd": getattr(m, 'avg_position_size_usd', 0.0),
+    }
+    result.update(additional_metrics)
+    
     return result
 
 
@@ -224,6 +263,33 @@ def test_single_model(args_tuple: Tuple) -> Optional[Dict[str, Any]]:
                 "avg_confidence": getattr(m, 'avg_confidence', 0.0),
             }
             
+            # Добавляем все доступные метрики
+            additional_metrics = {
+                "sortino_ratio": getattr(m, 'sortino_ratio', 0.0),
+                "calmar_ratio": getattr(m, 'calmar_ratio', 0.0),
+                "total_signals": getattr(m, 'total_signals', 0),
+                "avg_mfe": getattr(m, 'avg_mfe', 0.0),
+                "avg_mae": getattr(m, 'avg_mae', 0.0),
+                "mfe_mae_ratio": getattr(m, 'mfe_mae_ratio', 0.0),
+                "var_95": getattr(m, 'var_95', 0.0),
+                "cvar_95": getattr(m, 'cvar_95', 0.0),
+                "recovery_factor": getattr(m, 'recovery_factor', 0.0),
+                "expectancy_usd": getattr(m, 'expectancy_usd', 0.0),
+                "risk_reward_ratio": getattr(m, 'risk_reward_ratio', 0.0),
+                "trade_frequency_per_day": getattr(m, 'trade_frequency_per_day', 0.0),
+                "profitable_days_pct": getattr(m, 'profitable_days_pct', 0.0),
+                "ulcer_index": getattr(m, 'ulcer_index', 0.0),
+                "kelly_criterion": getattr(m, 'kelly_criterion', 0.0),
+                "avg_tp_distance_pct": getattr(m, 'avg_tp_distance_pct', 0.0),
+                "avg_sl_distance_pct": getattr(m, 'avg_sl_distance_pct', 0.0),
+                "avg_rr_ratio": getattr(m, 'avg_rr_ratio', 0.0),
+                "signal_quality_score": getattr(m, 'signal_quality_score', 0.0),
+                "signals_with_tp_sl_pct": getattr(m, 'signals_with_tp_sl_pct', 100.0),
+                "signals_with_correct_sl_pct": getattr(m, 'signals_with_correct_sl_pct', 100.0),
+                "avg_position_size_usd": getattr(m, 'avg_position_size_usd', 0.0),
+            }
+            result.update(additional_metrics)
+            
             return result
         
         return metrics_to_dict_local(metrics, model_path)
@@ -239,7 +305,7 @@ def compare_models(
     models_dir: Path,
     days: int = 30,
     interval: str = "15m",
-    initial_balance: float = 1000.0,
+    initial_balance: float = 100.0,
     risk_per_trade: float = 0.02,
     leverage: int = 10,
     workers: int = 4,
@@ -337,6 +403,9 @@ def compare_models(
     # Добавляем дополнительные метрики
     df_results = calculate_additional_metrics(df_results, days)
     
+    # Добавляем расширенный анализ
+    df_results = add_advanced_analysis(df_results, days)
+    
     # Проверка на переобучение
     if check_overfitting and len(df_results) > 0:
         df_results = add_overfitting_check(df_results, models_dir, days, interval, 
@@ -353,6 +422,123 @@ def compare_models(
     df_results.reset_index(drop=True, inplace=True)
     
     return df_results
+
+
+def add_advanced_analysis(df_results: pd.DataFrame, days: int) -> pd.DataFrame:
+    """
+    Добавляет расширенный анализ результатов:
+    - Анализ распределения сигналов (LONG/SHORT/HOLD)
+    - Анализ качества сигналов
+    - Анализ эффективности TP/SL
+    """
+    if df_results.empty:
+        return df_results
+    
+    # Анализ распределения сигналов
+    if 'total_signals' in df_results.columns and 'long_trades' in df_results.columns and 'short_trades' in df_results.columns:
+        df_results['hold_signals'] = df_results['total_signals'] - df_results['long_trades'] - df_results['short_trades']
+        df_results['long_signal_pct'] = (df_results['long_trades'] / df_results['total_signals'].replace(0, 1) * 100).fillna(0)
+        df_results['short_signal_pct'] = (df_results['short_trades'] / df_results['total_signals'].replace(0, 1) * 100).fillna(0)
+        df_results['hold_signal_pct'] = (df_results['hold_signals'] / df_results['total_signals'].replace(0, 1) * 100).fillna(0)
+        df_results['signal_utilization_pct'] = ((df_results['long_trades'] + df_results['short_trades']) / df_results['total_signals'].replace(0, 1) * 100).fillna(0)
+        df_results['long_short_balance'] = (df_results['long_trades'] / df_results['short_trades'].replace(0, 1)).fillna(1.0)
+    
+    # Анализ качества сигналов
+    if 'signals_with_tp_sl_pct' in df_results.columns:
+        df_results['signal_quality'] = pd.cut(
+            df_results['signals_with_tp_sl_pct'],
+            bins=[0, 50, 80, 95, 100],
+            labels=['Poor', 'Fair', 'Good', 'Excellent']
+        )
+    
+    # Анализ эффективности TP/SL
+    if 'avg_tp_distance_pct' in df_results.columns and 'avg_sl_distance_pct' in df_results.columns:
+        df_results['tp_sl_ratio'] = (df_results['avg_tp_distance_pct'] / df_results['avg_sl_distance_pct'].replace(0, 0.001)).fillna(0)
+        df_results['risk_reward_efficiency'] = df_results['tp_sl_ratio'] * df_results['win_rate_pct'] / 100
+    
+    # Анализ конверсии сигналов в сделки
+    if 'total_trades' in df_results.columns and 'total_signals' in df_results.columns:
+        df_results['signal_to_trade_ratio'] = (df_results['total_trades'] / df_results['total_signals'].replace(0, 1)).fillna(0)
+    
+    # Анализ стабильности (на основе MFE/MAE)
+    if 'avg_mfe' in df_results.columns and 'avg_mae' in df_results.columns:
+        df_results['trade_control'] = (df_results['avg_mfe'] / df_results['avg_mae'].replace(0, 0.001)).fillna(0)
+        df_results['trade_control_category'] = pd.cut(
+            df_results['trade_control'],
+            bins=[0, 0.5, 1.0, 2.0, float('inf')],
+            labels=['Poor', 'Fair', 'Good', 'Excellent']
+        )
+    
+    # Дополнительные метрики для диагностики
+    # Эффективность использования сигналов (сколько сделок на 100 сигналов)
+    if 'total_trades' in df_results.columns and 'total_signals' in df_results.columns:
+        df_results['trades_per_100_signals'] = (df_results['total_trades'] / df_results['total_signals'].replace(0, 1) * 100).fillna(0)
+    
+    # Потенциальная прибыльность (если бы все сигналы использовались)
+    if 'total_pnl_pct' in df_results.columns and 'signal_utilization_pct' in df_results.columns:
+        df_results['potential_pnl_if_all_signals'] = (
+            df_results['total_pnl_pct'] / (df_results['signal_utilization_pct'].replace(0, 1) / 100)
+        ).fillna(0)
+    
+    # Эффективность модели (PnL на сделку)
+    if 'total_pnl_pct' in df_results.columns and 'total_trades' in df_results.columns:
+        df_results['pnl_per_trade'] = (
+            df_results['total_pnl_pct'] / df_results['total_trades'].replace(0, 1)
+        ).fillna(0)
+    
+    return df_results
+
+
+def compare_with_previous_results(df_results: pd.DataFrame, previous_csv: str = None) -> pd.DataFrame:
+    """
+    Сравнивает текущие результаты с предыдущими (до/после переобучения).
+    """
+    if previous_csv is None or not Path(previous_csv).exists():
+        return df_results
+    
+    try:
+        df_previous = pd.read_csv(previous_csv)
+        
+        # Переименовываем колонки в предыдущих результатах
+        df_previous_renamed = df_previous[['model_name', 'symbol', 'total_pnl_pct', 'win_rate_pct', 
+                                           'profit_factor', 'max_drawdown_pct']].copy()
+        df_previous_renamed = df_previous_renamed.rename(columns={
+            'total_pnl_pct': 'total_pnl_pct_previous',
+            'win_rate_pct': 'win_rate_pct_previous',
+            'profit_factor': 'profit_factor_previous',
+            'max_drawdown_pct': 'max_drawdown_pct_previous',
+        })
+        
+        # Объединяем по model_name и symbol
+        df_merged = df_results.merge(
+            df_previous_renamed,
+            on=['model_name', 'symbol'],
+            how='left'
+        )
+        
+        # Вычисляем изменения
+        df_merged['pnl_change_pct'] = df_merged['total_pnl_pct'] - df_merged['total_pnl_pct_previous'].fillna(0)
+        df_merged['winrate_change_pct'] = df_merged['win_rate_pct'] - df_merged['win_rate_pct_previous'].fillna(0)
+        df_merged['profit_factor_change'] = df_merged['profit_factor'] - df_merged['profit_factor_previous'].fillna(0)
+        df_merged['dd_change_pct'] = df_merged['max_drawdown_pct'] - df_merged['max_drawdown_pct_previous'].fillna(0)
+        
+        # Флаг улучшения
+        df_merged['is_improved'] = (
+            (df_merged['pnl_change_pct'] > 0) &
+            (df_merged['winrate_change_pct'] >= -2) &  # Допускаем небольшое снижение win rate
+            (df_merged['dd_change_pct'] <= 2)  # Допускаем небольшое увеличение DD
+        )
+        
+        print(f"\n📊 Сравнение с предыдущими результатами:")
+        print(f"   Улучшено: {df_merged['is_improved'].sum()}/{len(df_merged)} моделей")
+        print(f"   Среднее изменение PnL%: {df_merged['pnl_change_pct'].mean():.2f}%")
+        print(f"   Среднее изменение Win Rate: {df_merged['winrate_change_pct'].mean():.2f}%")
+        
+        return df_merged
+        
+    except Exception as e:
+        print(f"⚠️  Ошибка при сравнении с предыдущими результатами: {e}")
+        return df_results
 
 
 def calculate_additional_metrics(df_results: pd.DataFrame, days: int) -> pd.DataFrame:
@@ -469,6 +655,323 @@ def add_overfitting_check(df_results: pd.DataFrame, models_dir: Path, days: int,
         df_results['is_overfit'] = df_results['model_name'].map(overfit_dict).fillna(False)
     
     return df_results
+
+
+def print_detailed_analysis(df_results: pd.DataFrame) -> None:
+    """Выводит детальный анализ результатов."""
+    if df_results.empty:
+        return
+    
+    print("\n" + "=" * 80)
+    print("📊 ДЕТАЛЬНЫЙ АНАЛИЗ РЕЗУЛЬТАТОВ")
+    print("=" * 80)
+    
+    # 1. Анализ распределения сигналов
+    if 'long_signal_pct' in df_results.columns:
+        print("\n📈 Анализ распределения сигналов:")
+        print("-" * 80)
+        for symbol in df_results['symbol'].unique():
+            symbol_df = df_results[df_results['symbol'] == symbol]
+            print(f"\n{symbol}:")
+            print(f"   Средний % LONG сигналов: {symbol_df['long_signal_pct'].mean():.1f}%")
+            print(f"   Средний % SHORT сигналов: {symbol_df['short_signal_pct'].mean():.1f}%")
+            print(f"   Средний % HOLD сигналов: {symbol_df['hold_signal_pct'].mean():.1f}%")
+            print(f"   Использование сигналов: {symbol_df['signal_utilization_pct'].mean():.1f}%")
+            print(f"   Баланс LONG/SHORT: {symbol_df['long_short_balance'].mean():.2f}:1")
+    
+    # 2. Анализ качества сигналов
+    if 'signals_with_tp_sl_pct' in df_results.columns:
+        print("\n🎯 Анализ качества сигналов:")
+        print("-" * 80)
+        print(f"   Средний % сигналов с TP/SL: {df_results['signals_with_tp_sl_pct'].mean():.1f}%")
+        if 'signals_with_correct_sl_pct' in df_results.columns:
+            print(f"   Средний % сигналов с правильным SL (1%): {df_results['signals_with_correct_sl_pct'].mean():.1f}%")
+        if 'signal_quality' in df_results.columns:
+            quality_dist = df_results['signal_quality'].value_counts()
+            print(f"   Распределение качества:")
+            for quality, count in quality_dist.items():
+                print(f"      {quality}: {count} моделей ({count/len(df_results)*100:.1f}%)")
+    
+    # 3. Анализ эффективности TP/SL
+    if 'avg_tp_distance_pct' in df_results.columns and 'avg_sl_distance_pct' in df_results.columns:
+        print("\n💰 Анализ эффективности TP/SL:")
+        print("-" * 80)
+        print(f"   Среднее расстояние до TP: {df_results['avg_tp_distance_pct'].mean():.2f}%")
+        print(f"   Среднее расстояние до SL: {df_results['avg_sl_distance_pct'].mean():.2f}%")
+        if 'tp_sl_ratio' in df_results.columns:
+            print(f"   Средний TP/SL ratio: {df_results['tp_sl_ratio'].mean():.2f}")
+        if 'risk_reward_efficiency' in df_results.columns:
+            print(f"   Эффективность риск/прибыль: {df_results['risk_reward_efficiency'].mean():.2f}")
+    
+    # 4. Анализ конверсии сигналов
+    if 'signal_to_trade_ratio' in df_results.columns:
+        print("\n🔄 Анализ конверсии сигналов в сделки:")
+        print("-" * 80)
+        print(f"   Средняя конверсия сигнал→сделка: {df_results['signal_to_trade_ratio'].mean():.2%}")
+        for symbol in df_results['symbol'].unique():
+            symbol_df = df_results[df_results['symbol'] == symbol]
+            print(f"   {symbol}: {symbol_df['signal_to_trade_ratio'].mean():.2%}")
+    
+    # 5. Анализ контроля сделок (MFE/MAE)
+    if 'trade_control' in df_results.columns:
+        print("\n📊 Анализ контроля сделок (MFE/MAE):")
+        print("-" * 80)
+        print(f"   Средний MFE/MAE ratio: {df_results['trade_control'].mean():.2f}")
+        if 'trade_control_category' in df_results.columns:
+            control_dist = df_results['trade_control_category'].value_counts()
+            print(f"   Распределение контроля:")
+            for category, count in control_dist.items():
+                print(f"      {category}: {count} моделей ({count/len(df_results)*100:.1f}%)")
+    
+    # 6. Топ-5 моделей по различным метрикам
+    print("\n🏆 ТОП-5 МОДЕЛЕЙ ПО РАЗЛИЧНЫМ МЕТРИКАМ:")
+    print("-" * 80)
+    
+    metrics_to_show = [
+        ('total_pnl_pct', 'PnL %'),
+        ('win_rate_pct', 'Win Rate %'),
+        ('profit_factor', 'Profit Factor'),
+        ('sharpe_ratio', 'Sharpe Ratio'),
+        ('composite_score', 'Composite Score'),
+    ]
+    
+    for metric_col, metric_name in metrics_to_show:
+        if metric_col in df_results.columns:
+            top5 = df_results.nlargest(5, metric_col)[['model_name', 'symbol', metric_col]]
+            print(f"\n{metric_name}:")
+            for idx, (_, row) in enumerate(top5.iterrows(), 1):
+                print(f"   {idx}. {row['model_name']} ({row['symbol']}): {row[metric_col]:.2f}")
+    
+    print("\n" + "=" * 80)
+    
+    # 7. Анализ проблем и рекомендации
+    print_problems_and_recommendations(df_results)
+
+
+def print_problems_and_recommendations(df_results: pd.DataFrame) -> None:
+    """
+    Анализирует результаты и выдает рекомендации по улучшению.
+    Фокус на проблемах: низкое использование сигналов, низкая конверсия, качество сигналов.
+    """
+    if df_results.empty:
+        return
+    
+    print("\n" + "=" * 80)
+    print("🔍 АНАЛИЗ ПРОБЛЕМ И РЕКОМЕНДАЦИИ ПО УЛУЧШЕНИЮ")
+    print("=" * 80)
+    
+    # 1. Анализ использования сигналов
+    if 'signal_utilization_pct' in df_results.columns:
+        avg_utilization = df_results['signal_utilization_pct'].mean()
+        print(f"\n📊 ПРОБЛЕМА 1: Использование сигналов")
+        print("-" * 80)
+        print(f"   Текущее использование: {avg_utilization:.1f}% (цель: 30-40%)")
+        
+        if avg_utilization < 25:
+            print(f"   ⚠️  КРИТИЧНО: Использование сигналов слишком низкое!")
+            print(f"   📉 Средний % HOLD: {df_results['hold_signal_pct'].mean():.1f}%")
+            print(f"   📉 Средний % LONG: {df_results['long_signal_pct'].mean():.1f}%")
+            print(f"   📉 Средний % SHORT: {df_results['short_signal_pct'].mean():.1f}%")
+            
+            print(f"\n   💡 РЕКОМЕНДАЦИИ:")
+            print(f"      1. Уменьшить threshold_pct в target labeling с 0.5% до 0.3%")
+            print(f"      2. Уменьшить min_profit_pct с 0.5% до 0.3%")
+            print(f"      3. Снизить базовый confidence_threshold на 5-10%")
+            print(f"      4. Проверить фильтры в strategy_ml.py - возможно слишком строгие")
+            print(f"      5. Увеличить forward_periods с 5 до 6-7 для большего охвата")
+            
+            # Анализ по символам
+            print(f"\n   📈 По символам:")
+            for symbol in df_results['symbol'].unique():
+                symbol_df = df_results[df_results['symbol'] == symbol]
+                util = symbol_df['signal_utilization_pct'].mean()
+                hold = symbol_df['hold_signal_pct'].mean()
+                print(f"      {symbol}: {util:.1f}% использование ({hold:.1f}% HOLD)")
+        else:
+            print(f"   ✅ Использование сигналов в норме")
+    
+    # 2. Анализ конверсии сигналов в сделки
+    if 'signal_to_trade_ratio' in df_results.columns:
+        avg_conversion = df_results['signal_to_trade_ratio'].mean() * 100
+        print(f"\n🔄 ПРОБЛЕМА 2: Конверсия сигналов в сделки")
+        print("-" * 80)
+        print(f"   Текущая конверсия: {avg_conversion:.2f}% (цель: 10-15%)")
+        
+        if avg_conversion < 5:
+            print(f"   ⚠️  КРИТИЧНО: Конверсия слишком низкая!")
+            
+            # Анализ возможных причин
+            if 'avg_confidence' in df_results.columns:
+                avg_conf = df_results['avg_confidence'].mean()
+                print(f"   📊 Средняя уверенность модели: {avg_conf:.1%}")
+                if avg_conf < 0.5:
+                    print(f"      ⚠️  Низкая уверенность - возможно модель не уверена в сигналах")
+            
+            if 'signals_with_tp_sl_pct' in df_results.columns:
+                tp_sl_pct = df_results['signals_with_tp_sl_pct'].mean()
+                if tp_sl_pct < 100:
+                    print(f"   ⚠️  Только {tp_sl_pct:.1f}% сигналов имеют TP/SL")
+                    print(f"      Это может блокировать открытие позиций")
+            
+            print(f"\n   💡 РЕКОМЕНДАЦИИ:")
+            print(f"      1. Проверить фильтры в strategy_ml.py:")
+            print(f"         - max_signals_per_day (сейчас 10) - возможно слишком низкий")
+            print(f"         - Фильтры по RSI (экстремальные зоны)")
+            print(f"         - Фильтры по объему (низкий объем)")
+            print(f"         - Фильтры стабильности (stability_filter)")
+            print(f"      2. Упростить условия открытия позиций")
+            print(f"      3. Проверить баланс - возможно недостаточно средств")
+            print(f"      4. Добавить логирование причин отклонения сигналов")
+            
+            # Анализ по символам
+            print(f"\n   📈 По символам:")
+            for symbol in df_results['symbol'].unique():
+                symbol_df = df_results[df_results['symbol'] == symbol]
+                conv = symbol_df['signal_to_trade_ratio'].mean() * 100
+                trades = symbol_df['total_trades'].mean()
+                signals = symbol_df['total_signals'].mean()
+                print(f"      {symbol}: {conv:.2f}% ({trades:.0f} сделок из {signals:.0f} сигналов)")
+        else:
+            print(f"   ✅ Конверсия в норме")
+    
+    # 3. Сравнение MTF vs без MTF
+    if 'mode_suffix' in df_results.columns:
+        mtf_models = df_results[df_results['mode_suffix'] == 'mtf']
+        no_mtf_models = df_results[df_results['mode_suffix'] == '15m']
+        
+        if len(mtf_models) > 0 and len(no_mtf_models) > 0:
+            print(f"\n📊 СРАВНЕНИЕ: MTF vs БЕЗ MTF")
+            print("-" * 80)
+            
+            mtf_pnl = mtf_models['total_pnl_pct'].mean()
+            no_mtf_pnl = no_mtf_models['total_pnl_pct'].mean()
+            mtf_util = mtf_models['signal_utilization_pct'].mean() if 'signal_utilization_pct' in mtf_models.columns else 0
+            no_mtf_util = no_mtf_models['signal_utilization_pct'].mean() if 'signal_utilization_pct' in no_mtf_models.columns else 0
+            
+            print(f"   MTF модели:")
+            print(f"      Средний PnL%: {mtf_pnl:.2f}%")
+            print(f"      Использование сигналов: {mtf_util:.1f}%")
+            print(f"      Моделей: {len(mtf_models)}")
+            
+            print(f"\n   БЕЗ MTF модели:")
+            print(f"      Средний PnL%: {no_mtf_pnl:.2f}%")
+            print(f"      Использование сигналов: {no_mtf_util:.1f}%")
+            print(f"      Моделей: {len(no_mtf_models)}")
+            
+            if no_mtf_pnl > mtf_pnl:
+                print(f"\n   ✅ Модели БЕЗ MTF показывают лучшие результаты!")
+                print(f"      Разница: {no_mtf_pnl - mtf_pnl:.2f}%")
+            elif mtf_pnl > no_mtf_pnl:
+                print(f"\n   ✅ MTF модели показывают лучшие результаты!")
+                print(f"      Разница: {mtf_pnl - no_mtf_pnl:.2f}%")
+            else:
+                print(f"\n   ⚖️  Результаты сопоставимы")
+    
+    # 4. Анализ качества сигналов
+    if 'signals_with_tp_sl_pct' in df_results.columns:
+        avg_tp_sl = df_results['signals_with_tp_sl_pct'].mean()
+        print(f"\n🎯 ПРОБЛЕМА 3: Качество сигналов")
+        print("-" * 80)
+        print(f"   Сигналов с TP/SL: {avg_tp_sl:.1f}% (цель: 100%)")
+        
+        if avg_tp_sl < 100:
+            print(f"   ⚠️  Не все сигналы имеют TP/SL!")
+            print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить генерацию TP/SL в strategy_ml.py")
+        else:
+            print(f"   ✅ Все сигналы имеют TP/SL")
+        
+        if 'signals_with_correct_sl_pct' in df_results.columns:
+            correct_sl = df_results['signals_with_correct_sl_pct'].mean()
+            print(f"   Сигналов с правильным SL (1%): {correct_sl:.1f}% (цель: 100%)")
+            if correct_sl < 95:
+                print(f"   ⚠️  Много сигналов с неправильным SL!")
+                print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить расчет SL в strategy_ml.py")
+    
+    # 5. Анализ баланса LONG/SHORT
+    if 'long_short_balance' in df_results.columns:
+        avg_balance = df_results['long_short_balance'].mean()
+        print(f"\n⚖️  ПРОБЛЕМА 4: Баланс LONG/SHORT")
+        print("-" * 80)
+        print(f"   Соотношение LONG/SHORT: {avg_balance:.2f}:1 (цель: ~1:1)")
+        
+        if avg_balance > 2.0 or avg_balance < 0.5:
+            print(f"   ⚠️  Дисбаланс LONG/SHORT!")
+            print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить class weights в обучении")
+            print(f"      Убедиться, что minority class получает достаточный вес")
+        else:
+            print(f"   ✅ Баланс в норме")
+    
+    # 6. Анализ MFE/MAE (контроль сделок)
+    if 'trade_control' in df_results.columns:
+        avg_control = df_results['trade_control'].mean()
+        print(f"\n📊 ПРОБЛЕМА 5: Контроль сделок (MFE/MAE)")
+        print("-" * 80)
+        print(f"   Средний MFE/MAE ratio: {avg_control:.2f} (цель: > 1.0)")
+        
+        if avg_control == 0 or avg_control < 0.5:
+            print(f"   ⚠️  КРИТИЧНО: MFE/MAE не рассчитывается или очень низкий!")
+            print(f"   💡 РЕКОМЕНДАЦИЯ: Исправить расчет MFE/MAE в backtest_ml_strategy.py")
+        elif avg_control < 1.0:
+            print(f"   ⚠️  Низкий контроль - сделки уходят в убыток быстрее, чем в прибыль")
+            print(f"   💡 РЕКОМЕНДАЦИЯ: Улучшить timing входа (возможно, слишком ранние входы)")
+        else:
+            print(f"   ✅ Контроль в норме")
+    
+    # 7. Общие рекомендации
+    print(f"\n💡 ОБЩИЕ РЕКОМЕНДАЦИИ:")
+    print("-" * 80)
+    
+    profitable = df_results[df_results['total_pnl_pct'] > 0]
+    if len(profitable) > 0:
+        profitable_pct = len(profitable) / len(df_results) * 100
+        print(f"   ✅ Прибыльных моделей: {profitable_pct:.1f}% ({len(profitable)}/{len(df_results)})")
+        
+        if profitable_pct < 50:
+            print(f"   ⚠️  Меньше половины моделей прибыльны!")
+            print(f"      Рекомендуется пересмотреть параметры обучения")
+        
+        # Лучшие модели
+        best = profitable.nlargest(3, 'total_pnl_pct')
+        print(f"\n   🏆 Топ-3 прибыльных модели:")
+        for idx, (_, row) in enumerate(best.iterrows(), 1):
+            print(f"      {idx}. {row['model_name']} ({row['symbol']}): {row['total_pnl_pct']:.2f}% PnL")
+    else:
+        print(f"   ❌ КРИТИЧНО: Нет прибыльных моделей!")
+        print(f"      Необходимо пересмотреть:")
+        print(f"      1. Параметры target labeling")
+        print(f"      2. Гиперпараметры моделей")
+        print(f"      3. Фильтры в strategy_ml.py")
+        print(f"      4. Параметры TP/SL")
+    
+    # 8. Приоритетные задачи
+    print(f"\n🎯 ПРИОРИТЕТНЫЕ ЗАДАЧИ (по результатам анализа):")
+    print("-" * 80)
+    
+    priorities = []
+    
+    if avg_utilization < 25 if 'signal_utilization_pct' in df_results.columns else False:
+        priorities.append("1. УВЕЛИЧИТЬ использование сигналов (сейчас слишком много HOLD)")
+    
+    if avg_conversion < 5 if 'signal_to_trade_ratio' in df_results.columns else False:
+        priorities.append("2. УЛУЧШИТЬ конверсию сигналов в сделки (проверить фильтры)")
+    
+    if avg_tp_sl < 100 if 'signals_with_tp_sl_pct' in df_results.columns else False:
+        priorities.append("3. ИСПРАВИТЬ генерацию TP/SL (не все сигналы имеют TP/SL)")
+    
+    if avg_control == 0 or avg_control < 0.5 if 'trade_control' in df_results.columns else False:
+        priorities.append("4. ИСПРАВИТЬ расчет MFE/MAE (сейчас не работает)")
+    
+    if len(profitable) == 0 if 'total_pnl_pct' in df_results.columns else False:
+        priorities.append("5. КРИТИЧНО: Пересмотреть параметры обучения (нет прибыльных моделей)")
+    
+    if priorities:
+        for priority in priorities:
+            print(f"   {priority}")
+    else:
+        print(f"   ✅ Все основные метрики в норме!")
+        print(f"   Можно переходить к оптимизации гиперпараметров")
+    
+    print("\n" + "=" * 80)
 
 
 def print_summary_table(df_results: pd.DataFrame) -> None:
@@ -777,14 +1280,20 @@ Examples:
   # Базовая команда
   python compare_ml_models.py
   
-  # Расширенное тестирование
-  python compare_ml_models.py --days 60 --symbols BTCUSDT,ETHUSDT,SOLUSDT,ADAUSDT 
+  # После переобучения - сравнение с предыдущими результатами
+  python compare_ml_models.py --compare-with ml_models_comparison_20260205_120000.csv --detailed-analysis
+  
+  # Расширенное тестирование с детальным анализом
+  python compare_ml_models.py --days 60 --symbols BTCUSDT,ETHUSDT,SOLUSDT,ADAUSDT --detailed-analysis
   
   # С проверкой переобучения и 8 процессами
-  python compare_ml_models.py --check-overfitting --workers 8 --output all
+  python compare_ml_models.py --check-overfitting --workers 8 --output all --detailed-analysis
   
   # Тестирование с низким риском
   python compare_ml_models.py --risk 0.01 --leverage 5 --balance 5000
+  
+  # Полный анализ после переобучения
+  python compare_ml_models.py --compare-with previous_results.csv --output all --detailed-analysis --check-overfitting
         """
     )
     
@@ -811,8 +1320,8 @@ Examples:
     parser.add_argument(
         "--balance",
         type=float,
-        default=1000.0,
-        help="Initial balance (default: 1000.0)",
+        default=100.0,
+        help="Initial balance (default: 100.0)",
     )
     parser.add_argument(
         "--risk",
@@ -843,6 +1352,17 @@ Examples:
         choices=["none", "csv", "plots", "all"],
         default="csv",
         help="Output options: none, csv, plots, all (default: csv)",
+    )
+    parser.add_argument(
+        "--compare-with",
+        type=str,
+        default=None,
+        help="Path to previous CSV results for comparison (before/after retraining)",
+    )
+    parser.add_argument(
+        "--detailed-analysis",
+        action="store_true",
+        help="Run detailed analysis (signal distribution, quality metrics, etc.)",
     )
     
     args = parser.parse_args()
@@ -886,11 +1406,22 @@ Examples:
     # Сохраняем результаты в зависимости от опций
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
+    # Сравнение с предыдущими результатами
+    if args.compare_with:
+        df_results = compare_with_previous_results(df_results, args.compare_with)
+    
     if args.output in ["csv", "all"]:
         csv_name = f"ml_models_comparison_{timestamp}.csv"
         df_results.to_csv(csv_name, index=False, encoding='utf-8')
         print(f"\n💾 Full comparison table saved to: {csv_name}")
         print(f"   Rows: {len(df_results)}, Columns: {len(df_results.columns)}")
+    
+    # Детальный анализ (включает анализ проблем и рекомендации)
+    if args.detailed_analysis:
+        print_detailed_analysis(df_results)
+    else:
+        # Даже без --detailed-analysis показываем краткий анализ проблем
+        print_problems_and_recommendations(df_results)
     
     if args.output in ["plots", "all"]:
         plots_dir = f"comparison_plots_{timestamp}"

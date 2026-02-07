@@ -902,7 +902,9 @@ class TelegramBot:
             
             for symbol in self.state.active_symbols:
                 await self.send_notification(f"🔄 Обучение модели для {symbol}...")
-                comparison = self.model_manager.train_and_compare(symbol)
+                # Используем настройки MTF из конфига
+                use_mtf = self.settings.ml_strategy.mtf_enabled
+                comparison = self.model_manager.train_and_compare(symbol, use_mtf=use_mtf)
                 
                 if comparison:
                     best_model = comparison.get("new_model", {})
@@ -935,9 +937,17 @@ class TelegramBot:
                 await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
                 return
             
+            # Определяем параметры MTF из настроек
+            use_mtf = self.settings.ml_strategy.mtf_enabled
+            cmd_args = ["python3", str(script_path), "--symbol", symbol]
+            
+            # Добавляем параметры MTF (обучаем обе группы: MTF и non-MTF)
+            # Это даст больше вариантов моделей для выбора
+            # Если нужно только MTF или только non-MTF, можно добавить --mtf или --no-mtf
+            
             # Запускаем обучение в отдельном процессе
             process = await asyncio.create_subprocess_exec(
-                "python3", str(script_path), "--symbol", symbol,
+                *cmd_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(script_path.parent)

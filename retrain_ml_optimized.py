@@ -91,8 +91,32 @@ def safe_print(*args, **kwargs):
 def main():
     """Переобучение с оптимизированными параметрами."""
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Обучение ML моделей с опциональными MTF фичами",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  # Обучение БЕЗ MTF (только 15m фичи)
+  python retrain_ml_optimized.py --no-mtf
+  
+  # Обучение С MTF (15m + 1h + 4h фичи)
+  python retrain_ml_optimized.py --mtf
+  
+  # Обучение БЕЗ MTF для конкретного символа
+  python retrain_ml_optimized.py --symbol SOLUSDT --no-mtf
+        """
+    )
     parser.add_argument("--symbol", type=str, help="Торговая пара для переобучения")
+    parser.add_argument(
+        "--mtf", 
+        action="store_true", 
+        help="Использовать MTF фичи (1h, 4h) - по умолчанию включено"
+    )
+    parser.add_argument(
+        "--no-mtf", 
+        action="store_true", 
+        help="НЕ использовать MTF фичи (только 15m)"
+    )
     args = parser.parse_known_args()[0]
     
     safe_print("=" * 80)
@@ -103,12 +127,26 @@ def main():
     settings = load_settings()
     
     # Список символов для обучения
-    symbols = [args.symbol] if args.symbol else ["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
+    symbols = [args.symbol] if args.symbol else ["BNBUSDT", "ADAUSDT"]
     base_interval = "15"  # 15 минут (базовый ТФ)
+    #["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
+    # Определяем, использовать ли MTF-режим при обучении
+    # Приоритет: --no-mtf > --mtf > переменная окружения > по умолчанию (включено)
+    if args.no_mtf:
+        ml_mtf_enabled = False
+        safe_print("📌 Режим: БЕЗ MTF фичей (только 15m)")
+    elif args.mtf:
+        ml_mtf_enabled = True
+        safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h)")
+    else:
+        # Проверяем переменную окружения, если флаги не указаны
+        ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "1")
+        ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
+        if ml_mtf_enabled:
+            safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h) [по умолчанию]")
+        else:
+            safe_print("📌 Режим: БЕЗ MTF фичей (только 15m) [из переменной окружения]")
     
-    # Определяем, использовать ли MTF-режим при обучении (читаем из окружения)
-    ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "1")
-    ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
     mode_suffix = "mtf" if ml_mtf_enabled else "15m"
     
     # Обучаем модели для каждого символа
@@ -186,20 +224,22 @@ def main():
         safe_print(f"\n[3/5] 🎯 Создание целевой переменной (оптимизированный таргет)...")
         safe_print("   Параметры:")
         safe_print("   • Forward periods: 5 (75 минут)")
-        safe_print("   • Threshold: 1.0% (вместо 0.2%)")
+        safe_print("   • Threshold: 0.3% (уменьшено для больше сигналов)")
+        safe_print("   • Min profit: 0.3% (уменьшено для больше сигналов)")
         safe_print("   • Risk/Reward: 1.5:1")
         safe_print("   • Use ATR threshold: True")
         
         # Используем УПРОЩЕННЫЕ параметры для большего количества сигналов
+        # КРИТИЧНО: Уменьшены пороги для увеличения использования сигналов (цель: 30-40%)
         df_with_target = feature_engineer.create_target_variable(
             df_features,
             forward_periods=5,  # 5 * 15m = 75 минут
-            threshold_pct=0.5,  # УМЕНЬШЕНО с 1.0% до 0.5% для больше сигналов
+            threshold_pct=0.3,  # УМЕНЬШЕНО с 0.5% до 0.3% для больше сигналов
             use_atr_threshold=True,
             use_risk_adjusted=True,
             min_risk_reward_ratio=1.5,  # УМЕНЬШЕНО с 2.0 до 1.5
             max_hold_periods=96,  # УВЕЛИЧЕНО с 48 до 96 (24 часа)
-            min_profit_pct=0.5,  # УМЕНЬШЕНО с 1.0% до 0.5%
+            min_profit_pct=0.3,  # УМЕНЬШЕНО с 0.5% до 0.3% для больше сигналов
         )
         
         # Анализ распределения классов

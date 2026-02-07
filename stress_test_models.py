@@ -52,6 +52,26 @@ SCENARIOS = [
         'commission': 0.0006,
         'days': 3,
     },
+    {
+        'name': 'High Volatility',
+        'description': 'Период с высокой волатильностью (21 день, проверка устойчивости)',
+        'commission': 0.0006,
+        'days': 21,
+    },
+    {
+        'name': 'Low Balance',
+        'description': 'Низкий начальный баланс ($50 вместо $100)',
+        'commission': 0.0006,
+        'days': 14,
+        'initial_balance': 50.0,
+    },
+    {
+        'name': 'High Leverage',
+        'description': 'Высокое плечо (20x вместо 10x)',
+        'commission': 0.0006,
+        'days': 14,
+        'leverage': 20,
+    },
 ]
 
 def main():
@@ -78,15 +98,18 @@ def main():
             print(f"   {scenario['description']}")
             
             try:
-                # Запускаем бэктест
+                # Запускаем бэктест с параметрами из сценария
+                initial_balance = scenario.get('initial_balance', 100.0)
+                leverage = scenario.get('leverage', 10)
+                
                 metrics = run_exact_backtest(
                     model_path=model_path,
                     symbol=symbol,
                     days_back=scenario['days'],
                     interval="15",
-                    initial_balance=1000.0,
+                    initial_balance=initial_balance,
                     risk_per_trade=0.02,
-                    leverage=10,
+                    leverage=leverage,
                 )
                 
                 if metrics:

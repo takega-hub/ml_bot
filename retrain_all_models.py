@@ -214,7 +214,11 @@ def main():
             
             # Проверяем существующую модель если нужно пропустить
             if args.skip_existing:
-                model_name = f"{config['name']}_{symbol}_{config['suffix']}.pkl"
+                # Правильный формат имени: {type}_{symbol}_15_{mode}.pkl
+                # где mode = "15m" для non-MTF или "mtf" для MTF
+                mode_suffix = "mtf" if use_mtf else "15m"
+                model_type = config['name'].replace('_mtf', '').replace('mtf', '')  # Убираем _mtf из имени
+                model_name = f"{model_type}_{symbol}_15_{mode_suffix}.pkl"
                 model_path = Path("ml_models") / model_name
                 if model_path.exists():
                     print(f"⏭️  Пропускаем {model_name} (уже существует)")

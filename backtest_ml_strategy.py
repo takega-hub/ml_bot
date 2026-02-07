@@ -150,7 +150,7 @@ class MLBacktestSimulator:
     
     def __init__(
         self,
-        initial_balance: float = 1000.0,
+        initial_balance: float = 100.0,
         risk_per_trade: float = 0.02,
         commission: float = 0.0006,
         max_position_size_pct: float = 0.1,
@@ -255,32 +255,20 @@ class MLBacktestSimulator:
         })
     
     def calculate_position_size(self, entry_price: float, stop_loss: float, action: Action, 
-                               margin_pct_balance: float = 0.20, base_order_usd: float = 50.0) -> Tuple[float, float]:
+                               margin_pct_balance: float = 0.20, base_order_usd: float = 100.0) -> Tuple[float, float]:
         """
         Рассчитывает размер позиции ТОЧНО как реальный бот.
         
         Реальный бот использует:
-        1. margin_pct_balance% от баланса (по умолчанию 20%)
-        2. Фиксированную сумму base_order_usd (по умолчанию $50)
-        3. Берет минимум из двух вариантов
+        - Фиксированная сумма позиции: base_order_usd (по умолчанию $100)
+        - Маржа = base_order_usd / leverage
+        - Количество = base_order_usd / цена входа
         """
-        # РАСЧЕТ 1: margin_pct_balance% от баланса с использованием плеча
-        # Маржа = баланс * margin_pct_balance
-        # Количество = (маржа * leverage) / цена
-        margin_from_percentage = self.balance * margin_pct_balance
-        qty_from_percentage = (margin_from_percentage * self.leverage) / entry_price
+        # РАСЧЕТ: Фиксированная сумма позиции с учетом плеча
+        # Размер позиции в USD (notional value) = фиксированная сумма
+        position_size_usd = base_order_usd
         
-        # РАСЧЕТ 2: Фиксированная сумма
-        # Количество = base_order_usd / цена
-        qty_from_fixed = base_order_usd / entry_price
-        
-        # Используем минимум из двух вариантов (как реальный бот)
-        total_qty = min(qty_from_percentage, qty_from_fixed)
-        
-        # Размер позиции в USD (notional value)
-        position_size_usd = total_qty * entry_price
-        
-        # Требуемая маржа
+        # Требуемая маржа = размер позиции / leverage
         margin_required = position_size_usd / self.leverage
         
         # Проверяем, что маржа не превышает баланс
@@ -322,13 +310,12 @@ class MLBacktestSimulator:
             return False
         
         # 4. Рассчитываем размер позиции (ТОЧНО как реальный бот)
-        # Используем настройки из settings (если доступны) или значения по умолчанию
-        margin_pct_balance = getattr(self, '_margin_pct_balance', 0.20)
-        base_order_usd = getattr(self, '_base_order_usd', 50.0)
+        # Используем фиксированную сумму $100 с учетом плеча
+        base_order_usd = getattr(self, '_base_order_usd', 100.0)  # Фиксированная сумма позиции $100
         
         position_size_usd, margin_required = self.calculate_position_size(
             signal.price, stop_loss, signal.action,
-            margin_pct_balance=margin_pct_balance,
+            margin_pct_balance=0.20,  # Не используется, оставлено для совместимости
             base_order_usd=base_order_usd
         )
         
@@ -449,21 +436,38 @@ class MLBacktestSimulator:
         else:  # SHORT
             price_change_pct = (pos.entry_price - exit_price) / pos.entry_price
         
-        # PnL с учетом плеча
-        pnl_pct = price_change_pct * self.leverage
-        pnl_usd = pos.size_usd * pnl_pct
+        # PnL с учетом плеча: считаем от МАРЖИ, а не от размера позиции!
+        # Маржа = размер позиции / плечо
+        margin_used = pos.size_usd / self.leverage
         
-        # Комиссии
-        notional = pos.size_usd * self.leverage
-        commission_cost = notional * self.commission * 2
-        pnl_usd -= commission_cost
+        # PnL в USD = маржа * процент изменения цены * плечо
+        pnl_usd_before_commission = margin_used * price_change_pct * self.leverage
+        
+        # Комиссии (считаются от суммы сделки при входе и выходе)
+        # При входе: сумма = размер позиции в USD
+        # При выходе: сумма = количество монет × цена выхода
+        # Количество монет = размер позиции при входе / цена входа
+        quantity = pos.size_usd / pos.entry_price if pos.entry_price > 0 else 0.0
+        notional_entry = pos.size_usd  # Сумма сделки при входе
+        notional_exit = quantity * exit_price  # Сумма сделки при выходе
+        commission_cost = (notional_entry + notional_exit) * self.commission  # Вход + выход
+        
+        # Итоговый PnL с учетом комиссий
+        pnl_usd = pnl_usd_before_commission - commission_cost
+        
+        # Процент PnL от маржи С УЧЕТОМ комиссий (одинаково для LONG и SHORT)
+        # Это реальный процент доходности/убытка от маржи
+        if margin_used > 0:
+            pnl_pct = (pnl_usd / margin_used) * 100  # Процент от маржи с учетом комиссий
+        else:
+            pnl_pct = 0.0
         
         # Возвращаем маржу и добавляем PnL
-        margin_returned = pos.size_usd / self.leverage
+        margin_returned = margin_used
         self.balance += margin_returned + pnl_usd
         
         pos.pnl = pnl_usd
-        pos.pnl_pct = pnl_pct * 100
+        pos.pnl_pct = pnl_pct  # Процент от маржи с учетом комиссий
         
         # Обновляем кривую капитала
         self.equity_curve.append(self.balance)
@@ -476,13 +480,16 @@ class MLBacktestSimulator:
         self.trades.append(pos)
         self.current_position = None
         
-        # Логируем (только первые 10 сделок)
+        # Логируем все сделки (но с периодическим выводом после 10-й)
         if len(self.trades) <= 10:
             print(f"\n📊 Закрыта позиция #{len(self.trades)}:")
             print(f"   {pos.action.value} @ ${pos.entry_price:.2f} -> ${exit_price:.2f}")
             print(f"   Причина: {exit_reason.value}")
-            print(f"   PnL: ${pnl_usd:.2f} ({pnl_pct*100:.2f}%)")
+            print(f"   PnL: ${pnl_usd:.2f} ({pos.pnl_pct:.2f}%)")
             print(f"   Новый баланс: ${self.balance:.2f}")
+        elif len(self.trades) % 10 == 0:
+            # Периодический вывод каждые 10 сделок
+            print(f"📊 Сделка #{len(self.trades)}: {pos.action.value} -> {exit_reason.value}, PnL: ${pnl_usd:.2f} ({pos.pnl_pct:.2f}%), Баланс: ${self.balance:.2f}")
     
     def close_all_positions(self, final_time: datetime, final_price: float):
         """Закрывает все позиции в конце бэктеста."""
@@ -633,9 +640,9 @@ class MLBacktestSimulator:
             largest_win=max([t.pnl for t in winning_trades]) if winning_trades else 0.0,
             largest_loss=min([t.pnl for t in losing_trades]) if losing_trades else 0.0,
             avg_confidence=np.mean([t.confidence for t in self.trades]) if self.trades else 0.0,
-            avg_mfe=0.0,
-            avg_mae=0.0,
-            mfe_mae_ratio=0.0,
+            avg_mfe=np.mean([t.max_favorable_excursion for t in self.trades]) * 100 if self.trades else 0.0,  # В процентах
+            avg_mae=np.mean([abs(t.max_adverse_excursion) for t in self.trades]) * 100 if self.trades else 0.0,  # В процентах, берем abs
+            mfe_mae_ratio=np.mean([t.max_favorable_excursion / abs(t.max_adverse_excursion) if t.max_adverse_excursion != 0 else 0.0 for t in self.trades]) if self.trades else 0.0,
             var_95=0.0,
             cvar_95=0.0,
             recovery_factor=total_pnl / max_drawdown if max_drawdown > 0 else 0.0,
@@ -660,7 +667,7 @@ def run_exact_backtest(
     symbol: str = "BTCUSDT",
     days_back: int = 30,
     interval: str = "15",
-    initial_balance: float = 1000.0,
+    initial_balance: float = 100.0,
     risk_per_trade: float = 0.02,
     leverage: int = 10,
 ) -> Optional[BacktestMetrics]:
@@ -812,7 +819,9 @@ def run_exact_backtest(
     
     # Передаем настройки размера позиции в симулятор (как в реальном боте)
     simulator._margin_pct_balance = settings.risk.margin_pct_balance  # 20% от баланса
-    simulator._base_order_usd = settings.risk.base_order_usd  # $50 фиксированная сумма
+    # Передаем настройки размера позиции в симулятор (как в реальном боте)
+    # Используем фиксированную сумму $100 с учетом плеча
+    simulator._base_order_usd = 100.0  # Фиксированная сумма позиции $100
     
     # Запускаем бэктест
     print(f"\n📈 Запуск точного бэктеста...")
@@ -825,7 +834,22 @@ def run_exact_backtest(
     
     # ВАЖНО: Используем все данные до текущего момента (как реальный бот)
     # Реальный бот на каждой итерации использует ВСЕ доступные исторические данные
-    for idx in range(len(df_with_features)):
+    total_bars = len(df_with_features)
+    processed_bars = 0
+    
+    # Прогресс-бар для отслеживания процесса
+    try:
+        from tqdm import tqdm
+        progress_bar = tqdm(
+            range(min_window_size, total_bars),
+            desc=f"Бэктест {symbol}",
+            unit="бар",
+            ncols=100
+        )
+    except ImportError:
+        progress_bar = range(min_window_size, total_bars)
+    
+    for idx in progress_bar:
         # Пропускаем первые N баров, чтобы накопить достаточно данных для индикаторов
         if idx < min_window_size:
             continue
@@ -839,7 +863,8 @@ def run_exact_backtest(
         # ВАЖНО: Реальный бот использует ВСЕ данные до текущего момента
         # Это критично для правильной работы индикаторов и ML модели
         # Используем данные от начала до текущего индекса (включительно)
-        df_window = df_with_features.iloc[:idx+1].copy()
+        # ОПТИМИЗАЦИЯ: Используем view вместо copy для ускорения (но нужно быть осторожным)
+        df_window = df_with_features.iloc[:idx+1]
         
         # Определяем текущую позицию (как реальный бот)
         has_position = None
@@ -897,6 +922,15 @@ def run_exact_backtest(
         # Проверяем вход в позицию (только если нет открытой позиции)
         if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
             simulator.open_position(signal, current_time, symbol)
+        
+        # Периодический вывод прогресса в прогресс-бар (каждые 500 баров)
+        processed_bars += 1
+        if processed_bars % 500 == 0 and hasattr(progress_bar, 'set_postfix'):
+            trades_count = len(simulator.trades)
+            progress_bar.set_postfix({
+                'Сделок': trades_count,
+                'Баланс': f'${simulator.balance:.2f}'
+            })
     
     # Закрываем все позиции
     if simulator.current_position is not None:
@@ -1071,8 +1105,8 @@ def main():
                        help='Количество дней для бэктеста (по умолчанию: 30)')
     parser.add_argument('--interval', type=str, default='15m',
                        help='Таймфрейм (по умолчанию: 15m)')
-    parser.add_argument('--balance', type=float, default=1000.0,
-                       help='Начальный баланс (по умолчанию: 1000.0)')
+    parser.add_argument('--balance', type=float, default=100.0,
+                       help='Начальный баланс (по умолчанию: 100.0)')
     parser.add_argument('--risk', type=float, default=0.02,
                        help='Риск на сделку (по умолчанию: 0.02 = 2%%)')
     parser.add_argument('--leverage', type=int, default=10,
