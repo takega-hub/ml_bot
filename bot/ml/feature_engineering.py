@@ -465,8 +465,8 @@ class FeatureEngineer:
         # Сначала forward fill, потом backward fill
         df = df.ffill().bfill()
         
-        # Заполняем оставшиеся NaN нулями (с явным указанием downcast=None для избежания предупреждений)
-        df = df.fillna(0, downcast=None)
+        # Заполняем оставшиеся NaN нулями
+        df = df.fillna(0)
         # Восстанавливаем типы после fillna
         df = df.infer_objects(copy=False)
         
@@ -568,8 +568,8 @@ class FeatureEngineer:
                 print(f"[WARNING] Ошибка при добавлении MTF фичей для {tf_name}: {e}")
                 continue
         
-        # Заполняем NaN (с явным указанием downcast=None для избежания предупреждений)
-        df = df.ffill().bfill().fillna(0, downcast=None)
+        # Заполняем NaN
+        df = df.ffill().bfill().fillna(0)
         df = df.infer_objects(copy=False)
         
         return df
