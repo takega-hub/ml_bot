@@ -508,12 +508,25 @@ class MLStrategy:
             return 0, 0.0
         
         try:
+            # Логируем начало predict для отладки
+            if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
+                logger.info(f"[ml_strategy] predict() начат, df.shape={df.shape}, skip_feature_creation={skip_feature_creation}")
+                import time
+                prepare_start = time.time()
+            
             # Подготавливаем фичи (создаст все необходимые индикаторы или использует уже созданные)
             # Нужно получить и X (массив фичей) и df_with_features (DataFrame с фичами) для QuadEnsemble
             X, df_with_features = self.prepare_features_with_df(df, skip_feature_creation=skip_feature_creation)
             
+            if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
+                prepare_elapsed = time.time() - prepare_start
+                logger.info(f"[ml_strategy] prepare_features_with_df() завершен за {prepare_elapsed:.2f} сек, X.shape={X.shape}")
+            
             # Берем последний образец
             X_last = X[-1:].reshape(1, -1)
+            
+            if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
+                logger.info(f"[ml_strategy] X_last подготовлен: shape={X_last.shape}")
         except Exception as e:
             logger.error(f"[ml_strategy] Error preparing features: {e}")
             return 0, 0.0
@@ -697,6 +710,14 @@ class MLStrategy:
             Signal объект с уровневым SL и RR TP
         """
         try:
+            # Логируем начало generate_signal для отладки (только первые несколько раз)
+            if not hasattr(self, '_generate_signal_call_count'):
+                self._generate_signal_call_count = 0
+            self._generate_signal_call_count += 1
+            
+            if self._generate_signal_call_count <= 3:
+                logger.info(f"[ml_strategy] generate_signal() вызван (раз {self._generate_signal_call_count}), df.shape={df.shape}")
+            
             # Определяем символ
             symbol = getattr(self, '_symbol', None)
             if symbol is None:
@@ -714,9 +735,20 @@ class MLStrategy:
                 else:
                     symbol = "UNKNOWN"
             
+            if self._generate_signal_call_count <= 3:
+                logger.info(f"[ml_strategy] Символ определен: {symbol}, вызов predict()...")
+            
             # Делаем предсказание
             # ВАЖНО: НЕ пропускаем создание фичей, чтобы индикаторы обновлялись для новых свечей
+            import time
+            if self._generate_signal_call_count <= 3:
+                predict_start = time.time()
+            
             prediction, confidence = self.predict(df, skip_feature_creation=False)
+            
+            if self._generate_signal_call_count <= 3:
+                predict_elapsed = time.time() - predict_start
+                logger.info(f"[ml_strategy] predict() завершен за {predict_elapsed:.2f} сек, prediction={prediction}, confidence={confidence:.4f}")
             
             # === ДИНАМИЧЕСКИЙ CONFIDENCE THRESHOLD ===
             # Адаптируем порог на основе рыночных условий

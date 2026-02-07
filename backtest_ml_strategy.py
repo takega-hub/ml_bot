@@ -898,15 +898,25 @@ def run_exact_backtest(
                 logger.info(f"[run_exact_backtest] Начало обработки первого бара (idx={idx})")
                 print(f"   Обработка первого бара: {idx}/{total_bars}...")
             
-            current_time = df_with_features.index[idx]
-            row = df_with_features.iloc[idx]
-            current_price = row['close']
-            high = row['high']
-            low = row['low']
-            
-            # Выводим прогресс для первых 5 баров
-            if processed_bars < 5:
-                print(f"   Бар {processed_bars + 1}: {current_time}, цена: {current_price:.2f}")
+            try:
+                current_time = df_with_features.index[idx]
+                row = df_with_features.iloc[idx]
+                current_price = row['close']
+                high = row['high']
+                low = row['low']
+                
+                # Выводим прогресс для первых 5 баров
+                if processed_bars < 5:
+                    print(f"   Бар {processed_bars + 1}: {current_time}, цена: {current_price:.2f}")
+                
+                if processed_bars == 0:
+                    logger.info(f"[run_exact_backtest] Извлечены данные строки: time={current_time}, price={current_price:.2f}")
+                    print(f"   Данные строки извлечены успешно")
+            except Exception as e:
+                logger.error(f"[run_exact_backtest] Ошибка при извлечении данных строки {idx}: {e}")
+                import traceback
+                logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                raise
             
             # ВАЖНО: Реальный бот использует ВСЕ данные до текущего момента
             # Это критично для правильной работы индикаторов и ML модели
@@ -914,10 +924,20 @@ def run_exact_backtest(
             # ОПТИМИЗАЦИЯ: Для первых 1000 баров создаем копию (для безопасности),
             # для остальных используем view (быстрее, но нужно быть осторожным)
             if processed_bars == 0:
-                logger.debug(f"[run_exact_backtest] Создание df_window для первого бара (размер: {idx+1})")
+                logger.info(f"[run_exact_backtest] Создание df_window для первого бара (размер: {idx+1})")
+                print(f"   Создание окна данных (первые {idx+1} строк)...")
             
-            # Используем view для ускорения (не создаем копию)
-            df_window = df_with_features.iloc[:idx+1]
+            try:
+                # Используем view для ускорения (не создаем копию)
+                df_window = df_with_features.iloc[:idx+1]
+                if processed_bars == 0:
+                    logger.info(f"[run_exact_backtest] df_window создан: {len(df_window)} строк, {len(df_window.columns)} колонок")
+                    print(f"   Окно данных создано: {len(df_window)} строк")
+            except Exception as e:
+                logger.error(f"[run_exact_backtest] Ошибка при создании df_window для бара {idx}: {e}")
+                import traceback
+                logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                raise
             
             # Логируем прогресс каждые 1000 баров
             if processed_bars > 0 and processed_bars % 1000 == 0:
@@ -945,8 +965,16 @@ def run_exact_backtest(
                 # ВАЖНО: Вызываем ТОЧНО тот же метод, что и реальный бот
                 # Логируем только первые несколько вызовов для отладки
                 if processed_bars < 3:
-                    logger.debug(f"[run_exact_backtest] Генерация сигнала для бара {idx}/{total_bars}")
+                    logger.info(f"[run_exact_backtest] Генерация сигнала для бара {idx}/{total_bars}")
                     print(f"   Генерация сигнала для бара {idx}...")
+                    print(f"   Параметры: has_position={has_position}, leverage={leverage}")
+                
+                # Засекаем время генерации сигнала для первого бара
+                if processed_bars == 0:
+                    import time
+                    signal_start_time = time.time()
+                    logger.info(f"[run_exact_backtest] Вызов strategy.generate_signal()...")
+                    print(f"   Вызов generate_signal()...")
                 
                 signal = strategy.generate_signal(
                     row=row,
@@ -958,12 +986,20 @@ def run_exact_backtest(
                     max_loss_pct_margin=settings.ml_strategy.max_loss_pct_margin,
                 )
                 
+                if processed_bars == 0:
+                    signal_elapsed = time.time() - signal_start_time
+                    logger.info(f"[run_exact_backtest] generate_signal() завершен за {signal_elapsed:.2f} сек")
+                    print(f"   generate_signal() завершен за {signal_elapsed:.2f} сек")
+                
                 # ВАЛИДАЦИЯ: Проверяем, что сигнал имеет правильный тип
                 assert isinstance(signal, Signal), f"Сигнал должен быть типа Signal, получен {type(signal)}"
                 
                 # Выводим результат для первых 3 баров
                 if processed_bars < 3:
-                    print(f"   Сигнал получен: {signal.action.value}, уверенность: {getattr(signal, 'confidence', 'N/A')}")
+                    confidence_val = getattr(signal, 'confidence', None)
+                    confidence_str = f"{confidence_val:.4f}" if confidence_val is not None else "N/A"
+                    logger.info(f"[run_exact_backtest] Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
+                    print(f"   Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
                 
             except AssertionError as e:
                 # Критическая ошибка валидации
