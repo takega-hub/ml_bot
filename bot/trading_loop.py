@@ -11,6 +11,12 @@ from bot.ml.strategy_ml import MLStrategy, build_ml_signals
 from bot.strategy import Action, Signal, Bias
 from bot.notification_manager import NotificationManager, NotificationLevel
 
+# Импортируем исключение для обработки ошибки недостатка средств
+try:
+    from pybit.exceptions import InvalidRequestError
+except ImportError:
+    InvalidRequestError = Exception  # Fallback если pybit не установлен
+
 logger = logging.getLogger(__name__)
 
 class TradingLoop:
@@ -545,14 +551,62 @@ class TradingLoop:
             
             logger.info(f"[{symbol}] ✅ Position size calculated: qty={qty:.6f}, placing order...")
             
-            resp = self.bybit.place_order(
-                symbol=symbol,
-                side=side,
-                qty=qty,
-                order_type="Market",
-                take_profit=None if is_add else signal.take_profit,
-                stop_loss=None if is_add else signal.stop_loss,
-            )
+            try:
+                resp = self.bybit.place_order(
+                    symbol=symbol,
+                    side=side,
+                    qty=qty,
+                    order_type="Market",
+                    take_profit=None if is_add else signal.take_profit,
+                    stop_loss=None if is_add else signal.stop_loss,
+                )
+            except InvalidRequestError as e:
+                # Обрабатываем ошибку недостатка средств (код 110007)
+                error_code = getattr(e, 'status_code', None) or getattr(e, 'ret_code', None)
+                error_msg = str(e)
+                
+                # Проверяем, что это ошибка недостатка средств
+                if error_code == 110007 or "not enough" in error_msg.lower() or "ab not enough" in error_msg.lower():
+                    # Рассчитываем недостающую сумму
+                    required_margin = fixed_margin_usd
+                    shortfall = max(0, required_margin - balance)
+                    
+                    # Формируем детальное сообщение
+                    message = (
+                        f"⚠️ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ОТКРЫТИЯ ПОЗИЦИИ\n\n"
+                        f"📊 Параметры сделки:\n"
+                        f"• Символ: {symbol}\n"
+                        f"• Направление: {side}\n"
+                        f"• Цена входа: ${signal.price:.6f}\n"
+                        f"• Количество: {qty:.6f}\n"
+                        f"• Размер позиции: ${position_size_usd:.2f}\n"
+                        f"• Требуемая маржа: ${required_margin:.2f}\n"
+                        f"• Плечо: {self.settings.leverage}x\n"
+                    )
+                    
+                    if signal.take_profit and signal.stop_loss:
+                        message += (
+                            f"• TP: ${signal.take_profit:.6f}\n"
+                            f"• SL: ${signal.stop_loss:.6f}\n"
+                        )
+                    
+                    message += (
+                        f"\n💰 Баланс:\n"
+                        f"• Доступно: ${balance:.2f}\n"
+                        f"• Не хватает: ${shortfall:.2f}\n"
+                        f"• Нужно всего: ${required_margin:.2f}"
+                    )
+                    
+                    # Отправляем уведомление
+                    await self.notifier.critical(message)
+                    logger.error(
+                        f"[{symbol}] ❌ Insufficient balance: required=${required_margin:.2f}, "
+                        f"available=${balance:.2f}, shortfall=${shortfall:.2f}"
+                    )
+                    return
+                else:
+                    # Другая ошибка InvalidRequestError - пробрасываем дальше
+                    raise
             
             # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ответа от биржи
             if resp:
@@ -605,6 +659,48 @@ class TradingLoop:
             else:
                 ret_code = resp.get("retCode") if resp and isinstance(resp, dict) else "unknown"
                 ret_msg = resp.get("retMsg", "") if resp and isinstance(resp, dict) else ""
+                
+                # Обрабатываем ошибку недостатка средств (код 110007)
+                if ret_code == 110007 or (ret_msg and ("not enough" in ret_msg.lower() or "ab not enough" in ret_msg.lower())):
+                    # Рассчитываем недостающую сумму
+                    required_margin = fixed_margin_usd
+                    shortfall = max(0, required_margin - balance)
+                    
+                    # Формируем детальное сообщение
+                    message = (
+                        f"⚠️ НЕДОСТАТОЧНО СРЕДСТВ ДЛЯ ОТКРЫТИЯ ПОЗИЦИИ\n\n"
+                        f"📊 Параметры сделки:\n"
+                        f"• Символ: {symbol}\n"
+                        f"• Направление: {side}\n"
+                        f"• Цена входа: ${signal.price:.6f}\n"
+                        f"• Количество: {qty:.6f}\n"
+                        f"• Размер позиции: ${position_size_usd:.2f}\n"
+                        f"• Требуемая маржа: ${required_margin:.2f}\n"
+                        f"• Плечо: {self.settings.leverage}x\n"
+                    )
+                    
+                    if signal.take_profit and signal.stop_loss:
+                        message += (
+                            f"• TP: ${signal.take_profit:.6f}\n"
+                            f"• SL: ${signal.stop_loss:.6f}\n"
+                        )
+                    
+                    message += (
+                        f"\n💰 Баланс:\n"
+                        f"• Доступно: ${balance:.2f}\n"
+                        f"• Не хватает: ${shortfall:.2f}\n"
+                        f"• Нужно всего: ${required_margin:.2f}"
+                    )
+                    
+                    # Отправляем уведомление
+                    await self.notifier.critical(message)
+                    logger.error(
+                        f"[{symbol}] ❌ Insufficient balance (retCode={ret_code}): required=${required_margin:.2f}, "
+                        f"available=${balance:.2f}, shortfall=${shortfall:.2f}"
+                    )
+                    return
+                
+                # Другие ошибки - просто логируем
                 logger.error(
                     f"[{symbol}] ❌ Failed to open {side} position: "
                     f"retCode={ret_code}, retMsg={ret_msg}, "

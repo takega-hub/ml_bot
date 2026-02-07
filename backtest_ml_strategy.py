@@ -889,16 +889,12 @@ def run_exact_backtest(
         # Логируем начало бэктеста
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"[run_exact_backtest] Начало бэктеста: {total_bars} баров, min_window={min_window_size}")
-        logger.info(f"[run_exact_backtest] Будет обработано {total_bars - min_window_size} баров")
+        logger.info(f"[run_exact_backtest] Начало бэктеста: {total_bars} баров, будет обработано {total_bars - min_window_size} баров")
         
         # Прогресс-бар отключен для серверного режима
         # В серверном режиме (деплой, Telegram бот) прогресс-бар не нужен и может вызывать проблемы
         # Используем простой range и логируем прогресс периодически
         progress_bar = range(min_window_size, total_bars)
-        logger.info("[run_exact_backtest] Серверный режим: прогресс-бар отключен, используется логирование")
-        
-        logger.info(f"[run_exact_backtest] Начинаем обработку баров...")
         start_time_loop = None
         try:
             import time
@@ -911,25 +907,12 @@ def run_exact_backtest(
             if idx < min_window_size:
                 continue
             
-            # Логируем начало первой итерации
-            if processed_bars == 0:
-                logger.info(f"[run_exact_backtest] Начало обработки первого бара (idx={idx})")
-                print(f"   Обработка первого бара: {idx}/{total_bars}...")
-            
             try:
                 current_time = df_with_features.index[idx]
                 row = df_with_features.iloc[idx]
                 current_price = row['close']
                 high = row['high']
                 low = row['low']
-                
-                # Выводим прогресс для первых 5 баров
-                if processed_bars < 5:
-                    print(f"   Бар {processed_bars + 1}: {current_time}, цена: {current_price:.2f}")
-                
-                if processed_bars == 0:
-                    logger.info(f"[run_exact_backtest] Извлечены данные строки: time={current_time}, price={current_price:.2f}")
-                    print(f"   Данные строки извлечены успешно")
             except Exception as e:
                 logger.error(f"[run_exact_backtest] Ошибка при извлечении данных строки {idx}: {e}")
                 import traceback
@@ -939,18 +922,9 @@ def run_exact_backtest(
             # ВАЖНО: Реальный бот использует ВСЕ данные до текущего момента
             # Это критично для правильной работы индикаторов и ML модели
             # Используем данные от начала до текущего индекса (включительно)
-            # ОПТИМИЗАЦИЯ: Для первых 1000 баров создаем копию (для безопасности),
-            # для остальных используем view (быстрее, но нужно быть осторожным)
-            if processed_bars == 0:
-                logger.info(f"[run_exact_backtest] Создание df_window для первого бара (размер: {idx+1})")
-                print(f"   Создание окна данных (первые {idx+1} строк)...")
-            
             try:
                 # Используем view для ускорения (не создаем копию)
                 df_window = df_with_features.iloc[:idx+1]
-                if processed_bars == 0:
-                    logger.info(f"[run_exact_backtest] df_window создан: {len(df_window)} строк, {len(df_window.columns)} колонок")
-                    print(f"   Окно данных создано: {len(df_window)} строк")
             except Exception as e:
                 logger.error(f"[run_exact_backtest] Ошибка при создании df_window для бара {idx}: {e}")
                 import traceback
@@ -981,19 +955,6 @@ def run_exact_backtest(
             
             try:
                 # ВАЖНО: Вызываем ТОЧНО тот же метод, что и реальный бот
-                # Логируем только первые несколько вызовов для отладки
-                if processed_bars < 3:
-                    logger.info(f"[run_exact_backtest] Генерация сигнала для бара {idx}/{total_bars}")
-                    print(f"   Генерация сигнала для бара {idx}...")
-                    print(f"   Параметры: has_position={has_position}, leverage={leverage}")
-                
-                # Засекаем время генерации сигнала для первого бара
-                if processed_bars == 0:
-                    import time
-                    signal_start_time = time.time()
-                    logger.info(f"[run_exact_backtest] Вызов strategy.generate_signal()...")
-                    print(f"   Вызов generate_signal()...")
-                
                 # ОПТИМИЗАЦИЯ: Фичи уже созданы в df_with_features, поэтому используем skip_feature_creation=True
                 # Это значительно ускоряет бэктест (с ~0.6 сек на бар до ~0.01 сек)
                 # ВАЖНО: Это корректно, так как фичи уже созданы для всех баров в df_with_features
@@ -1009,21 +970,8 @@ def run_exact_backtest(
                     skip_feature_creation=True,  # ОПТИМИЗАЦИЯ: фичи уже созданы
                 )
                 
-                if processed_bars == 0:
-                    signal_elapsed = time.time() - signal_start_time
-                    logger.info(f"[run_exact_backtest] generate_signal() завершен за {signal_elapsed:.2f} сек")
-                    print(f"   generate_signal() завершен за {signal_elapsed:.2f} сек")
-                
                 # ВАЛИДАЦИЯ: Проверяем, что сигнал имеет правильный тип
                 assert isinstance(signal, Signal), f"Сигнал должен быть типа Signal, получен {type(signal)}"
-                
-                # Выводим результат для первых 3 баров
-                if processed_bars < 3:
-                    confidence_val = getattr(signal, 'confidence', None)
-                    confidence_str = f"{confidence_val:.4f}" if confidence_val is not None else "N/A"
-                    logger.info(f"[run_exact_backtest] Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
-                    print(f"   Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
-                    print(f"   TP: {signal.take_profit}, SL: {signal.stop_loss}")
                 
             except AssertionError as e:
                 # Критическая ошибка валидации
@@ -1046,14 +994,8 @@ def run_exact_backtest(
                 )
             
             # Анализируем сигнал (только статистика, без изменений)
-            if processed_bars < 3:
-                logger.info(f"[run_exact_backtest] Вызов analyze_signal()...")
-                print(f"   Анализ сигнала...")
-            
             try:
                 simulator.analyze_signal(signal, current_price)
-                if processed_bars < 3:
-                    logger.info(f"[run_exact_backtest] analyze_signal() завершен")
             except Exception as e:
                 logger.error(f"[run_exact_backtest] Ошибка в analyze_signal(): {e}")
                 import traceback
@@ -1063,15 +1005,8 @@ def run_exact_backtest(
             # ВАЖНО: Сначала проверяем выход из позиции (как реальный бот)
             # Это важно, так как может быть сигнал на закрытие текущей позиции
             if simulator.current_position is not None:
-                if processed_bars < 3:
-                    logger.info(f"[run_exact_backtest] Проверка выхода из позиции...")
-                    print(f"   Проверка выхода из позиции...")
-                
                 try:
                     exited = simulator.check_exit(current_time, current_price, high, low)
-                    if processed_bars < 3:
-                        logger.info(f"[run_exact_backtest] check_exit() завершен: exited={exited}")
-                        print(f"   Выход из позиции: {exited}")
                 except Exception as e:
                     logger.error(f"[run_exact_backtest] Ошибка в check_exit(): {e}")
                     import traceback
@@ -1080,31 +1015,17 @@ def run_exact_backtest(
                 
                 # Если позиция закрыта, не открываем новую на этой же итерации
                 if exited:
-                    if processed_bars < 3:
-                        logger.info(f"[run_exact_backtest] Позиция закрыта, пропускаем открытие новой")
                     continue
             
             # Проверяем вход в позицию (только если нет открытой позиции)
             if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
-                if processed_bars < 3:
-                    logger.info(f"[run_exact_backtest] Открытие позиции: {signal.action.value}")
-                    print(f"   Открытие позиции: {signal.action.value}...")
-                
                 try:
                     opened = simulator.open_position(signal, current_time, symbol)
-                    if processed_bars < 3:
-                        logger.info(f"[run_exact_backtest] open_position() завершен: opened={opened}")
-                        print(f"   Позиция открыта: {opened}")
                 except Exception as e:
                     logger.error(f"[run_exact_backtest] Ошибка в open_position(): {e}")
                     import traceback
                     logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
                     raise
-            elif processed_bars < 3:
-                if simulator.current_position is not None:
-                    logger.info(f"[run_exact_backtest] Позиция уже открыта, пропускаем")
-                elif signal.action == Action.HOLD:
-                    logger.info(f"[run_exact_backtest] Сигнал HOLD, позиция не открывается")
             
             # Периодический вывод прогресса в лог (каждые 500 баров)
             processed_bars += 1

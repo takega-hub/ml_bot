@@ -112,23 +112,35 @@ class ModelManager:
         models.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         return models
 
-    def test_model(self, model_path: str, symbol: str, days: int = 14) -> Optional[Dict[str, Any]]:
-        """Тестирует модель на исторических данных и возвращает метрики"""
+    def test_model(self, model_path: str, symbol: str, days: int = 14, initial_balance: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """
+        Тестирует модель на исторических данных и возвращает метрики
+        
+        Args:
+            model_path: Путь к модели
+            symbol: Торговая пара
+            days: Количество дней для тестирования
+            initial_balance: Начальный баланс (по умолчанию 100.0, как в локальных тестах)
+        """
         import logging
         import traceback
         logger = logging.getLogger(__name__)
         
+        # Используем переданный баланс или значение по умолчанию 100.0
+        if initial_balance is None:
+            initial_balance = 100.0
+        
         try:
             from backtest_ml_strategy import run_exact_backtest
             
-            logger.info(f"[test_model] Starting backtest for {model_path} on {symbol} ({days} days)")
+            logger.info(f"[test_model] Starting backtest for {model_path} on {symbol} ({days} days, balance=${initial_balance:.2f})")
             
             metrics = run_exact_backtest(
                 model_path=str(model_path),
                 symbol=symbol,
                 days_back=days,
                 interval="15",  # 15 минут в формате для backtest
-                initial_balance=1000.0,
+                initial_balance=initial_balance,  # Используем переданное значение или 100.0 по умолчанию
                 risk_per_trade=0.02,
                 leverage=10,
             )
