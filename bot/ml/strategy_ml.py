@@ -520,15 +520,25 @@ class MLStrategy:
         
         # Предсказание
         if hasattr(self.model, "predict_proba"):
-            # Для классификаторов с вероятностями (включая ансамбль)
-            # Проверяем, является ли это QuadEnsemble (требует историю для LSTM)
-            if hasattr(self.model, 'lstm_trainer') and hasattr(self.model, 'sequence_length'):
-                # QuadEnsemble: передаем историю данных для LSTM
-                # Используем df_with_features, который уже содержит все фичи
-                proba = self.model.predict_proba(X_last, df_history=df_with_features)[0]
-            else:
-                # Обычные модели и ансамбли (TripleEnsemble, etc.)
-                proba = self.model.predict_proba(X_last)[0]
+            try:
+                # Для классификаторов с вероятностями (включая ансамбль)
+                # Проверяем, является ли это QuadEnsemble (требует историю для LSTM)
+                if hasattr(self.model, 'lstm_trainer') and hasattr(self.model, 'sequence_length'):
+                    # QuadEnsemble: передаем историю данных для LSTM
+                    # Используем df_with_features, который уже содержит все фичи
+                    proba = self.model.predict_proba(X_last, df_history=df_with_features)[0]
+                else:
+                    # Обычные модели и ансамбли (TripleEnsemble, etc.)
+                    proba = self.model.predict_proba(X_last)[0]
+            except Exception as e:
+                logger.error(f"[ml_strategy] Ошибка при вызове predict_proba: {e}")
+                logger.error(f"[ml_strategy] Тип модели: {type(self.model)}")
+                logger.error(f"[ml_strategy] X_last shape: {X_last.shape if hasattr(X_last, 'shape') else 'N/A'}")
+                import traceback
+                logger.error(f"[ml_strategy] Traceback:\n{traceback.format_exc()}")
+                # Возвращаем равномерное распределение при ошибке
+                proba = np.array([0.33, 0.34, 0.33])  # SHORT, HOLD, LONG
+                logger.warning(f"[ml_strategy] Используется равномерное распределение из-за ошибки")
             
             # Проверяем proba на NaN
             if np.any(np.isnan(proba)) or not np.all(np.isfinite(proba)):

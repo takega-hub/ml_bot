@@ -724,6 +724,9 @@ def run_exact_backtest(
         try:
             settings = load_settings()
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[run_exact_backtest] Ошибка загрузки настроек: {e}")
             print(f"❌ Ошибка загрузки настроек: {e}")
             return None
         
@@ -745,12 +748,18 @@ def run_exact_backtest(
             df = client.get_kline_df(symbol, bybit_interval, limit=total_candles)
             
             if df.empty:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"[run_exact_backtest] Нет данных для {symbol}")
                 print(f"❌ Нет данных для {symbol}")
                 return None
             
             print(f"✅ Загружено {len(df)} свечей")
             print(f"   Период: {df.index[0]} до {df.index[-1]}")
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[run_exact_backtest] Ошибка загрузки данных для {symbol}: {e}")
             print(f"❌ Ошибка загрузки данных: {e}")
             return None
         
@@ -771,6 +780,11 @@ def run_exact_backtest(
             df_with_indicators = prepare_with_indicators(df.copy())
             print(f"✅ Индикаторы подготовлены")
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[run_exact_backtest] Ошибка подготовки индикаторов для {symbol}: {e}")
+            import traceback
+            logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
             print(f"❌ Ошибка подготовки индикаторов: {e}")
             return None
         
@@ -807,8 +821,13 @@ def run_exact_backtest(
             print(f"   - Leverage: {leverage}x")
             print(f"   ✅ Стратегия готова (идентична продакшену)")
         except Exception as e:
-            print(f"❌ Ошибка подготовки стратегии: {e}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"[run_exact_backtest] Ошибка подготовки стратегии для {model_path}: {e}")
             import traceback
+            error_traceback = traceback.format_exc()
+            logger.error(f"[run_exact_backtest] Traceback:\n{error_traceback}")
+            print(f"❌ Ошибка подготовки стратегии: {e}")
             traceback.print_exc()
             return None
         
@@ -1086,6 +1105,13 @@ def run_exact_backtest(
     except Exception as e:
         error_msg = str(e)
         error_traceback = traceback.format_exc()
+        
+        # Логируем ошибку через logger, чтобы она попала в логи
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"[run_exact_backtest] КРИТИЧЕСКАЯ ОШИБКА для {model_path}: {error_msg}")
+        logger.error(f"[run_exact_backtest] Traceback:\n{error_traceback}")
+        
         print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА В БЭКТЕСТЕ:")
         print(f"   {error_msg}")
         print(f"\n📋 Полный traceback:")
