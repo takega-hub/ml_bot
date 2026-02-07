@@ -29,6 +29,9 @@ class TradingLoop:
         self.strategies: Dict[str, MLStrategy] = {}
         # Отслеживаем последнюю обработанную свечу для каждого символа
         self.last_processed_candle: Dict[str, Optional[pd.Timestamp]] = {}
+        # Кэш сигнала BTCUSDT для проверки направления других пар (обновляется каждые 5 минут)
+        self._btc_signal_cache: Optional[Dict] = None
+        self._btc_signal_cache_time: Optional[float] = None
 
     async def run(self):
         logger.info("Starting Trading Loop...")
@@ -414,6 +417,20 @@ class TradingLoop:
                             )
                         return
 
+                # Проверка сигнала BTCUSDT для других пар (альткоины следуют за BTC)
+                if symbol != "BTCUSDT":
+                    btc_signal = await self._get_btc_signal()
+                    if btc_signal and btc_signal.get("action") in (Action.LONG, Action.SHORT):
+                        btc_action = btc_signal["action"]
+                        # Если сигнал BTC противоположен сигналу текущего символа - игнорируем
+                        if (btc_action == Action.LONG and signal.action == Action.SHORT) or \
+                           (btc_action == Action.SHORT and signal.action == Action.LONG):
+                            logger.info(
+                                f"[{symbol}] ⏭️ Signal ignored: BTCUSDT={btc_action.value}, "
+                                f"{symbol}={signal.action.value} (opposite direction, following BTC)"
+                            )
+                            return
+                
                 # Открываем позицию, если ее нет или она в другую сторону (для short_term)
                 if signal.action == Action.LONG and has_pos != Bias.LONG:
                     logger.info(f"[{symbol}] ✅ Opening LONG position (no position or opposite)")
@@ -858,6 +875,109 @@ class TradingLoop:
                 # неизвестная сила — не блокируем, но логируем
                 logger.warning(f"Unknown signal strength '{strength}', allowing reverse by confidence only.")
         return True
+
+    async def _get_btc_signal(self) -> Optional[Dict]:
+        """
+        Получает сигнал BTCUSDT для проверки направления других пар.
+        Использует кэш на 5 минут, чтобы не делать лишние запросы.
+        
+        Returns:
+            Dict с ключами 'action' (Action) и 'confidence' (float) или None
+        """
+        import time
+        
+        # Проверяем кэш (актуален 5 минут)
+        current_time = time.time()
+        if (self._btc_signal_cache is not None and 
+            self._btc_signal_cache_time is not None and 
+            current_time - self._btc_signal_cache_time < 300):  # 5 минут
+            return self._btc_signal_cache
+        
+        # Если BTCUSDT не в активных символах, возвращаем None
+        if "BTCUSDT" not in self.state.active_symbols:
+            return None
+        
+        try:
+            # Получаем данные BTCUSDT
+            btc_df = await asyncio.to_thread(
+                self.bybit.get_kline_df,
+                "BTCUSDT",
+                self.settings.timeframe,
+                200
+            )
+            
+            if btc_df.empty or len(btc_df) < 2:
+                return None
+            
+            # Инициализируем стратегию BTCUSDT если нужно
+            if "BTCUSDT" not in self.strategies:
+                model_path = self.state.symbol_models.get("BTCUSDT")
+                if not model_path:
+                    from pathlib import Path
+                    models = list(Path("ml_models").glob("*_BTCUSDT_*.pkl"))
+                    if models:
+                        model_path = str(models[0])
+                        self.state.symbol_models["BTCUSDT"] = model_path
+                
+                if model_path:
+                    self.strategies["BTCUSDT"] = MLStrategy(
+                        model_path=model_path,
+                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
+                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                    )
+                else:
+                    return None
+            
+            # Получаем позицию BTCUSDT
+            try:
+                btc_pos_info = await asyncio.to_thread(self.bybit.get_position_info, symbol="BTCUSDT")
+                btc_has_pos = None
+                if btc_pos_info and isinstance(btc_pos_info, dict) and btc_pos_info.get("retCode") == 0:
+                    result = btc_pos_info.get("result")
+                    if result and isinstance(result, dict):
+                        list_data = result.get("list", [])
+                        if list_data and len(list_data) > 0:
+                            p = list_data[0]
+                            if p and isinstance(p, dict):
+                                btc_size = float(p.get("size", 0))
+                                if btc_size > 0:
+                                    btc_side = p.get("side")
+                                    btc_has_pos = Bias.LONG if btc_side == "Buy" else Bias.SHORT
+            except Exception as e:
+                logger.debug(f"Error getting BTCUSDT position: {e}")
+                btc_has_pos = None
+            
+            # Генерируем сигнал BTCUSDT
+            btc_strategy = self.strategies["BTCUSDT"]
+            btc_row = btc_df.iloc[-2] if len(btc_df) >= 2 else btc_df.iloc[-1]
+            btc_current_price = btc_df.iloc[-1]['close']
+            
+            btc_signal = await asyncio.to_thread(
+                btc_strategy.generate_signal,
+                row=btc_row,
+                df=btc_df.iloc[:-1] if len(btc_df) >= 2 else btc_df,
+                has_position=btc_has_pos,
+                current_price=btc_current_price,
+                leverage=self.settings.leverage
+            )
+            
+            if btc_signal:
+                # Сохраняем в кэш
+                indicators_info = btc_signal.indicators_info if btc_signal.indicators_info and isinstance(btc_signal.indicators_info, dict) else {}
+                btc_confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
+                
+                self._btc_signal_cache = {
+                    'action': btc_signal.action,
+                    'confidence': btc_confidence
+                }
+                self._btc_signal_cache_time = current_time
+                
+                return self._btc_signal_cache
+            
+        except Exception as e:
+            logger.debug(f"Error getting BTCUSDT signal: {e}")
+        
+        return None
 
     async def _close_position_market(self, symbol: str, side: Bias, size: float):
         """Закрывает позицию по рынку (reduce_only)."""
