@@ -510,7 +510,7 @@ class MLStrategy:
         try:
             # Логируем начало predict для отладки
             if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
-                logger.info(f"[ml_strategy] predict() начат, df.shape={df.shape}, skip_feature_creation={skip_feature_creation}")
+                logger.debug(f"[ml_strategy] predict() начат, df.shape={df.shape}, skip_feature_creation={skip_feature_creation}")
                 import time
                 prepare_start = time.time()
             
@@ -520,13 +520,13 @@ class MLStrategy:
             
             if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
                 prepare_elapsed = time.time() - prepare_start
-                logger.info(f"[ml_strategy] prepare_features_with_df() завершен за {prepare_elapsed:.2f} сек, X.shape={X.shape}")
+                logger.debug(f"[ml_strategy] prepare_features_with_df() завершен за {prepare_elapsed:.2f} сек, X.shape={X.shape}")
             
             # Берем последний образец
             X_last = X[-1:].reshape(1, -1)
             
             if hasattr(self, '_generate_signal_call_count') and self._generate_signal_call_count <= 3:
-                logger.info(f"[ml_strategy] X_last подготовлен: shape={X_last.shape}")
+                logger.debug(f"[ml_strategy] X_last подготовлен: shape={X_last.shape}")
         except Exception as e:
             logger.error(f"[ml_strategy] Error preparing features: {e}")
             return 0, 0.0
@@ -690,6 +690,7 @@ class MLStrategy:
         leverage: int = 10,
         target_profit_pct_margin: float = 25.0,
         max_loss_pct_margin: float = 10.0,
+        skip_feature_creation: bool = False,
     ) -> Signal:
         """
         Генерирует торговый сигнал на основе ML-предсказания.
@@ -705,6 +706,7 @@ class MLStrategy:
             leverage: Плечо (default: 10)
             target_profit_pct_margin: Целевая прибыль от маржи в % (25%)
             max_loss_pct_margin: Максимальный убыток от маржи в % (10%)
+            skip_feature_creation: Если True, пропускает создание фичей (для оптимизации в бэктесте)
         
         Returns:
             Signal объект с уровневым SL и RR TP
@@ -716,7 +718,7 @@ class MLStrategy:
             self._generate_signal_call_count += 1
             
             if self._generate_signal_call_count <= 3:
-                logger.info(f"[ml_strategy] generate_signal() вызван (раз {self._generate_signal_call_count}), df.shape={df.shape}")
+                logger.debug(f"[ml_strategy] generate_signal() вызван (раз {self._generate_signal_call_count}), df.shape={df.shape}")
             
             # Определяем символ
             symbol = getattr(self, '_symbol', None)
@@ -736,19 +738,21 @@ class MLStrategy:
                     symbol = "UNKNOWN"
             
             if self._generate_signal_call_count <= 3:
-                logger.info(f"[ml_strategy] Символ определен: {symbol}, вызов predict()...")
+                logger.debug(f"[ml_strategy] Символ определен: {symbol}, вызов predict()...")
             
             # Делаем предсказание
-            # ВАЖНО: НЕ пропускаем создание фичей, чтобы индикаторы обновлялись для новых свечей
+            # ОПТИМИЗАЦИЯ: Если фичи уже созданы (например, в бэктесте), используем skip_feature_creation=True
+            # В реальном боте фичи создаются заново для каждого окна (skip_feature_creation=False)
             import time
             if self._generate_signal_call_count <= 3:
                 predict_start = time.time()
+                logger.debug(f"[ml_strategy] skip_feature_creation={skip_feature_creation}")
             
-            prediction, confidence = self.predict(df, skip_feature_creation=False)
+            prediction, confidence = self.predict(df, skip_feature_creation=skip_feature_creation)
             
             if self._generate_signal_call_count <= 3:
                 predict_elapsed = time.time() - predict_start
-                logger.info(f"[ml_strategy] predict() завершен за {predict_elapsed:.2f} сек, prediction={prediction}, confidence={confidence:.4f}")
+                logger.debug(f"[ml_strategy] predict() завершен за {predict_elapsed:.2f} сек, prediction={prediction}, confidence={confidence:.4f}")
             
             # === ДИНАМИЧЕСКИЙ CONFIDENCE THRESHOLD ===
             # Адаптируем порог на основе рыночных условий

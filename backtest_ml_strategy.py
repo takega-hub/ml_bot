@@ -313,18 +313,41 @@ class MLBacktestSimulator:
         # Используем фиксированную сумму $100 с учетом плеча
         base_order_usd = getattr(self, '_base_order_usd', 100.0)  # Фиксированная сумма позиции $100
         
-        position_size_usd, margin_required = self.calculate_position_size(
-            signal.price, stop_loss, signal.action,
-            margin_pct_balance=0.20,  # Не используется, оставлено для совместимости
-            base_order_usd=base_order_usd
-        )
+        import logging
+        logger = logging.getLogger(__name__)
+        if hasattr(self, '_open_position_call_count'):
+            self._open_position_call_count += 1
+        else:
+            self._open_position_call_count = 1
+        
+        if self._open_position_call_count <= 3:
+            logger.info(f"[open_position] Расчет размера позиции: base_order_usd={base_order_usd}, price={signal.price:.2f}, sl={stop_loss:.2f}")
+        
+        try:
+            position_size_usd, margin_required = self.calculate_position_size(
+                signal.price, stop_loss, signal.action,
+                margin_pct_balance=0.20,  # Не используется, оставлено для совместимости
+                base_order_usd=base_order_usd
+            )
+            
+            if self._open_position_call_count <= 3:
+                logger.info(f"[open_position] Размер позиции рассчитан: size_usd={position_size_usd:.2f}, margin={margin_required:.2f}")
+        except Exception as e:
+            logger.error(f"[open_position] Ошибка при расчете размера позиции: {e}")
+            import traceback
+            logger.error(f"[open_position] Traceback:\n{traceback.format_exc()}")
+            raise
         
         if position_size_usd <= 0 or margin_required > self.balance:
+            if self._open_position_call_count <= 3:
+                logger.warning(f"[open_position] Недостаточно средств: size={position_size_usd:.2f}, margin={margin_required:.2f}, balance={self.balance:.2f}")
             print(f"❌ Не могу открыть позицию: недостаточно средств")
             print(f"   Размер: ${position_size_usd:.2f}, Маржа: ${margin_required:.2f}, Баланс: ${self.balance:.2f}")
             return False
         
         # 5. Вычитаем маржу (как реальный бот)
+        if self._open_position_call_count <= 3:
+            logger.info(f"[open_position] Вычитаем маржу: {margin_required:.2f} из баланса {self.balance:.2f}")
         self.balance -= margin_required
         
         # 6. Рассчитываем расстояния TP/SL для статистики
@@ -337,6 +360,10 @@ class MLBacktestSimulator:
         
         # 7. Создаем позицию (ТОЧНО с теми TP/SL, что в сигнале)
         confidence = signal.indicators_info.get('confidence', 0.5) if signal.indicators_info else 0.5
+        
+        if self._open_position_call_count <= 3:
+            logger.info(f"[open_position] Создание объекта Trade...")
+            print(f"   Создание позиции...")
         
         self.current_position = Trade(
             entry_time=current_time,
@@ -865,20 +892,11 @@ def run_exact_backtest(
         logger.info(f"[run_exact_backtest] Начало бэктеста: {total_bars} баров, min_window={min_window_size}")
         logger.info(f"[run_exact_backtest] Будет обработано {total_bars - min_window_size} баров")
         
-        # Прогресс-бар для отслеживания процесса
-        try:
-            from tqdm import tqdm
-            progress_bar = tqdm(
-                range(min_window_size, total_bars),
-                desc=f"Бэктест {symbol}",
-                unit="бар",
-                ncols=100,
-                mininterval=1.0,  # Обновлять не чаще раза в секунду
-                maxinterval=5.0   # Но не реже раза в 5 секунд
-            )
-        except ImportError:
-            progress_bar = range(min_window_size, total_bars)
-            logger.warning("[run_exact_backtest] tqdm не установлен, прогресс-бар недоступен")
+        # Прогресс-бар отключен для серверного режима
+        # В серверном режиме (деплой, Telegram бот) прогресс-бар не нужен и может вызывать проблемы
+        # Используем простой range и логируем прогресс периодически
+        progress_bar = range(min_window_size, total_bars)
+        logger.info("[run_exact_backtest] Серверный режим: прогресс-бар отключен, используется логирование")
         
         logger.info(f"[run_exact_backtest] Начинаем обработку баров...")
         start_time_loop = None
@@ -976,6 +994,10 @@ def run_exact_backtest(
                     logger.info(f"[run_exact_backtest] Вызов strategy.generate_signal()...")
                     print(f"   Вызов generate_signal()...")
                 
+                # ОПТИМИЗАЦИЯ: Фичи уже созданы в df_with_features, поэтому используем skip_feature_creation=True
+                # Это значительно ускоряет бэктест (с ~0.6 сек на бар до ~0.01 сек)
+                # ВАЖНО: Это корректно, так как фичи уже созданы для всех баров в df_with_features
+                # В реальном боте фичи создаются заново, но в бэктесте мы можем оптимизировать
                 signal = strategy.generate_signal(
                     row=row,
                     df=df_window,  # Все данные до текущего момента (как реальный бот)
@@ -984,6 +1006,7 @@ def run_exact_backtest(
                     leverage=leverage,
                     target_profit_pct_margin=settings.ml_strategy.target_profit_pct_margin,
                     max_loss_pct_margin=settings.ml_strategy.max_loss_pct_margin,
+                    skip_feature_creation=True,  # ОПТИМИЗАЦИЯ: фичи уже созданы
                 )
                 
                 if processed_bars == 0:
@@ -1000,6 +1023,7 @@ def run_exact_backtest(
                     confidence_str = f"{confidence_val:.4f}" if confidence_val is not None else "N/A"
                     logger.info(f"[run_exact_backtest] Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
                     print(f"   Сигнал получен: {signal.action.value}, уверенность: {confidence_str}")
+                    print(f"   TP: {signal.take_profit}, SL: {signal.stop_loss}")
                 
             except AssertionError as e:
                 # Критическая ошибка валидации
@@ -1022,28 +1046,78 @@ def run_exact_backtest(
                 )
             
             # Анализируем сигнал (только статистика, без изменений)
-            simulator.analyze_signal(signal, current_price)
+            if processed_bars < 3:
+                logger.info(f"[run_exact_backtest] Вызов analyze_signal()...")
+                print(f"   Анализ сигнала...")
+            
+            try:
+                simulator.analyze_signal(signal, current_price)
+                if processed_bars < 3:
+                    logger.info(f"[run_exact_backtest] analyze_signal() завершен")
+            except Exception as e:
+                logger.error(f"[run_exact_backtest] Ошибка в analyze_signal(): {e}")
+                import traceback
+                logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                raise
             
             # ВАЖНО: Сначала проверяем выход из позиции (как реальный бот)
             # Это важно, так как может быть сигнал на закрытие текущей позиции
             if simulator.current_position is not None:
-                exited = simulator.check_exit(current_time, current_price, high, low)
+                if processed_bars < 3:
+                    logger.info(f"[run_exact_backtest] Проверка выхода из позиции...")
+                    print(f"   Проверка выхода из позиции...")
+                
+                try:
+                    exited = simulator.check_exit(current_time, current_price, high, low)
+                    if processed_bars < 3:
+                        logger.info(f"[run_exact_backtest] check_exit() завершен: exited={exited}")
+                        print(f"   Выход из позиции: {exited}")
+                except Exception as e:
+                    logger.error(f"[run_exact_backtest] Ошибка в check_exit(): {e}")
+                    import traceback
+                    logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                    raise
+                
                 # Если позиция закрыта, не открываем новую на этой же итерации
                 if exited:
+                    if processed_bars < 3:
+                        logger.info(f"[run_exact_backtest] Позиция закрыта, пропускаем открытие новой")
                     continue
             
             # Проверяем вход в позицию (только если нет открытой позиции)
             if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
-                simulator.open_position(signal, current_time, symbol)
+                if processed_bars < 3:
+                    logger.info(f"[run_exact_backtest] Открытие позиции: {signal.action.value}")
+                    print(f"   Открытие позиции: {signal.action.value}...")
+                
+                try:
+                    opened = simulator.open_position(signal, current_time, symbol)
+                    if processed_bars < 3:
+                        logger.info(f"[run_exact_backtest] open_position() завершен: opened={opened}")
+                        print(f"   Позиция открыта: {opened}")
+                except Exception as e:
+                    logger.error(f"[run_exact_backtest] Ошибка в open_position(): {e}")
+                    import traceback
+                    logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                    raise
+            elif processed_bars < 3:
+                if simulator.current_position is not None:
+                    logger.info(f"[run_exact_backtest] Позиция уже открыта, пропускаем")
+                elif signal.action == Action.HOLD:
+                    logger.info(f"[run_exact_backtest] Сигнал HOLD, позиция не открывается")
             
-            # Периодический вывод прогресса в прогресс-бар (каждые 500 баров)
+            # Периодический вывод прогресса в лог (каждые 500 баров)
             processed_bars += 1
-            if processed_bars % 500 == 0 and hasattr(progress_bar, 'set_postfix'):
+            if processed_bars % 500 == 0:
                 trades_count = len(simulator.trades)
-                progress_bar.set_postfix({
-                    'Сделок': trades_count,
-                    'Баланс': f'${simulator.balance:.2f}'
-                })
+                elapsed = time.time() - start_time_loop if start_time_loop else 0
+                bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
+                progress_pct = processed_bars * 100 / (total_bars - min_window_size) if (total_bars - min_window_size) > 0 else 0
+                logger.info(
+                    f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
+                    f"({progress_pct:.1f}%), сделок: {trades_count}, баланс: ${simulator.balance:.2f}, "
+                    f"скорость: {bars_per_sec:.1f} бар/сек"
+                    )
         
         # Закрываем все позиции
         if simulator.current_position is not None:
