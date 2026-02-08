@@ -339,29 +339,46 @@ class TradingLoop:
             logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
             logger.info(f"[{symbol}] ⏭️ Signal generated, continuing processing...")
 
-            # 4. Логируем сигнал в историю
+            # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
+            # Это гарантирует, что в истории отображаются только сигналы с достаточной уверенностью
+            min_confidence_for_history = self.settings.risk.reverse_min_confidence
             if signal.action != Action.HOLD:
-                logger.info(f"[{symbol}] 📝 Adding signal to history...")
-                self.state.add_signal(
-                    symbol=symbol,
-                    action=signal.action.value,
-                    price=signal.price,
-                    confidence=confidence,
-                    reason=signal.reason,
-                    indicators=indicators_info
-                )
-                logger.info(f"[{symbol}] ✅ Signal added to history, checking notification...")
-                
-                # Уведомление о сигнале высокой уверенности
-                if confidence > 0.7:
-                    logger.info(f"[{symbol}] 📢 Sending notification...")
-                    await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(confidence*100)}%\nЦена: {signal.price}")
-                    logger.info(f"[{symbol}] ✅ Notification sent")
+                if confidence >= min_confidence_for_history:
+                    logger.info(f"[{symbol}] 📝 Adding signal to history (confidence {confidence:.2%} >= {min_confidence_for_history:.2%})...")
+                    self.state.add_signal(
+                        symbol=symbol,
+                        action=signal.action.value,
+                        price=signal.price,
+                        confidence=confidence,
+                        reason=signal.reason,
+                        indicators=indicators_info
+                    )
+                    logger.info(f"[{symbol}] ✅ Signal added to history, checking notification...")
+                    
+                    # Уведомление о сигнале высокой уверенности
+                    if confidence > 0.7:
+                        logger.info(f"[{symbol}] 📢 Sending notification...")
+                        await self.notifier.medium(f"🔔 СИГНАЛ {signal.action.value} по {symbol}\nУверенность: {int(confidence*100)}%\nЦена: {signal.price}")
+                        logger.info(f"[{symbol}] ✅ Notification sent")
+                else:
+                    logger.debug(f"[{symbol}] ⏭️ Signal skipped from history: confidence {confidence:.2%} < {min_confidence_for_history:.2%}")
             
             logger.info(f"[{symbol}] ✅ Signal processing completed, returning from process_symbol")
 
             # 5. Исполнение сделок
+            # ВАЖНО: Проверяем уверенность перед открытием позиции
+            # Используем строго confidence_threshold из настроек (без динамического снижения)
+            min_confidence_for_trade = self.settings.ml_strategy.confidence_threshold
+            
             if signal.action in (Action.LONG, Action.SHORT):
+                # Проверяем уверенность перед открытием позиции
+                if confidence < min_confidence_for_trade:
+                    logger.info(
+                        f"[{symbol}] ⏭️ Signal rejected for trade: confidence {confidence:.2%} < "
+                        f"threshold {min_confidence_for_trade:.2%}"
+                    )
+                    return  # Не открываем позицию, если уверенность ниже порога
+                
                 signal_side = Bias.LONG if signal.action == Action.LONG else Bias.SHORT
                 
                 # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ для диагностики
@@ -373,7 +390,7 @@ class TradingLoop:
                 logger.info(
                     f"[{symbol}] 🔍 TRADE DECISION: action={signal.action.value}, "
                     f"has_pos={has_pos}, local_pos={local_pos is not None}, "
-                    f"signal_side={signal_side}, confidence={confidence:.2%}, "
+                    f"signal_side={signal_side}, confidence={confidence:.2%} (>= {min_confidence_for_trade:.2%}), "
                     f"TP={tp_str}, SL={sl_str}, "
                     f"price={current_price:.2f}"
                 )

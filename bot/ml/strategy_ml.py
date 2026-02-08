@@ -576,20 +576,27 @@ class MLStrategy:
                     hold_prob = 0.0
                 
                 # ЛОГИКА ДЛЯ АНСАМБЛЕЙ
-                ensemble_absolute_min = 0.003  # Минимальная уверенность 0.3%
+                # Используем confidence_threshold из настроек как минимальный порог
+                # Это гарантирует единообразную обработку для всех типов моделей
+                ensemble_min = self.confidence_threshold
                 
                 # Вычисляем разницу между LONG и SHORT
                 prob_diff = abs(long_prob - short_prob)
                 
                 # Определяем предсказание
-                if long_prob >= ensemble_absolute_min and long_prob > short_prob and prob_diff >= self.min_confidence_difference:
+                # Для ансамблей требуем:
+                # 1. Вероятность >= confidence_threshold из настроек
+                # 2. Минимальная разница между LONG и SHORT (15%)
+                if long_prob >= ensemble_min and long_prob > short_prob and prob_diff >= self.min_confidence_difference:
                     prediction = 1  # LONG
-                    confidence = min(long_prob * (1 + prob_diff * 0.3), long_prob)
+                    # Confidence = базовая вероятность (без искусственного увеличения)
+                    confidence = long_prob
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = long_prob
-                elif short_prob >= ensemble_absolute_min and short_prob > long_prob and prob_diff >= self.min_confidence_difference:
+                elif short_prob >= ensemble_min and short_prob > long_prob and prob_diff >= self.min_confidence_difference:
                     prediction = -1  # SHORT
-                    confidence = min(short_prob * (1 + prob_diff * 0.3), short_prob)
+                    # Confidence = базовая вероятность (без искусственного увеличения)
+                    confidence = short_prob
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = short_prob
                 else:
@@ -781,8 +788,11 @@ class MLStrategy:
                     elif adx > 25:  # Сильный тренд
                         effective_threshold = min(effective_threshold, self.confidence_threshold * 0.95)
                 
-                # Ограничиваем диапазон (0.3 - 0.8)
-                effective_threshold = max(0.3, min(0.8, effective_threshold))
+                # Ограничиваем диапазон: минимум не может быть ниже 80% от базового порога
+                # Это гарантирует, что если пользователь установил порог 0.75, он не снизится ниже 0.6
+                min_allowed = self.confidence_threshold * 0.8
+                max_allowed = min(0.95, self.confidence_threshold * 1.5)  # Максимум 95% или 1.5x от базового
+                effective_threshold = max(min_allowed, min(max_allowed, effective_threshold))
             
             # Применяем динамический порог
             if prediction != 0 and confidence < effective_threshold:
@@ -939,9 +949,18 @@ class MLStrategy:
             # УЛУЧШЕНИЕ: Финальная проверка на валидность (из успешного бэктеста)
             # ВАЖНО: Если TP/SL невалидны, мы их пересчитаем позже, но НЕ устанавливаем в None
             # для LONG/SHORT сигналов, так как они ВСЕГДА должны иметь TP/SL
-            if tp_price is not None and sl_price is not None:
+            if prediction != 0:  # Только для LONG/SHORT сигналов
+                # КРИТИЧНО: Для LONG/SHORT ВСЕГДА должны быть валидные TP/SL
+                if tp_price is None or sl_price is None:
+                    # Если TP/SL не установлены, устанавливаем их принудительно
+                    if prediction == 1:  # LONG
+                        sl_price = current_price * 0.99
+                        tp_price = current_price * 1.025
+                    elif prediction == -1:  # SHORT
+                        sl_price = current_price * 1.01
+                        tp_price = current_price * 0.975
                 # Проверяем, что цены не NaN и не бесконечны
-                if not (np.isfinite(tp_price) and np.isfinite(sl_price)):
+                elif not (np.isfinite(tp_price) and np.isfinite(sl_price)):
                     # Для LONG/SHORT пересчитываем, а не устанавливаем None
                     if prediction == 1:  # LONG
                         sl_price = current_price * 0.99
@@ -949,9 +968,6 @@ class MLStrategy:
                     elif prediction == -1:  # SHORT
                         sl_price = current_price * 1.01
                         tp_price = current_price * 0.975
-                    else:
-                        tp_price = None
-                        sl_price = None
                 # Проверяем, что цены положительные
                 elif tp_price <= 0 or sl_price <= 0:
                     # Для LONG/SHORT пересчитываем, а не устанавливаем None
@@ -961,9 +977,6 @@ class MLStrategy:
                     elif prediction == -1:  # SHORT
                         sl_price = current_price * 1.01
                         tp_price = current_price * 0.975
-                    else:
-                        tp_price = None
-                        sl_price = None
             
             # Определяем силу предсказания
             if confidence >= 0.9:
@@ -1073,21 +1086,36 @@ class MLStrategy:
                             current_price
                         )
             
-            # КРИТИЧНО: Проверяем, что TP/SL установлены перед генерацией LONG/SHORT сигналов
-            if prediction != 0 and (tp_price is None or sl_price is None):
-                # Если TP/SL не установлены, пересчитываем их принудительно
-                if prediction == 1:  # LONG
-                    sl_price = current_price * 0.99  # 1% ниже
-                    tp_price = current_price + (abs(current_price - sl_price) * rr)
-                    sl_source = sl_source or "fallback_1pct"
-                elif prediction == -1:  # SHORT
-                    sl_price = current_price * 1.01  # 1% выше
-                    tp_price = current_price - (abs(sl_price - current_price) * rr)
-                    sl_source = sl_source or "fallback_1pct"
-
+            # КРИТИЧНО: ГАРАНТИРУЕМ, что TP/SL установлены и валидны перед генерацией LONG/SHORT сигналов
+            # ВАЖНО: Это ДОПОЛНИТЕЛЬНАЯ проверка после всех предыдущих
             if prediction != 0:
+                # ГАРАНТИРУЕМ, что TP/SL установлены и валидны
+                if tp_price is None or sl_price is None or not np.isfinite(tp_price) or not np.isfinite(sl_price) or tp_price <= 0 or sl_price <= 0:
+                    # Если TP/SL не установлены или невалидны, пересчитываем их принудительно
+                    logger.warning(f"TP/SL invalid for prediction={prediction}, recalculating. tp={tp_price}, sl={sl_price}, price={current_price}")
+                    if prediction == 1:  # LONG
+                        sl_price = current_price * 0.99  # 1% ниже
+                        tp_price = current_price + (abs(current_price - sl_price) * rr)
+                        sl_source = sl_source or "fallback_1pct"
+                    elif prediction == -1:  # SHORT
+                        sl_price = current_price * 1.01  # 1% выше
+                        tp_price = current_price - (abs(sl_price - current_price) * rr)
+                        sl_source = sl_source or "fallback_1pct"
+                
+                # Рассчитываем проценты для отображения
                 tp_pct_display = (abs(tp_price - current_price) / current_price) * 100 if tp_price else 0.0
                 sl_pct_display = (abs(current_price - sl_price) / current_price) * 100 if sl_price else 0.0
+                
+                # ФИНАЛЬНАЯ ГАРАНТИЯ: Убеждаемся, что TP/SL валидны перед продолжением
+                if tp_price is None or sl_price is None:
+                    logger.error(f"CRITICAL: TP/SL still None after all checks! prediction={prediction}, price={current_price}")
+                    # Принудительно устанавливаем
+                    if prediction == 1:  # LONG
+                        sl_price = current_price * 0.99
+                        tp_price = current_price * 1.025
+                    elif prediction == -1:  # SHORT
+                        sl_price = current_price * 1.01
+                        tp_price = current_price * 0.975
             
             # Генерируем сигналы
             if prediction == 1:  # LONG
@@ -1164,6 +1192,14 @@ class MLStrategy:
                 # Обновляем indicators_info с финальными значениями TP/SL
                 indicators_info['stop_loss'] = sl_price
                 indicators_info['take_profit'] = tp_price
+                
+                # КРИТИЧНО: ФИНАЛЬНАЯ ГАРАНТИЯ перед возвратом - TP/SL ДОЛЖНЫ быть установлены
+                if sl_price is None or tp_price is None:
+                    logger.error(f"CRITICAL ERROR: TP/SL is None for LONG signal before return! sl={sl_price}, tp={tp_price}, price={current_price}")
+                    sl_price = current_price * 0.99
+                    tp_price = current_price * 1.025
+                    indicators_info['stop_loss'] = sl_price
+                    indicators_info['take_profit'] = tp_price
                 
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
@@ -1249,6 +1285,14 @@ class MLStrategy:
                 # Обновляем indicators_info с финальными значениями TP/SL
                 indicators_info['stop_loss'] = sl_price
                 indicators_info['take_profit'] = tp_price
+                
+                # КРИТИЧНО: ФИНАЛЬНАЯ ГАРАНТИЯ перед возвратом - TP/SL ДОЛЖНЫ быть установлены
+                if sl_price is None or tp_price is None:
+                    logger.error(f"CRITICAL ERROR: TP/SL is None for SHORT signal before return! sl={sl_price}, tp={tp_price}, price={current_price}")
+                    sl_price = current_price * 1.01
+                    tp_price = current_price * 0.975
+                    indicators_info['stop_loss'] = sl_price
+                    indicators_info['take_profit'] = tp_price
                 
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),

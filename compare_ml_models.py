@@ -26,7 +26,8 @@
 
 Опции:
     --days 30                           # Сколько дней тестировать (по умолчанию 30)
-    --symbols BTCUSDT,ETHUSDT,SOLUSDT   # Ограничить список символов
+    --symbols auto                      # Автоматически найти все символы из моделей (по умолчанию)
+    --symbols BTCUSDT,ETHUSDT,SOLUSDT   # Или указать конкретные символы
     --models-dir ml_models              # Путь к директории с моделями
     --output all                        # Сохранить результаты (csv, plots, all)
     --workers 4                         # Количество параллельных процессов
@@ -67,6 +68,44 @@ except ImportError as e:
     print(f"❌ Ошибка импорта: {e}")
     print("Убедитесь, что модуль backtest_ml_strategy доступен для импорта")
     sys.exit(1)
+
+
+def find_all_symbols(models_dir: Path) -> List[str]:
+    """
+    Автоматически находит все символы из имен файлов моделей.
+    
+    Ожидаемый формат имени файла:
+        {model_type}_{SYMBOL}_{INTERVAL}.pkl
+        {model_type}_{SYMBOL}_{INTERVAL}_{mode_suffix}.pkl  # mtf / 15m
+    
+    Примеры:
+        ensemble_BTCUSDT_15.pkl
+        ensemble_BTCUSDT_15_mtf.pkl
+        quad_ensemble_ETHUSDT_15_15m.pkl
+    """
+    if not models_dir.exists():
+        return []
+    
+    symbols = set()
+    
+    # Ищем все .pkl файлы
+    for model_file in models_dir.glob("*.pkl"):
+        name = model_file.stem  # Имя без расширения
+        
+        # Пытаемся извлечь символ из имени файла
+        # Формат: {model_type}_{SYMBOL}_{...}
+        parts = name.split("_")
+        
+        if len(parts) >= 2:
+            # Пробуем найти известные символы в частях имени
+            for part in parts:
+                part_upper = part.upper()
+                # Проверяем, является ли часть известным символом (заканчивается на USDT)
+                if part_upper.endswith("USDT") and len(part_upper) >= 6:
+                    symbols.add(part_upper)
+                    break
+    
+    return sorted(list(symbols))
 
 
 def find_models_for_symbol(models_dir: Path, symbol: str) -> List[Path]:
@@ -1302,8 +1341,8 @@ Examples:
     parser.add_argument(
         "--symbols",
         type=str,
-        default="BTCUSDT,ETHUSDT,SOLUSDT",
-        help="Comma-separated list of symbols (default: BTCUSDT,ETHUSDT,SOLUSDT)",
+        default="auto",
+        help="Comma-separated list of symbols or 'auto' to auto-detect from models (default: auto)",
     )
     parser.add_argument(
         "--models-dir",
@@ -1367,14 +1406,30 @@ Examples:
     
     args = parser.parse_args()
     
-    # Преобразуем аргументы
-    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     models_dir = Path(args.models_dir)
     
     # Проверяем существование директории с моделями
     if not models_dir.exists():
         print(f"❌ Директория с моделями не существует: {models_dir}")
         print(f"   Текущая рабочая директория: {Path.cwd()}")
+        return
+    
+    # Определяем список символов
+    if args.symbols.lower() == "auto" or args.symbols.strip() == "":
+        # Автоматическое обнаружение символов из моделей
+        print(f"🔍 Автоматическое обнаружение символов из моделей...")
+        symbols = find_all_symbols(models_dir)
+        if not symbols:
+            print(f"⚠️  Не удалось найти символы в моделях. Используем дефолтные: BTCUSDT,ETHUSDT,SOLUSDT")
+            symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        else:
+            print(f"✅ Найдено символов: {', '.join(symbols)} ({len(symbols)} символов)")
+    else:
+        # Используем указанные символы
+        symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    
+    if not symbols:
+        print(f"❌ Не указаны символы для тестирования")
         return
     
     # Запускаем сравнение моделей

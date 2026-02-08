@@ -872,6 +872,52 @@ def run_exact_backtest(
         # Используем фиксированную сумму $100 с учетом плеча
         simulator._base_order_usd = 100.0  # Фиксированная сумма позиции $100
         
+        # Подготовка BTCUSDT данных и стратегии для проверки направления (если символ не BTCUSDT)
+        btc_strategy = None
+        btc_df_with_features = None
+        if symbol != "BTCUSDT":
+            try:
+                print(f"\n📊 Подготовка BTCUSDT для проверки направления...")
+                # Загружаем данные BTCUSDT
+                btc_df = client.get_kline_df("BTCUSDT", bybit_interval, limit=total_candles)
+                if not btc_df.empty:
+                    # Подготавливаем индикаторы для BTCUSDT
+                    btc_df_with_indicators = prepare_with_indicators(btc_df.copy())
+                    btc_df_work = btc_df_with_indicators.copy()
+                    if "timestamp" in btc_df_work.columns:
+                        btc_df_work = btc_df_work.set_index("timestamp")
+                    
+                    # Ищем модель BTCUSDT
+                    btc_models = list(Path("ml_models").glob("*_BTCUSDT_*.pkl"))
+                    if btc_models:
+                        btc_model_path = str(btc_models[0])
+                        # Определяем, является ли модель MTF
+                        btc_is_mtf = "_mtf" in Path(btc_model_path).stem.lower()
+                        if btc_is_mtf:
+                            os.environ["ML_MTF_ENABLED"] = "1"
+                        else:
+                            os.environ["ML_MTF_ENABLED"] = "0"
+                        
+                        # Создаем стратегию BTCUSDT
+                        btc_strategy = MLStrategy(
+                            model_path=btc_model_path,
+                            confidence_threshold=settings.ml_strategy.confidence_threshold,
+                            min_signal_strength=settings.ml_strategy.min_signal_strength,
+                            stability_filter=settings.ml_strategy.stability_filter,
+                            min_signals_per_day=settings.ml_strategy.min_signals_per_day,
+                            max_signals_per_day=settings.ml_strategy.max_signals_per_day
+                        )
+                        
+                        # Создаем технические индикаторы для BTCUSDT
+                        btc_df_with_features = btc_strategy.feature_engineer.create_technical_indicators(btc_df_work)
+                        print(f"✅ BTCUSDT стратегия подготовлена для проверки направления")
+                    else:
+                        print(f"⚠️  Модель BTCUSDT не найдена, проверка направления отключена")
+            except Exception as e:
+                logger.warning(f"[run_exact_backtest] Ошибка подготовки BTCUSDT: {e}, проверка направления отключена")
+                btc_strategy = None
+                btc_df_with_features = None
+        
         # Запускаем бэктест
         print(f"\n📈 Запуск точного бэктеста...")
         print(f"   Имитация работы реального бота на сервере")
@@ -1016,6 +1062,48 @@ def run_exact_backtest(
                 # Если позиция закрыта, не открываем новую на этой же итерации
                 if exited:
                     continue
+            
+            # Проверка сигнала BTCUSDT для других пар (альткоины следуют за BTC)
+            if symbol != "BTCUSDT" and signal.action in (Action.LONG, Action.SHORT) and btc_strategy is not None and btc_df_with_features is not None:
+                try:
+                    if idx < len(btc_df_with_features):
+                        btc_row = btc_df_with_features.iloc[idx]
+                        btc_current_price = btc_row['close']
+                        btc_df_window = btc_df_with_features.iloc[:idx+1]
+                        
+                        # Генерируем сигнал BTCUSDT
+                        btc_signal = btc_strategy.generate_signal(
+                            row=btc_row,
+                            df=btc_df_window,
+                            has_position=None,  # В бэктесте не проверяем позиции BTC
+                            current_price=btc_current_price,
+                            leverage=leverage
+                        )
+                        
+                        if btc_signal and btc_signal.action in (Action.LONG, Action.SHORT):
+                            # Если сигнал BTC противоположен сигналу текущего символа - игнорируем
+                            if (btc_signal.action == Action.LONG and signal.action == Action.SHORT) or \
+                               (btc_signal.action == Action.SHORT and signal.action == Action.LONG):
+                                logger.debug(
+                                    f"[run_exact_backtest] Signal ignored: BTCUSDT={btc_signal.action.value}, "
+                                    f"{symbol}={signal.action.value} (opposite direction, following BTC)"
+                                )
+                                # Пропускаем этот сигнал, но продолжаем обработку
+                                processed_bars += 1
+                                if processed_bars % 500 == 0:
+                                    trades_count = len(simulator.trades)
+                                    elapsed = time.time() - start_time_loop if start_time_loop else 0
+                                    bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
+                                    logger.info(
+                                        f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
+                                        f"({processed_bars*100/(total_bars - min_window_size):.1f}%), "
+                                        f"сделок: {trades_count}, баланс: ${simulator.balance:.2f}, "
+                                        f"скорость: {bars_per_sec:.1f} бар/сек"
+                                    )
+                                continue
+                except Exception as e:
+                    logger.debug(f"[run_exact_backtest] Ошибка проверки BTCUSDT сигнала: {e}")
+                    # Продолжаем обработку, если проверка BTC не удалась
             
             # Проверяем вход в позицию (только если нет открытой позиции)
             if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
