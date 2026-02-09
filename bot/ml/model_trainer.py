@@ -64,12 +64,19 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, Voti
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_recall_fscore_support
 from sklearn.preprocessing import StandardScaler
-import xgboost as xgb
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    xgb = None
+    print("[model_trainer] Warning: XGBoost not available. Install with: pip install xgboost")
 try:
     import lightgbm as lgb
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
+    lgb = None
     print("[model_trainer] Warning: LightGBM not available. Install with: pip install lightgbm")
 from collections import Counter
 
@@ -611,7 +618,7 @@ class ModelTrainer:
         learning_rate: float = 0.1,
         random_state: int = 42,
         class_weight: Optional[Dict[int, float]] = None,
-    ) -> Tuple[xgb.XGBClassifier, Dict[str, Any]]:
+    ) -> Tuple[Any, Dict[str, Any]]:  # Any вместо xgb.XGBClassifier для совместимости
         """
         Обучает XGBoost классификатор.
         
@@ -627,6 +634,21 @@ class ModelTrainer:
         Returns:
             (model, metrics) - обученная модель и метрики
         """
+        # Перепроверяем доступность XGBoost (на случай, если он был установлен после импорта модуля)
+        try:
+            import xgboost as xgb_check
+            xgb_available = True
+            # Используем локальный импорт для гарантии доступности
+            xgb = xgb_check
+        except ImportError:
+            xgb_available = False
+            # Если локальный импорт не удался, пробуем использовать глобальный
+            if xgb is None:
+                raise ImportError("XGBoost is not installed. Install with: pip install xgboost")
+        
+        if not xgb_available and not XGBOOST_AVAILABLE:
+            raise ImportError("XGBoost is not installed. Install with: pip install xgboost")
+        
         print(f"[model_trainer] Training XGBoost Classifier...")
         print(f"  Samples: {len(X)}, Features: {X.shape[1]}")
         

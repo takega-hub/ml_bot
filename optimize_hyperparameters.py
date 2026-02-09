@@ -7,10 +7,18 @@
 
 import argparse
 import sys
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import json
 from datetime import datetime
+
+# Устанавливаем UTF-8 кодировку для Windows
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import pandas as pd
 import numpy as np
@@ -174,7 +182,7 @@ def main():
         symbols = ["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT", "ADAUSDT", "BNBUSDT"]
     
     print("=" * 80)
-    print("🔧 ОПТИМИЗАЦИЯ ГИПЕРПАРАМЕТРОВ")
+    print("ОПТИМИЗАЦИЯ ГИПЕРПАРАМЕТРОВ")
     print("=" * 80)
     print(f"Модель: {args.model}")
     print(f"Символы: {', '.join(symbols)} ({len(symbols)} символов)")
@@ -190,11 +198,11 @@ def main():
     # Оптимизируем для каждого символа
     for symbol in symbols:
         print("\n" + "=" * 80)
-        print(f"📊 ОПТИМИЗАЦИЯ ДЛЯ {symbol}")
+        print(f"ОПТИМИЗАЦИЯ ДЛЯ {symbol}")
         print("=" * 80)
         
         # Собираем данные
-        print("\n📥 Сбор данных...")
+        print("\nСбор данных...")
         collector = DataCollector(settings.api)
         df_raw = collector.collect_klines(
             symbol=symbol,
@@ -206,13 +214,13 @@ def main():
         )
         
         if df_raw.empty:
-            print(f"❌ Нет данных для {symbol}, пропускаем")
+            print(f"[ERROR] Нет данных для {symbol}, пропускаем")
             continue
         
-        print(f"✅ Собрано {len(df_raw)} свечей")
+        print(f"[OK] Собрано {len(df_raw)} свечей")
         
         # Создаем фичи
-        print("\n🔧 Создание фичей...")
+        print("\nСоздание фичей...")
         feature_engineer = FeatureEngineer()
         df_features = feature_engineer.create_technical_indicators(df_raw)
         
@@ -247,7 +255,7 @@ def main():
                 df_features = feature_engineer.add_mtf_features(df_features, higher_timeframes)
         
         # Создаем target
-        print("\n🎯 Создание target variable...")
+        print("\nСоздание target variable...")
         df_with_target = feature_engineer.create_target_variable(
             df_features,
             forward_periods=5,
@@ -261,14 +269,14 @@ def main():
         )
         
         # Подготавливаем данные
-        print("\n📊 Подготовка данных для ML...")
+        print("\nПодготовка данных для ML...")
         X, y = feature_engineer.prepare_features_for_ml(df_with_target)
         
         print(f"   X shape: {X.shape}, y shape: {y.shape}")
         print(f"   Распределение классов: {np.bincount(y + 1)}")  # +1 для индексации
         
         # Оптимизация
-        print(f"\n🔍 Оптимизация гиперпараметров для {args.model}...")
+        print(f"\nОптимизация гиперпараметров для {args.model}...")
         
         try:
             if args.model == 'rf':
@@ -278,7 +286,7 @@ def main():
             elif args.model == 'lgb':
                 results = optimize_lgb_hyperparameters(X, y)
             else:
-                print(f"❌ Неизвестный тип модели: {args.model}")
+                print(f"[ERROR] Неизвестный тип модели: {args.model}")
                 continue
             
             # Сохраняем результаты для этого символа
@@ -294,13 +302,13 @@ def main():
             
             all_results.append(result_dict)
             
-            print(f"\n✅ {symbol} - Лучшие параметры:")
+            print(f"\n[OK] {symbol} - Лучшие параметры:")
             for param, value in results['best_params'].items():
                 print(f"   {param}: {value}")
             print(f"   Лучший score: {results['best_score']:.4f}")
             
         except Exception as e:
-            print(f"❌ Ошибка при оптимизации {symbol}: {e}")
+            print(f"[ERROR] Ошибка при оптимизации {symbol}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -313,17 +321,17 @@ def main():
             json.dump(all_results, f, indent=2, ensure_ascii=False)
         
         print("\n" + "=" * 80)
-        print("✅ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА ДЛЯ ВСЕХ СИМВОЛОВ")
+        print("[OK] ОПТИМИЗАЦИЯ ЗАВЕРШЕНА ДЛЯ ВСЕХ СИМВОЛОВ")
         print("=" * 80)
         print(f"Обработано символов: {len(all_results)}/{len(symbols)}")
-        print(f"\n💾 Все результаты сохранены в: {output_file}")
+        print(f"\nВсе результаты сохранены в: {output_file}")
         
         # Выводим сводку
-        print("\n📊 СВОДКА:")
+        print("\nСВОДКА:")
         for result in all_results:
             print(f"   {result['symbol']}: score = {result['best_score']:.4f}")
     else:
-        print("\n❌ Не удалось оптимизировать ни один символ")
+        print("\n[ERROR] Не удалось оптимизировать ни один символ")
 
 
 if __name__ == "__main__":

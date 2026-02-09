@@ -49,7 +49,7 @@ class MLStrategy:
     ML-стратегия, использующая обученную модель для предсказания движения цены.
     """
     
-    def __init__(self, model_path: str, confidence_threshold: float = 0.45, min_signal_strength: str = "слабое", stability_filter: bool = True, use_dynamic_threshold: bool = True, min_signals_per_day: int = 1, max_signals_per_day: int = 10):
+    def __init__(self, model_path: str, confidence_threshold: float = 0.35, min_signal_strength: str = "слабое", stability_filter: bool = True, use_dynamic_threshold: bool = True, min_signals_per_day: int = 1, max_signals_per_day: int = 20):
         """
         Инициализирует ML-стратегию.
         
@@ -997,7 +997,11 @@ class MLStrategy:
             
             # Проверяем количество сигналов за сегодня
             from datetime import datetime, timezone
-            current_date = datetime.now(timezone.utc).date()
+            # Используем дату свечи для бэктеста, иначе текущую дату
+            if hasattr(row, 'name') and isinstance(row.name, pd.Timestamp):
+                current_date = row.name.date()
+            else:
+                current_date = datetime.now(timezone.utc).date()
             date_str = current_date.isoformat()
             signals_today = self.daily_signals_count.get(date_str, 0)
             
@@ -1026,11 +1030,11 @@ class MLStrategy:
                 )
             
             # Фильтр стабильности: если есть противоположная позиция, требуем немного больше уверенности
-            # УПРОЩЕНО: снижены требования для улучшения конверсии
+            # УПРОЩЕНО: минимальные требования для естественного отбора качественных сигналов
             if self.stability_filter and prediction != 0:
                 if has_position == Bias.SHORT and prediction == 1:
                     # Есть SHORT, хотим открыть LONG - требуем немного больше уверенности
-                    stability_threshold = max(confidence * 1.1, min_strength * 1.1)  # УМЕНЬШЕНО с 1.3/1.5 до 1.1
+                    stability_threshold = max(confidence * 1.02, min_strength * 1.02)  # УМЕНЬШЕНО с 1.05 до 1.02 (минимальная защита)
                     if confidence < stability_threshold:
                         return Signal(
                             row.name, 
@@ -1040,7 +1044,7 @@ class MLStrategy:
                         )
                 elif has_position == Bias.LONG and prediction == -1:
                     # Есть LONG, хотим открыть SHORT - требуем немного больше уверенности
-                    stability_threshold = max(confidence * 1.1, min_strength * 1.1)  # УМЕНЬШЕНО с 1.3/1.5 до 1.1
+                    stability_threshold = max(confidence * 1.02, min_strength * 1.02)  # УМЕНЬШЕНО с 1.05 до 1.02 (минимальная защита)
                     if confidence < stability_threshold:
                         return Signal(
                             row.name, 
@@ -1052,13 +1056,13 @@ class MLStrategy:
             # Дополнительные фильтры для волатильных рынков
             is_volatile_symbol = symbol in ("ETHUSDT", "SOLUSDT")
             
-            # Фильтр по RSI для экстремальных зон (ОСЛАБЛЕН для улучшения конверсии)
+            # Фильтр по RSI для экстремальных зон (ОСЛАБЛЕН: блокируем только в крайних случаях)
             rsi = row.get("rsi", np.nan)
             if prediction != 0 and np.isfinite(rsi):
-                # УМЕНЬШЕНЫ пороги: было >85/<15, стало >90/<10
-                if (prediction == 1 and rsi > 90) or (prediction == -1 and rsi < 10):
+                # Блокируем только в самых экстремальных зонах (>98/<2)
+                if (prediction == 1 and rsi > 98) or (prediction == -1 and rsi < 2):
                     # В экстремальных зонах требуем немного больше уверенности
-                    extreme_threshold = confidence * 1.1  # УМЕНЬШЕНО с 1.2 до 1.1
+                    extreme_threshold = confidence * 1.02  # УМЕНЬШЕНО с 1.05 до 1.02 (минимальная защита)
                     if confidence < extreme_threshold:
                         rsi_int = int(rsi) if np.isfinite(rsi) else 0
                         return Signal(
@@ -1068,9 +1072,9 @@ class MLStrategy:
                             current_price
                         )
             
-            # Фильтр по объему (ОСЛАБЛЕН для улучшения конверсии)
-            # Применяется только для очень сильных сигналов и с более мягким порогом
-            if confidence > 0.8:  # УВЕЛИЧЕНО с 0.7 до 0.8 (применяется реже)
+            # Фильтр по объему (ОСЛАБЛЕН: применяется только для очень сильных сигналов и очень низкого объема)
+            # Применяется только для очень сильных сигналов и с очень мягким порогом
+            if confidence > 0.90:  # УВЕЛИЧЕНО с 0.85 до 0.90 (применяется только для очень сильных сигналов)
                 volume = row.get("volume", np.nan)
                 vol_sma = row.get("vol_sma", np.nan)
                 if not np.isfinite(vol_sma):
@@ -1078,7 +1082,7 @@ class MLStrategy:
                 
                 if np.isfinite(volume) and np.isfinite(vol_sma) and vol_sma > 0:
                     volume_ratio = volume / vol_sma
-                    if volume_ratio < 0.3:  # УМЕНЬШЕНО с 0.5 до 0.3 (более мягкий порог)
+                    if volume_ratio < 0.15:  # УМЕНЬШЕНО с 0.2 до 0.15 (блокируем только при очень низком объеме)
                         return Signal(
                             row.name, 
                             Action.HOLD, 
@@ -1346,14 +1350,14 @@ class MLStrategy:
 def build_ml_signals(
     df: pd.DataFrame,
     model_path: str,
-    confidence_threshold: float = 0.45,  # Снижено с 0.5 до 0.45 для увеличения использования сигналов
+    confidence_threshold: float = 0.35,  # Снижено для естественного получения ~5 сделок в день
     min_signal_strength: str = "слабое",
     stability_filter: bool = True,
     leverage: int = 10,
     target_profit_pct_margin: float = 25.0,
     max_loss_pct_margin: float = 10.0,
     min_signals_per_day: int = 1,
-    max_signals_per_day: int = 10,
+    max_signals_per_day: int = 20,
 ) -> list[Signal]:
     """
     Строит сигналы на основе ML-модели для всего DataFrame.

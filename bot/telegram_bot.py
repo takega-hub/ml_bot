@@ -1114,6 +1114,14 @@ class TelegramBot:
             # Сохраняем настройки
             self.save_ml_settings()
             
+            # Обновляем стратегии в trading_loop (если он существует)
+            if hasattr(self, 'trading_loop') and self.trading_loop:
+                # Обновляем confidence_threshold в существующих стратегиях
+                for symbol, strategy in self.trading_loop.strategies.items():
+                    if hasattr(strategy, 'confidence_threshold'):
+                        strategy.confidence_threshold = ml_settings.confidence_threshold
+                        logger.info(f"Updated confidence_threshold for {symbol} strategy to {ml_settings.confidence_threshold}")
+            
             # Показываем обновленные настройки
             ml_settings = self.settings.ml_strategy
             

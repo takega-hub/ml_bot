@@ -7,12 +7,20 @@
 
 import argparse
 import sys
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 import json
 from datetime import datetime
 import numpy as np
 from scipy.optimize import minimize
+
+# Устанавливаем UTF-8 кодировку для Windows
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -41,7 +49,7 @@ def optimize_ensemble_weights(
     
     Использует оптимизацию портфеля (Markowitz-style) для максимизации Sharpe ratio.
     """
-    print(f"\n🔍 Тестирование {len(model_paths)} моделей...")
+    print(f"\nТестирование {len(model_paths)} моделей...")
     
     # Получаем метрики для каждой модели
     model_sharpes = {}
@@ -60,7 +68,7 @@ def optimize_ensemble_weights(
             model_sharpes[model_path] = sharpe
             print(f"   {Path(model_path).name}: Sharpe = {sharpe:.2f}")
         except Exception as e:
-            print(f"   ⚠️  Ошибка для {Path(model_path).name}: {e}")
+            print(f"   [WARNING] Ошибка для {Path(model_path).name}: {e}")
             model_sharpes[model_path] = 0.0
     
     # Функция для максимизации (отрицательный Sharpe, т.к. minimize)
@@ -78,7 +86,7 @@ def optimize_ensemble_weights(
     initial_weights = [1.0 / len(model_paths)] * len(model_paths)
     
     # Оптимизация
-    print(f"\n⚙️  Оптимизация весов...")
+    print(f"\nОптимизация весов...")
     result = minimize(
         objective,
         initial_weights,
@@ -89,7 +97,7 @@ def optimize_ensemble_weights(
     )
     
     if not result.success:
-        print(f"⚠️  Оптимизация не сошлась, используем равномерные веса")
+        print(f"[WARNING] Оптимизация не сошлась, используем равномерные веса")
         optimal_weights = initial_weights
     else:
         optimal_weights = result.x
@@ -133,7 +141,7 @@ def main():
         symbols = ["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT", "ADAUSDT", "BNBUSDT"]
     
     print("=" * 80)
-    print("⚖️  ОПТИМИЗАЦИЯ ВЕСОВ АНСАМБЛЕЙ")
+    print("ОПТИМИЗАЦИЯ ВЕСОВ АНСАМБЛЕЙ")
     print("=" * 80)
     print(f"Символы: {', '.join(symbols)} ({len(symbols)} символов)")
     print(f"Дни: {args.days}")
@@ -147,7 +155,7 @@ def main():
         models_dir = Path("ml_models")
         model_paths = list(models_dir.glob(args.models))
         if not model_paths:
-            print(f"❌ Модели не найдены по паттерну: {args.models}")
+            print(f"[ERROR] Модели не найдены по паттерну: {args.models}")
             return
         model_paths = [str(p) for p in model_paths]
     else:
@@ -160,27 +168,27 @@ def main():
         if Path(path).exists():
             valid_paths.append(path)
         else:
-            print(f"⚠️  Модель не найдена: {path}")
+            print(f"[WARNING] Модель не найдена: {path}")
     
     if not valid_paths:
-        print("❌ Нет валидных моделей")
+        print("[ERROR] Нет валидных моделей")
         return
     
-    print(f"✅ Найдено {len(valid_paths)} моделей")
+    print(f"[OK] Найдено {len(valid_paths)} моделей")
     
     all_results = []
     
     # Оптимизируем веса для каждого символа
     for symbol in symbols:
         print("\n" + "=" * 80)
-        print(f"📊 ОПТИМИЗАЦИЯ ДЛЯ {symbol}")
+        print(f"ОПТИМИЗАЦИЯ ДЛЯ {symbol}")
         print("=" * 80)
         
         # Фильтруем модели для этого символа
         symbol_models = [p for p in valid_paths if symbol in Path(p).name]
         
         if not symbol_models:
-            print(f"⚠️  Нет моделей для {symbol}, пропускаем")
+            print(f"[WARNING] Нет моделей для {symbol}, пропускаем")
             continue
         
         print(f"   Модели: {len(symbol_models)}")
@@ -208,12 +216,12 @@ def main():
             
             all_results.append(result)
             
-            print(f"\n✅ {symbol} - Оптимальные веса:")
+            print(f"\n[OK] {symbol} - Оптимальные веса:")
             for model, weight in sorted(weights.items(), key=lambda x: x[1], reverse=True):
                 print(f"   {model}: {weight:.3f} ({weight*100:.1f}%)")
             
         except Exception as e:
-            print(f"❌ Ошибка при оптимизации {symbol}: {e}")
+            print(f"[ERROR] Ошибка при оптимизации {symbol}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -226,12 +234,12 @@ def main():
             json.dump(all_results, f, indent=2, ensure_ascii=False)
         
         print("\n" + "=" * 80)
-        print("✅ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА ДЛЯ ВСЕХ СИМВОЛОВ")
+        print("[OK] ОПТИМИЗАЦИЯ ЗАВЕРШЕНА ДЛЯ ВСЕХ СИМВОЛОВ")
         print("=" * 80)
         print(f"Обработано символов: {len(all_results)}/{len(symbols)}")
-        print(f"\n💾 Все результаты сохранены в: {output_file}")
+        print(f"\nВсе результаты сохранены в: {output_file}")
     else:
-        print("\n❌ Не удалось оптимизировать ни один символ")
+        print("\n[ERROR] Не удалось оптимизировать ни один символ")
 
 
 if __name__ == "__main__":

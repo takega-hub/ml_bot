@@ -1,0 +1,11 @@
+[
+  {
+    "symbol": "BNBUSDT",
+    "days": 30,
+    "weights": {
+      "rf_BNBUSDT_15_15m.pkl": 0.9999999998388045,
+      "xgb_BNBUSDT_15_15m.pkl": 1.611954458802245e-10
+    },
+    "timestamp": "2026-02-09T02:26:46.698518"
+  }
+]

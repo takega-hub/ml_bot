@@ -2,8 +2,11 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 import os
 import json
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,9 +34,9 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     """Параметры ML-стратегии"""
     
     # Основные параметры стратегии
-    confidence_threshold: float = 0.45  # Минимальная уверенность модели для открытия позиции (снижено для больше сигналов)
+    confidence_threshold: float = 0.35  # Минимальная уверенность модели для открытия позиции (35% по умолчанию, настроено для ~5 сделок в день)
     min_signal_strength: str = "слабое"  # Минимальная сила сигнала
-    stability_filter: bool = True  # Фильтр стабильности сигналов
+    stability_filter: bool = True  # Фильтр стабильности сигналов (минимальная защита от частой смены направления)
     
     # Параметры риск-менеджмента
     target_profit_pct_margin: float = 18.0  # Целевая прибыль от маржи в %
@@ -41,7 +44,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     
     # Целевые показатели стратегии (для мониторинга)
     min_signals_per_day: int = 1  # Минимум сигналов в день
-    max_signals_per_day: int = 10  # Максимум сигналов в день
+    max_signals_per_day: int = 20  # Максимум сигналов в день (не используется для ограничения, только для мониторинга)
     
     # Настройки моделей
     model_type: Optional[str] = None  # Тип модели: "rf", "gb", "ensemble", "triple_ensemble", "quad_ensemble"
@@ -56,7 +59,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
         """Валидация значений"""
         # Убедимся, что confidence_threshold в пределах [0, 1]
         if not 0 <= self.confidence_threshold <= 1:
-            self.confidence_threshold = 0.45
+            self.confidence_threshold = 0.75
         
         # Убедимся, что min_signal_strength валиден
         valid_strengths = ["слабое", "умеренное", "среднее", "сильное", "очень_сильное"]
@@ -349,6 +352,19 @@ def load_settings() -> AppSettings:
         valid_strengths = ["слабое", "умеренное", "среднее", "сильное", "очень_сильное"]
         if ml_min_strength.lower() in valid_strengths:
             settings.ml_strategy.min_signal_strength = ml_min_strength.lower()
+    
+    # Загружаем сохраненные ML настройки из файла (если есть)
+    # Это перезапишет значения по умолчанию и переменные окружения
+    ml_settings_file = project_root / "ml_settings.json"
+    if ml_settings_file.exists():
+        try:
+            with open(ml_settings_file, 'r', encoding='utf-8') as f:
+                ml_dict = json.load(f)
+                if "confidence_threshold" in ml_dict:
+                    settings.ml_strategy.confidence_threshold = float(ml_dict["confidence_threshold"])
+                    logger.info(f"Loaded confidence_threshold from ml_settings.json: {settings.ml_strategy.confidence_threshold}")
+        except Exception as e:
+            logger.warning(f"Failed to load ml_settings.json: {e}")
     
     ml_stability = os.getenv("ML_STABILITY_FILTER", "").strip()
     if ml_stability:

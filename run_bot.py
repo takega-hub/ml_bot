@@ -156,6 +156,8 @@ async def main():
         # 6. Инициализация торгового цикла
         try:
             trading_loop = TradingLoop(settings, state, bybit, tg_bot)
+            # Передаем trading_loop в TelegramBot для обновления стратегий при изменении настроек
+            tg_bot.trading_loop = trading_loop
         except Exception as e:
             logger.error(f"Failed to initialize TradingLoop: {e}", exc_info=True)
             raise

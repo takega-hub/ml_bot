@@ -58,8 +58,112 @@ class TradingLoop:
             logger.error(f"Fatal error in trading loop: {e}", exc_info=True)
             raise
     
+    def _get_seconds_until_next_candle_close(self, timeframe: str) -> float:
+        """
+        Вычисляет количество секунд до закрытия следующей свечи.
+        
+        Args:
+            timeframe: Таймфрейм ('15m', '1h', '4h', и т.д.)
+        
+        Returns:
+            Количество секунд до закрытия следующей свечи
+        """
+        from datetime import datetime, timedelta
+        
+        now = datetime.now()
+        
+        # Парсим таймфрейм
+        if timeframe.endswith('m'):
+            minutes = int(timeframe[:-1])
+        elif timeframe.endswith('h'):
+            minutes = int(timeframe[:-1]) * 60
+        elif timeframe.endswith('d'):
+            minutes = int(timeframe[:-1]) * 24 * 60
+        else:
+            # Пытаемся распарсить как число (минуты)
+            try:
+                minutes = int(timeframe)
+            except:
+                minutes = 15  # По умолчанию 15 минут
+        
+        # Вычисляем время закрытия следующей свечи
+        # Для 15m: закрытие в :00, :15, :30, :45
+        # Для 1h: закрытие в :00 каждого часа
+        # Для 4h: закрытие в 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+        
+        if minutes < 60:
+            # Минутные свечи: округляем до ближайшего кратного minutes
+            current_minute = now.minute
+            next_close_minute = ((current_minute // minutes) + 1) * minutes
+            if next_close_minute >= 60:
+                next_close = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            else:
+                next_close = now.replace(minute=next_close_minute, second=0, microsecond=0)
+        elif minutes == 60:
+            # Часовые свечи: закрытие в :00 каждого часа
+            if now.minute == 0 and now.second < 5:
+                # Свеча только что закрылась, следующая через час
+                next_close = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            else:
+                next_close = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        else:
+            # Многочасовые свечи (4h, 1d и т.д.)
+            hours = minutes // 60
+            current_hour = now.hour
+            next_close_hour = ((current_hour // hours) + 1) * hours
+            if next_close_hour >= 24:
+                next_close = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                next_close = now.replace(hour=next_close_hour, minute=0, second=0, microsecond=0)
+        
+        seconds_until_close = (next_close - now).total_seconds()
+        return max(0, seconds_until_close)
+    
+    def _get_seconds_since_last_candle_close(self, timeframe: str) -> float:
+        """
+        Вычисляет количество секунд с момента закрытия последней свечи.
+        
+        Args:
+            timeframe: Таймфрейм ('15m', '1h', '4h', и т.д.)
+        
+        Returns:
+            Количество секунд с момента закрытия последней свечи
+        """
+        from datetime import datetime, timedelta
+        
+        now = datetime.now()
+        
+        # Парсим таймфрейм
+        if timeframe.endswith('m'):
+            minutes = int(timeframe[:-1])
+        elif timeframe.endswith('h'):
+            minutes = int(timeframe[:-1]) * 60
+        elif timeframe.endswith('d'):
+            minutes = int(timeframe[:-1]) * 24 * 60
+        else:
+            try:
+                minutes = int(timeframe)
+            except:
+                minutes = 15
+        
+        # Вычисляем время закрытия последней свечи
+        if minutes < 60:
+            current_minute = now.minute
+            last_close_minute = (current_minute // minutes) * minutes
+            last_close = now.replace(minute=last_close_minute, second=0, microsecond=0)
+        elif minutes == 60:
+            last_close = now.replace(minute=0, second=0, microsecond=0)
+        else:
+            hours = minutes // 60
+            current_hour = now.hour
+            last_close_hour = (current_hour // hours) * hours
+            last_close = now.replace(hour=last_close_hour, minute=0, second=0, microsecond=0)
+        
+        seconds_since_close = (now - last_close).total_seconds()
+        return max(0, seconds_since_close)
+
     async def _signal_processing_loop(self):
-        """Основной цикл обработки сигналов"""
+        """Основной цикл обработки сигналов с оптимизацией для немедленной обработки после закрытия свечи"""
         logger.info("Starting Signal Processing Loop...")
         iteration = 0
         while True:
@@ -81,9 +185,22 @@ class TradingLoop:
                     if len(self.state.active_symbols) > 1:
                         await asyncio.sleep(2)
                 
-                # Пауза между циклами (из настроек)
-                logger.info(f"✅ Signal Processing Loop: Completed iteration {iteration}, sleeping for {self.settings.live_poll_seconds}s...")
-                await asyncio.sleep(self.settings.live_poll_seconds)
+                # УМНАЯ ПАУЗА: проверяем, когда закроется следующая свеча
+                # Если свеча только что закрылась (в пределах последних 30 секунд), проверяем снова через короткое время
+                seconds_since_close = self._get_seconds_since_last_candle_close(self.settings.timeframe)
+                
+                if seconds_since_close <= 30:
+                    # Свеча только что закрылась, проверяем снова через 10 секунд для надежности
+                    sleep_time = 10
+                    logger.info(f"✅ Signal Processing Loop: Candle closed {seconds_since_close:.1f}s ago, checking again in {sleep_time}s...")
+                else:
+                    # Обычная пауза, но не больше времени до следующего закрытия
+                    seconds_until_close = self._get_seconds_until_next_candle_close(self.settings.timeframe)
+                    # Используем минимум из обычной паузы и времени до закрытия (но не меньше 10 секунд)
+                    sleep_time = min(self.settings.live_poll_seconds, max(10, seconds_until_close - 5))
+                    logger.info(f"✅ Signal Processing Loop: Completed iteration {iteration}, sleeping for {sleep_time}s (next candle closes in {seconds_until_close:.1f}s)...")
+                
+                await asyncio.sleep(sleep_time)
                 logger.debug(f"Signal Processing Loop: Woke up from sleep, starting next iteration...")
             except Exception as e:
                 logger.error(f"[trading_loop] Error in signal processing loop: {e}")
@@ -264,6 +381,29 @@ class TradingLoop:
                 if candle_timestamp is None:
                     candle_timestamp = df.index[-1] if len(df.index) > 0 else None
             
+            # Логируем время закрытия свечи и задержку обработки
+            if candle_timestamp is not None:
+                try:
+                    from datetime import datetime
+                    if isinstance(candle_timestamp, pd.Timestamp):
+                        candle_close_time = candle_timestamp
+                    elif isinstance(candle_timestamp, (int, float)):
+                        # Если timestamp в миллисекундах
+                        candle_close_time = pd.Timestamp(candle_timestamp, unit='ms')
+                    else:
+                        candle_close_time = pd.Timestamp(candle_timestamp)
+                    
+                    now = pd.Timestamp.now()
+                    delay_seconds = (now - candle_close_time).total_seconds()
+                    delay_minutes = delay_seconds / 60
+                    
+                    logger.info(
+                        f"[{symbol}] 📊 Candle info: closed at {candle_close_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                        f"processing delay: {delay_seconds:.1f}s ({delay_minutes:.2f} min)"
+                    )
+                except Exception as e:
+                    logger.debug(f"[{symbol}] Could not calculate candle delay: {e}")
+            
             # Проверяем, не обрабатывали ли мы уже эту свечу
             # ВАЖНО: Проверяем только если timestamp валиден
             # Это предотвращает генерацию одинаковых сигналов для одной и той же закрытой свечи
@@ -333,11 +473,21 @@ class TradingLoop:
                 logger.warning(f"No signal generated for {symbol}")
                 return
             
+            # Сохраняем время получения сигнала для проверки "свежести"
+            signal_received_time = pd.Timestamp.now()
+            
             # Логируем каждый сигнал (для отладки)
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+            
+            # Сохраняем время получения сигнала в indicators_info для использования в execute_trade
+            if indicators_info is None:
+                indicators_info = {}
+            indicators_info['signal_received_time'] = signal_received_time.isoformat()
+            signal.indicators_info = indicators_info
+            
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
             logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
-            logger.info(f"[{symbol}] ⏭️ Signal generated, continuing processing...")
+            logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
             # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
             # Это гарантирует, что в истории отображаются только сигналы с достаточной уверенностью
@@ -378,6 +528,23 @@ class TradingLoop:
                         f"threshold {min_confidence_for_trade:.2%}"
                     )
                     return  # Не открываем позицию, если уверенность ниже порога
+                
+                # КРИТИЧНО: Проверяем "свежесть" сигнала - открываем сделки только по свежим сигналам (не старше 15 минут)
+                signal_age_seconds = (pd.Timestamp.now() - signal_received_time).total_seconds()
+                signal_age_minutes = signal_age_seconds / 60
+                max_signal_age_minutes = 15  # Максимальный возраст сигнала для открытия сделки
+                
+                if signal_age_minutes > max_signal_age_minutes:
+                    logger.warning(
+                        f"[{symbol}] ⏭️ Signal rejected: too old ({signal_age_minutes:.1f} minutes > {max_signal_age_minutes} minutes). "
+                        f"Signal received at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                        f"current time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return  # Не открываем позицию по устаревшему сигналу
+                
+                logger.info(
+                    f"[{symbol}] ✅ Signal is fresh: {signal_age_minutes:.1f} minutes old (max: {max_signal_age_minutes} minutes)"
+                )
                 
                 signal_side = Bias.LONG if signal.action == Action.LONG else Bias.SHORT
                 
@@ -481,6 +648,29 @@ class TradingLoop:
             
             # Проверяем наличие TP/SL в сигнале (критично для открытия позиции)
             indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+            
+            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: проверяем возраст сигнала (для защиты от устаревших сигналов)
+            # Используем signal_received_time из indicators_info, если он есть, иначе используем timestamp свечи
+            signal_received_time = None
+            if indicators_info and 'signal_received_time' in indicators_info:
+                signal_received_time = pd.Timestamp(indicators_info['signal_received_time'])
+            elif signal.timestamp:
+                # Используем timestamp свечи как приблизительное время получения сигнала
+                signal_received_time = signal.timestamp
+            
+            if signal_received_time and not is_add:  # Проверяем только для новых позиций, не для DCA
+                signal_age_seconds = (pd.Timestamp.now() - signal_received_time).total_seconds()
+                signal_age_minutes = signal_age_seconds / 60
+                max_signal_age_minutes = 15  # Максимальный возраст сигнала для открытия сделки
+                
+                if signal_age_minutes > max_signal_age_minutes:
+                    logger.warning(
+                        f"[{symbol}] ❌ Cannot open position: signal is too old ({signal_age_minutes:.1f} minutes > {max_signal_age_minutes} minutes). "
+                        f"Signal timestamp: {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                        f"current time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return  # Не открываем позицию по устаревшему сигналу
+            
             signal_tp = signal.take_profit or indicators_info.get('take_profit')
             signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
             

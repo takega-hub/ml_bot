@@ -223,6 +223,28 @@ def metrics_to_dict(m: BacktestMetrics, model_path: Path) -> Dict[str, Any]:
     return result
 
 
+def extract_interval_from_model(model_path: Path) -> str:
+    """
+    Извлекает интервал из имени файла модели.
+    
+    Форматы:
+        rf_BTCUSDT_15_15m.pkl -> "15"
+        rf_BTCUSDT_60_1h.pkl -> "60"
+        ensemble_BTCUSDT_15_mtf.pkl -> "15"
+        ensemble_BTCUSDT_60_mtf_1h.pkl -> "60"
+    """
+    name = model_path.stem
+    parts = name.split("_")
+    
+    # Ищем интервал в частях имени
+    for part in parts:
+        if part in ["15", "60", "240", "D"]:
+            return part
+    
+    # По умолчанию 15 минут
+    return "15"
+
+
 def test_single_model(args_tuple: Tuple) -> Optional[Dict[str, Any]]:
     """
     Функция для тестирования одной модели.
@@ -239,13 +261,24 @@ def test_single_model(args_tuple: Tuple) -> Optional[Dict[str, Any]]:
         matplotlib.use('Agg')  # Используем non-interactive backend
         
         # Импортируем функции локально
-        from backtest_ml_strategy import run_ml_backtest, BacktestMetrics
+        from backtest_ml_strategy import run_exact_backtest, BacktestMetrics
         
-        metrics = run_ml_backtest(
+        # Определяем интервал из имени модели, если не указан явно
+        model_interval = extract_interval_from_model(model_path)
+        if interval == "15m" and model_interval != "15":
+            # Используем интервал из имени модели
+            test_interval = model_interval
+        else:
+            # Используем указанный интервал или извлекаем из имени
+            test_interval = interval.replace("m", "") if interval.endswith("m") else interval
+            if test_interval == "15" and model_interval != "15":
+                test_interval = model_interval
+        
+        metrics = run_exact_backtest(
             model_path=str(model_path),
             symbol=symbol,
             days_back=days,
-            interval=interval,
+            interval=test_interval,
             initial_balance=initial_balance,
             risk_per_trade=risk_per_trade,
             leverage=leverage,
@@ -1013,6 +1046,74 @@ def print_problems_and_recommendations(df_results: pd.DataFrame) -> None:
     print("\n" + "=" * 80)
 
 
+def print_best_models_per_symbol(df_results: pd.DataFrame) -> None:
+    """
+    Выводит лучшие модели для каждого символа с краткой статистикой.
+    """
+    if df_results.empty:
+        return
+    
+    print("\n" + "=" * 80)
+    print("🏆 ЛУЧШИЕ МОДЕЛИ ПО КАЖДОМУ СИМВОЛУ")
+    print("=" * 80)
+    
+    # Группируем по символам и выбираем лучшую модель для каждого
+    for symbol in sorted(df_results['symbol'].unique()):
+        symbol_df = df_results[df_results['symbol'] == symbol].copy()
+        
+        # Сортируем по PnL% (убывание)
+        symbol_df = symbol_df.sort_values('total_pnl_pct', ascending=False)
+        
+        # Берем лучшую модель
+        best = symbol_df.iloc[0]
+        
+        print(f"\n📈 {symbol}:")
+        print("-" * 80)
+        print(f"   Модель: {best['model_name']}")
+        print(f"   Тип: {best.get('model_type', 'N/A')} ({best.get('mode_suffix', 'N/A')})")
+        print(f"   📊 Статистика:")
+        print(f"      • Сделок: {int(best['total_trades'])}")
+        print(f"      • PnL%: {best['total_pnl_pct']:+.2f}%")
+        print(f"      • PnL USD: ${best['total_pnl_usd']:+.2f}")
+        print(f"      • Win Rate: {best['win_rate_pct']:.1f}% ({int(best['winning_trades'])}/{int(best['total_trades'])})")
+        print(f"      • Profit Factor: {best['profit_factor']:.2f}")
+        print(f"      • Max Drawdown: {best['max_drawdown_pct']:.2f}%")
+        print(f"      • Sharpe Ratio: {best['sharpe_ratio']:.2f}")
+        
+        # Дополнительные метрики, если доступны
+        if 'trades_per_day' in best and pd.notna(best['trades_per_day']):
+            print(f"      • Сделок в день: {best['trades_per_day']:.2f}")
+        
+        if 'avg_win_usd' in best and pd.notna(best['avg_win_usd']):
+            print(f"      • Средняя прибыль: ${best['avg_win_usd']:.2f}")
+        
+        if 'avg_loss_usd' in best and pd.notna(best['avg_loss_usd']):
+            print(f"      • Средний убыток: ${best['avg_loss_usd']:.2f}")
+        
+        if 'long_trades' in best and 'short_trades' in best:
+            long_count = int(best['long_trades']) if pd.notna(best['long_trades']) else 0
+            short_count = int(best['short_trades']) if pd.notna(best['short_trades']) else 0
+            if long_count + short_count > 0:
+                print(f"      • LONG/SHORT: {long_count}/{short_count}")
+        
+        if 'avg_trade_duration_hours' in best and pd.notna(best['avg_trade_duration_hours']):
+            print(f"      • Средняя длительность сделки: {best['avg_trade_duration_hours']:.1f} ч")
+        
+        if 'avg_confidence' in best and pd.notna(best['avg_confidence']):
+            print(f"      • Средняя уверенность: {best['avg_confidence']*100:.1f}%")
+        
+        # Показываем топ-3 модели для этого символа
+        top3 = symbol_df.head(3)
+        if len(top3) > 1:
+            print(f"\n   📊 Топ-3 модели для {symbol}:")
+            for idx, (_, row) in enumerate(top3.iterrows(), 1):
+                pnl_sign = "+" if row['total_pnl_pct'] >= 0 else ""
+                print(f"      {idx}. {row['model_name']}: {pnl_sign}{row['total_pnl_pct']:.2f}% PnL, "
+                      f"{row['win_rate_pct']:.1f}% WR, {int(row['total_trades'])} сделок")
+    
+    print("\n" + "=" * 80)
+
+
 def print_summary_table(df_results: pd.DataFrame) -> None:
     """Печатает компактную сводную таблицу по каждому символу."""
     if df_results.empty:
@@ -1502,6 +1603,9 @@ Examples:
     print(f"   PnL%: {best_model['total_pnl_pct']:.2f}%")
     print(f"   Win Rate: {best_model['win_rate_pct']:.1f}%")
     print("=" * 80)
+    
+    # Выводим лучшие модели для каждого символа
+    print_best_models_per_symbol(df_results)
 
 
 if __name__ == "__main__":
