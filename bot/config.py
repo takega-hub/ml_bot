@@ -64,6 +64,11 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     retrain_days: int = 7  # Количество дней данных для ретрейна
     retrain_interval_hours: int = 24  # Интервал переобучения в часах
     
+    # Автоматическое обновление стратегий
+    auto_optimize_strategies: bool = False  # Автоматически обновлять стратегии по расписанию (раз в неделю)
+    auto_optimize_day: str = "sunday"  # День недели для автообновления
+    auto_optimize_hour: int = 3  # Час для автообновления (0-23)
+    
     def __post_init__(self):
         """Валидация значений"""
         # Убедимся, что confidence_threshold в пределах [0, 1]
@@ -90,6 +95,13 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.mtf_confidence_threshold_15m = 0.35
         if self.mtf_alignment_mode not in ["strict", "weighted"]:
             self.mtf_alignment_mode = "strict"
+        
+        # Валидация параметров автообновления
+        valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        if self.auto_optimize_day not in valid_days:
+            self.auto_optimize_day = "sunday"
+        if not 0 <= self.auto_optimize_hour <= 23:
+            self.auto_optimize_hour = 3
 
 
 @dataclass
@@ -380,6 +392,23 @@ def load_settings() -> AppSettings:
                 if "confidence_threshold" in ml_dict:
                     settings.ml_strategy.confidence_threshold = float(ml_dict["confidence_threshold"])
                     logger.info(f"Loaded confidence_threshold from ml_settings.json: {settings.ml_strategy.confidence_threshold}")
+                if "use_mtf_strategy" in ml_dict:
+                    settings.ml_strategy.use_mtf_strategy = bool(ml_dict["use_mtf_strategy"])
+                    logger.info(f"Loaded use_mtf_strategy from ml_settings.json: {settings.ml_strategy.use_mtf_strategy}")
+                if "mtf_confidence_threshold_1h" in ml_dict:
+                    settings.ml_strategy.mtf_confidence_threshold_1h = float(ml_dict["mtf_confidence_threshold_1h"])
+                if "mtf_confidence_threshold_15m" in ml_dict:
+                    settings.ml_strategy.mtf_confidence_threshold_15m = float(ml_dict["mtf_confidence_threshold_15m"])
+                if "mtf_alignment_mode" in ml_dict:
+                    settings.ml_strategy.mtf_alignment_mode = str(ml_dict["mtf_alignment_mode"])
+                if "mtf_require_alignment" in ml_dict:
+                    settings.ml_strategy.mtf_require_alignment = bool(ml_dict["mtf_require_alignment"])
+                if "auto_optimize_strategies" in ml_dict:
+                    settings.ml_strategy.auto_optimize_strategies = bool(ml_dict["auto_optimize_strategies"])
+                if "auto_optimize_day" in ml_dict:
+                    settings.ml_strategy.auto_optimize_day = str(ml_dict["auto_optimize_day"])
+                if "auto_optimize_hour" in ml_dict:
+                    settings.ml_strategy.auto_optimize_hour = int(ml_dict["auto_optimize_hour"])
         except Exception as e:
             logger.warning(f"Failed to load ml_settings.json: {e}")
     
@@ -408,6 +437,11 @@ def load_settings() -> AppSettings:
     ml_mtf_enabled = os.getenv("ML_MTF_ENABLED", "").strip()
     if ml_mtf_enabled:
         settings.ml_strategy.mtf_enabled = ml_mtf_enabled.lower() not in ("0", "false", "no", "off")
+    
+    # Поддержка переменной окружения для MTF стратегии
+    ml_mtf_strategy = os.getenv("ML_MTF_STRATEGY_ENABLED", "").strip()
+    if ml_mtf_strategy:
+        settings.ml_strategy.use_mtf_strategy = ml_mtf_strategy.lower() not in ("0", "false", "no", "off")
     
     # Загружаем путь к модели
     ml_model_path = os.getenv("ML_MODEL_PATH", "").strip()

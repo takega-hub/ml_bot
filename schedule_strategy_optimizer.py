@@ -45,6 +45,17 @@ def run_optimization():
     logger.info("=" * 80)
     logger.info(f"Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
+    # Проверяем, включено ли автообновление в настройках
+    try:
+        from bot.config import load_settings
+        settings = load_settings()
+        if not settings.ml_strategy.auto_optimize_strategies:
+            logger.info("⏸️  Автообновление стратегий выключено в настройках. Пропускаем оптимизацию.")
+            logger.info("💡 Для включения используйте Telegram бота: ML НАСТРОЙКИ → Автообновление")
+            return
+    except Exception as e:
+        logger.warning(f"⚠️  Не удалось проверить настройки автообновления: {e}. Продолжаем оптимизацию.")
+    
     try:
         python_exe = sys.executable
         cmd = [python_exe, "auto_strategy_optimizer.py"]

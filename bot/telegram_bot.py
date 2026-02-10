@@ -387,6 +387,9 @@ class TelegramBot:
         elif query.data.startswith("edit_ml_"):
             setting_name = query.data.replace("edit_ml_", "")
             await self.start_edit_ml_setting(query, setting_name)
+        elif query.data.startswith("toggle_ml_"):
+            setting_name = query.data.replace("toggle_ml_", "")
+            await self.toggle_ml_setting(query, setting_name)
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
@@ -1374,6 +1377,52 @@ class TelegramBot:
             logger.error(f"Error processing risk setting input: {e}")
             await update.message.reply_text(f"❌ Ошибка: {str(e)}")
     
+    async def toggle_ml_setting(self, query, setting_name: str):
+        """Переключает булеву настройку ML стратегии"""
+        ml_settings = self.settings.ml_strategy
+        
+        if setting_name == "use_mtf_strategy":
+            # Переключаем MTF стратегию
+            ml_settings.use_mtf_strategy = not ml_settings.use_mtf_strategy
+            
+            # Сохраняем настройки
+            self.save_ml_settings()
+            
+            status = "включена" if ml_settings.use_mtf_strategy else "выключена"
+            await query.answer(f"✅ MTF стратегия {status}", show_alert=True)
+            
+            # Показываем обновленные настройки
+            await self.show_ml_settings(query)
+        elif setting_name == "auto_optimize_strategies":
+            # Переключаем автообновление стратегий
+            ml_settings.auto_optimize_strategies = not ml_settings.auto_optimize_strategies
+            
+            # Сохраняем настройки
+            self.save_ml_settings()
+            
+            status = "включено" if ml_settings.auto_optimize_strategies else "выключено"
+            message = f"✅ Автообновление стратегий {status}"
+            if ml_settings.auto_optimize_strategies:
+                day_names = {
+                    "monday": "понедельник",
+                    "tuesday": "вторник",
+                    "wednesday": "среда",
+                    "thursday": "четверг",
+                    "friday": "пятница",
+                    "saturday": "суббота",
+                    "sunday": "воскресенье"
+                }
+                day_name = day_names.get(ml_settings.auto_optimize_day, ml_settings.auto_optimize_day)
+                message += f"\nРасписание: {day_name}, {ml_settings.auto_optimize_hour:02d}:00"
+                message += "\n\n⚠️ Убедитесь, что планировщик запущен:\npython schedule_strategy_optimizer.py"
+            
+            await query.answer(message, show_alert=True)
+            
+            # Показываем обновленные настройки
+            await self.show_ml_settings(query)
+        else:
+            await query.answer("⚠️ Неизвестная настройка", show_alert=True)
+    
     async def toggle_risk_setting(self, query, setting_name: str):
         """Переключает булеву настройку риска"""
         risk = self.settings.risk
@@ -1425,6 +1474,14 @@ class TelegramBot:
             
             ml_dict = {
                 "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+                "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
+                "mtf_confidence_threshold_1h": self.settings.ml_strategy.mtf_confidence_threshold_1h,
+                "mtf_confidence_threshold_15m": self.settings.ml_strategy.mtf_confidence_threshold_15m,
+                "mtf_alignment_mode": self.settings.ml_strategy.mtf_alignment_mode,
+                "mtf_require_alignment": self.settings.ml_strategy.mtf_require_alignment,
+                "auto_optimize_strategies": self.settings.ml_strategy.auto_optimize_strategies,
+                "auto_optimize_day": self.settings.ml_strategy.auto_optimize_day,
+                "auto_optimize_hour": self.settings.ml_strategy.auto_optimize_hour,
             }
             
             with open(config_file, 'w', encoding='utf-8') as f:
@@ -1523,6 +1580,24 @@ class TelegramBot:
         ml_settings = self.settings.ml_strategy
         
         text = "🧠 НАСТРОЙКИ ML СТРАТЕГИИ\n\n"
+        text += f"🔄 MTF стратегия (1h + 15m): {'✅ Включена' if ml_settings.use_mtf_strategy else '❌ Выключена'}\n"
+        if ml_settings.use_mtf_strategy:
+            text += f"   • Порог 1h: {ml_settings.mtf_confidence_threshold_1h*100:.0f}%\n"
+            text += f"   • Порог 15m: {ml_settings.mtf_confidence_threshold_15m*100:.0f}%\n"
+            text += f"   • Режим: {ml_settings.mtf_alignment_mode}\n\n"
+        text += f"🤖 Автообновление стратегий: {'✅ Включено' if ml_settings.auto_optimize_strategies else '❌ Выключено'}\n"
+        if ml_settings.auto_optimize_strategies:
+            day_names = {
+                "monday": "Понедельник",
+                "tuesday": "Вторник",
+                "wednesday": "Среда",
+                "thursday": "Четверг",
+                "friday": "Пятница",
+                "saturday": "Суббота",
+                "sunday": "Воскресенье"
+            }
+            day_name = day_names.get(ml_settings.auto_optimize_day, ml_settings.auto_optimize_day)
+            text += f"   • Расписание: {day_name}, {ml_settings.auto_optimize_hour:02d}:00\n\n"
         text += f"🎯 Минимальная уверенность: {ml_settings.confidence_threshold*100:.0f}%\n"
         text += f"💪 Минимальная сила сигнала:\n"
         text += f"   • Ансамбли: 0.3% (фиксировано)\n"
@@ -1536,6 +1611,14 @@ class TelegramBot:
         text += f"   • Агрессивно: 30-50%\n"
         
         keyboard = [
+            [InlineKeyboardButton(
+                f"🔄 MTF стратегия: {'✅ Вкл' if ml_settings.use_mtf_strategy else '❌ Выкл'}", 
+                callback_data="toggle_ml_use_mtf_strategy"
+            )],
+            [InlineKeyboardButton(
+                f"🤖 Автообновление: {'✅ Вкл' if ml_settings.auto_optimize_strategies else '❌ Выкл'}", 
+                callback_data="toggle_ml_auto_optimize_strategies"
+            )],
             [InlineKeyboardButton(f"🎯 Уверенность: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
             [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]

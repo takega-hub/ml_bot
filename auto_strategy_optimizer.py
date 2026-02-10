@@ -18,13 +18,77 @@ from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 import traceback
 
+# Настройка логирования с безопасной обработкой эмодзи для Windows
+import sys
+import codecs
+
+# Безопасная функция для логирования (убирает эмодзи для Windows)
+def safe_log_message(msg: str) -> str:
+    """Убирает эмодзи из сообщения для совместимости с Windows"""
+    if sys.platform == 'win32':
+        # Заменяем основные эмодзи на текстовые метки
+        replacements = {
+            '🚀': '[START]',
+            '📊': '[INFO]',
+            '✅': '[OK]',
+            '❌': '[ERROR]',
+            '⚠️': '[WARN]',
+            '🔄': '[RETRAIN]',
+            '📦': '[DATA]',
+            '🤖': '[MODEL]',
+            '🎯': '[TARGET]',
+            '📈': '[CHART]',
+            '🧠': '[ML]',
+            '💡': '[TIP]',
+            '🔍': '[SEARCH]',
+            '🏆': '[BEST]',
+            '📥': '[DOWNLOAD]',
+            '🔧': '[ENGINEERING]',
+            '⏳': '[WAIT]',
+            '🔥': '[HOT]',
+            '🌲': '[RF]',
+            '⚡': '[XGB]',
+            '🎉': '[SUCCESS]',
+            '📋': '[LIST]',
+            '📝': '[NOTE]',
+            '💪': '[STRONG]',
+            '🔹': '[INFO]',
+            'ℹ️': '[INFO]',
+        }
+        for emoji, replacement in replacements.items():
+            msg = msg.replace(emoji, replacement)
+    return msg
+
+class SafeStreamHandler(logging.StreamHandler):
+    """Обработчик логов, который безопасно обрабатывает эмодзи"""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            msg = safe_log_message(msg)
+            stream = self.stream
+            # Пытаемся записать с обработкой ошибок кодировки
+            try:
+                stream.write(msg + self.terminator)
+            except UnicodeEncodeError:
+                # Если все еще ошибка, удаляем все не-ASCII символы
+                msg_clean = ''.join(c for c in msg if ord(c) < 128)
+                stream.write(msg_clean + self.terminator)
+            self.flush()
+        except Exception as e:
+            # В случае критической ошибки просто пропускаем
+            try:
+                stream.write(f"[LOG ERROR: {type(e).__name__}]\n")
+            except:
+                pass
+
 # Настройка логирования
+log_file = f'optimization_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'optimization_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
-        logging.StreamHandler()
+        logging.FileHandler(log_file, encoding='utf-8'),
+        SafeStreamHandler()  # Используем безопасный обработчик для консоли
     ]
 )
 logger = logging.getLogger(__name__)
@@ -389,7 +453,7 @@ class StrategyOptimizer:
         """Запускает полный цикл оптимизации"""
         start_time = datetime.now()
         logger.info("=" * 80)
-        logger.info("🚀 НАЧАЛО АВТОМАТИЧЕСКОЙ ОПТИМИЗАЦИИ СТРАТЕГИЙ")
+        logger.info("[START] НАЧАЛО АВТОМАТИЧЕСКОЙ ОПТИМИЗАЦИИ СТРАТЕГИЙ")
         logger.info("=" * 80)
         logger.info(f"Символы: {', '.join(self.symbols)}")
         logger.info(f"Дни бэктеста: {self.days}")
@@ -446,7 +510,7 @@ class StrategyOptimizer:
         duration = (end_time - start_time).total_seconds() / 60  # минуты
         
         logger.info("\n" + "=" * 80)
-        logger.info("✅ ОПТИМИЗАЦИЯ ЗАВЕРШЕНА")
+        logger.info("[OK] ОПТИМИЗАЦИЯ ЗАВЕРШЕНА")
         logger.info("=" * 80)
         logger.info(f"Время выполнения: {duration:.1f} минут")
         logger.info(f"Обработано символов: {len(self.symbols)}")
@@ -457,11 +521,11 @@ class StrategyOptimizer:
         
         # Формируем отчет для уведомления
         report_lines = [
-            "📊 ОТЧЕТ ОБ ОПТИМИЗАЦИИ СТРАТЕГИЙ",
+            "[INFO] ОТЧЕТ ОБ ОПТИМИЗАЦИИ СТРАТЕГИЙ",
             f"Время: {duration:.1f} минут",
             f"Символов: {len(self.symbols)}",
             "",
-            "🏆 ЛУЧШИЕ СТРАТЕГИИ:"
+            "[BEST] ЛУЧШИЕ СТРАТЕГИИ:"
         ]
         
         for symbol, strategy in self.best_strategies.items():
@@ -481,7 +545,7 @@ class StrategyOptimizer:
             report_lines.append(f"  PnL: {pnl:.2f}%, WR: {wr:.1f}%")
         
         if self.errors:
-            report_lines.append(f"\n⚠️ Ошибок: {len(self.errors)}")
+            report_lines.append(f"\n[WARN] Ошибок: {len(self.errors)}")
         
         report = "\n".join(report_lines)
         logger.info(f"\n{report}")
@@ -537,10 +601,10 @@ def main():
     try:
         optimizer.run()
     except KeyboardInterrupt:
-        logger.info("\n⚠️ Оптимизация прервана пользователем")
+        logger.info("\n[WARN] Оптимизация прервана пользователем")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"[ERROR] Критическая ошибка: {e}", exc_info=True)
         sys.exit(1)
 
 
