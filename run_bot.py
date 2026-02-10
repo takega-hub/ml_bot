@@ -11,6 +11,10 @@ from bot.model_manager import ModelManager
 from bot.telegram_bot import TelegramBot
 from bot.trading_loop import TradingLoop
 from bot.health_monitor import HealthMonitor
+try:
+    from telegram.error import Conflict
+except ImportError:
+    Conflict = None
 
 # Флаг для защиты от повторной настройки логирования
 _logging_configured = False
@@ -108,6 +112,11 @@ def setup_logging():
     return logging.getLogger("main")
 
 async def main():
+    tg_bot = None
+    trading_loop = None
+    health_monitor = None
+    logger = None
+    
     try:
         # Настраиваем логирование (защищено от повторного вызова)
         logger = setup_logging()
@@ -182,19 +191,61 @@ async def main():
         except Exception as e:
             logger.error(f"Fatal error during execution: {e}", exc_info=True)
             raise
-        finally:
-            logger.info("Shutting down...")
+    except KeyboardInterrupt:
+        if logger:
+            logger.info("Received interrupt signal, shutting down...")
     except Exception as e:
-        logger.error(f"Fatal error during initialization: {e}", exc_info=True)
-        sys.exit(1)
+        # Handle Telegram Conflict error specifically
+        if Conflict and isinstance(e, Conflict):
+            if logger:
+                logger.error(
+                    "Telegram bot conflict detected. Another instance is already running.\n"
+                    "Please stop the other instance before starting this one.\n"
+                    "You can check for running instances with: ps aux | grep run_bot.py"
+                )
+            else:
+                print(
+                    "ERROR: Another Telegram bot instance is already running.\n"
+                    "Please stop the other instance before starting this one.",
+                    file=sys.stderr
+                )
+            sys.exit(1)
+        elif logger:
+            logger.error(f"Fatal error: {e}", exc_info=True)
+        else:
+            print(f"Fatal error: {e}", file=sys.stderr)
+        raise
+    finally:
+        # Cleanup in reverse order
+        if logger:
+            logger.info("Shutting down components...")
+        
+        # Shutdown Telegram bot first (most important for conflict resolution)
+        if tg_bot:
+            try:
+                await tg_bot.shutdown()
+            except Exception as e:
+                if logger:
+                    logger.error(f"Error shutting down Telegram bot: {e}", exc_info=True)
+        
+        # Note: trading_loop and health_monitor should handle their own cleanup
+        # when their run() methods are cancelled
+        
+        if logger:
+            logger.info("Shutdown complete.")
 
 if __name__ == "__main__":
     # Обработка прерываний (Ctrl+C)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Manual shutdown.")
+        print("Manual shutdown.")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Unhandled exception in main: {e}", exc_info=True)
+        # Try to log if logger is available, otherwise print
+        try:
+            logger = logging.getLogger("main")
+            logger.error(f"Unhandled exception in main: {e}", exc_info=True)
+        except:
+            print(f"Unhandled exception in main: {e}", file=sys.stderr)
         sys.exit(1)

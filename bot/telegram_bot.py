@@ -3,7 +3,7 @@ import asyncio
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-    from telegram.error import BadRequest
+    from telegram.error import BadRequest, Conflict
 except ImportError as e:
     raise ImportError(
         "python-telegram-bot не установлен. Установите его командой: pip install python-telegram-bot\n"
@@ -57,9 +57,46 @@ class TelegramBot:
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
         logger.info("Starting Telegram bot...")
-        await self.app.initialize()
-        await self.app.start()
-        await self.app.updater.start_polling()
+        try:
+            await self.app.initialize()
+            await self.app.start()
+            
+            # Try to start polling with conflict error handling
+            try:
+                await self.app.updater.start_polling()
+            except Conflict as e:
+                logger.error(
+                    f"Telegram bot conflict error: {e}\n"
+                    "Another bot instance is already running. "
+                    "Please stop the other instance before starting this one."
+                )
+                # Clean up before raising
+                await self.shutdown()
+                raise
+        except Exception as e:
+            logger.error(f"Error starting Telegram bot: {e}", exc_info=True)
+            # Ensure cleanup on any error
+            if self.app:
+                await self.shutdown()
+            raise
+
+    async def shutdown(self):
+        """Properly shutdown the Telegram bot"""
+        if not self.app:
+            return
+        
+        try:
+            logger.info("Shutting down Telegram bot...")
+            # Stop polling first
+            if self.app.updater and self.app.updater.running:
+                await self.app.updater.stop()
+            # Then shutdown the application
+            if self.app.running:
+                await self.app.stop()
+            await self.app.shutdown()
+            logger.info("Telegram bot shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during Telegram bot shutdown: {e}", exc_info=True)
 
     async def check_auth(self, update: Update) -> bool:
         user_id = update.effective_user.id
