@@ -236,8 +236,21 @@ class TelegramBot:
                     model_15m_path = getattr(strategy, 'model_15m_path', None)
                     
                     if model_1h_path and model_15m_path:
-                        model_1h_name = Path(model_1h_path).stem if isinstance(model_1h_path, (str, Path)) else str(model_1h_path)
-                        model_15m_name = Path(model_15m_path).stem if isinstance(model_15m_path, (str, Path)) else str(model_15m_path)
+                        # Извлекаем имя модели из Path объекта
+                        if isinstance(model_1h_path, Path):
+                            model_1h_name = model_1h_path.stem
+                        elif isinstance(model_1h_path, str):
+                            model_1h_name = Path(model_1h_path).stem
+                        else:
+                            model_1h_name = str(model_1h_path)
+                        
+                        if isinstance(model_15m_path, Path):
+                            model_15m_name = model_15m_path.stem
+                        elif isinstance(model_15m_path, str):
+                            model_15m_name = Path(model_15m_path).stem
+                        else:
+                            model_15m_name = str(model_15m_path)
+                        
                         status_text += f"Пара: {symbol} | 🔄 MTF стратегия:\n"
                         status_text += f"   1h: {model_1h_name}\n"
                         status_text += f"   15m: {model_15m_name}\n"

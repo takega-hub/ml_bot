@@ -1147,8 +1147,11 @@ class TradingLoop:
                     else:
                         new_sl = entry_price * 0.995
                 else:
-                    # При прибыли >= 0.5% ставим SL на уровень входа
-                    new_sl = entry_price
+                    # При прибыли >= 0.5% ставим SL на 0.2% от точки входа (точка безубытка)
+                    if side == "Buy":
+                        new_sl = entry_price * 1.002
+                    else:
+                        new_sl = entry_price * 0.998
                 
                 # Округляем до tick size
                 new_sl = self.bybit.round_price(new_sl, symbol)

@@ -255,7 +255,7 @@ class AppSettings:
     notification_level: str = "HIGH"  # CRITICAL, HIGH, MEDIUM, LOW
     
     # Торговые пары
-    symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"])
+    symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT"])
     active_symbols: List[str] = field(default_factory=lambda: ["BTCUSDT"])
     primary_symbol: str = "BTCUSDT"  # Основная пара для UI
     

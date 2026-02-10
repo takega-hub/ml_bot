@@ -176,7 +176,7 @@ class StrategyOptimizer:
                 "retrain_ml_optimized.py",
                 "--symbol", symbol,
                 "--no-mtf",
-                "--interval", "60"  # 1h интервал
+                "--interval", "60m"  # 1h интервал (60m или 1h)
             ]
             result_1h = subprocess.run(
                 cmd_1h,
