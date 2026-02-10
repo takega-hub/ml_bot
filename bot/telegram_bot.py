@@ -1395,10 +1395,15 @@ class TelegramBot:
             # Переключаем MTF стратегию
             old_value = ml_settings.use_mtf_strategy
             ml_settings.use_mtf_strategy = not ml_settings.use_mtf_strategy
-            logger.info(f"MTF strategy toggled: {old_value} -> {ml_settings.use_mtf_strategy}")
+            new_value = ml_settings.use_mtf_strategy
+            logger.info(f"MTF strategy toggled: {old_value} -> {new_value}")
+            logger.info(f"Current ml_settings.use_mtf_strategy value: {ml_settings.use_mtf_strategy}")
             
             # Сохраняем настройки
             self.save_ml_settings()
+            
+            # Проверяем, что настройка действительно сохранилась
+            logger.info(f"After save_ml_settings: ml_settings.use_mtf_strategy={ml_settings.use_mtf_strategy}")
             
             # Сбрасываем стратегии для всех активных символов, чтобы они переинициализировались
             if self.trading_loop:
@@ -1663,6 +1668,9 @@ class TelegramBot:
     async def show_ml_settings(self, query):
         """Показывает настройки ML стратегии"""
         ml_settings = self.settings.ml_strategy
+        
+        # Логируем текущие значения для отладки
+        logger.info(f"show_ml_settings: use_mtf_strategy={ml_settings.use_mtf_strategy}, auto_optimize_strategies={ml_settings.auto_optimize_strategies}")
         
         text = "🧠 НАСТРОЙКИ ML СТРАТЕГИИ\n\n"
         text += f"🔄 MTF стратегия (1h + 15m): {'✅ Включена' if ml_settings.use_mtf_strategy else '❌ Выключена'}\n"
