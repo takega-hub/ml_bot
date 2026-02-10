@@ -394,7 +394,11 @@ class TelegramBot:
         elif query.data.startswith("toggle_ml_"):
             setting_name = query.data.replace("toggle_ml_", "")
             logger.info(f"Handling toggle_ml callback: query.data={query.data}, setting_name={setting_name}")
-            await self.toggle_ml_setting(query, setting_name)
+            try:
+                await self.toggle_ml_setting(query, setting_name)
+            except Exception as e:
+                logger.error(f"Error in toggle_ml_setting: {e}", exc_info=True)
+                await query.answer(f"❌ Ошибка при переключении настройки: {str(e)}", show_alert=True)
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
