@@ -373,17 +373,21 @@ class TradingLoop:
                 
                 # Проверяем, включена ли MTF стратегия и есть ли обе модели
                 use_mtf = self.settings.ml_strategy.use_mtf_strategy
+                logger.info(f"[{symbol}] MTF strategy setting: use_mtf_strategy={use_mtf}")
                 
                 if use_mtf:
                     # Используем комбинированную MTF стратегию
                     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
                     from bot.ml.model_selector import select_best_models
                     
+                    logger.info(f"[{symbol}] Attempting to load MTF strategy...")
                     # Выбираем лучшие модели автоматически
                     model_1h, model_15m, model_info = select_best_models(
                         symbol=symbol,
                         use_best_from_comparison=True,
                     )
+                    
+                    logger.info(f"[{symbol}] MTF model selection result: model_1h={model_1h}, model_15m={model_15m}, source={model_info.get('source', 'unknown')}")
                     
                     if model_1h and model_15m:
                         # Используем параметры из best_strategies.json, если доступны

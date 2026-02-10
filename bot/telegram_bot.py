@@ -38,6 +38,9 @@ class TelegramBot:
         self.waiting_for_symbol = {}  # user_id -> True если ждем ввод символа
         self.waiting_for_risk_setting = {}  # user_id -> setting_name для редактирования настроек риска
         self.waiting_for_ml_setting = {}  # user_id -> setting_name для редактирования ML настроек
+        
+        # Инициализируем файл настроек при старте (добавляем недостающие поля)
+        self._ensure_ml_settings_file()
 
     async def start(self):
         if not self.settings.telegram_token:
@@ -390,6 +393,7 @@ class TelegramBot:
             await self.start_edit_ml_setting(query, setting_name)
         elif query.data.startswith("toggle_ml_"):
             setting_name = query.data.replace("toggle_ml_", "")
+            logger.info(f"Handling toggle_ml callback: query.data={query.data}, setting_name={setting_name}")
             await self.toggle_ml_setting(query, setting_name)
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
@@ -1380,11 +1384,14 @@ class TelegramBot:
     
     async def toggle_ml_setting(self, query, setting_name: str):
         """Переключает булеву настройку ML стратегии"""
+        logger.info(f"toggle_ml_setting called with setting_name: {setting_name}")
         ml_settings = self.settings.ml_strategy
         
         if setting_name == "use_mtf_strategy":
             # Переключаем MTF стратегию
+            old_value = ml_settings.use_mtf_strategy
             ml_settings.use_mtf_strategy = not ml_settings.use_mtf_strategy
+            logger.info(f"MTF strategy toggled: {old_value} -> {ml_settings.use_mtf_strategy}")
             
             # Сохраняем настройки
             self.save_ml_settings()
@@ -1403,7 +1410,9 @@ class TelegramBot:
             await self.show_ml_settings(query)
         elif setting_name == "auto_optimize_strategies":
             # Переключаем автообновление стратегий
+            old_value = ml_settings.auto_optimize_strategies
             ml_settings.auto_optimize_strategies = not ml_settings.auto_optimize_strategies
+            logger.info(f"Auto optimize toggled: {old_value} -> {ml_settings.auto_optimize_strategies}")
             
             # Сохраняем настройки
             self.save_ml_settings()
@@ -1429,6 +1438,7 @@ class TelegramBot:
             # Показываем обновленные настройки
             await self.show_ml_settings(query)
         else:
+            logger.warning(f"Unknown ML setting: {setting_name}")
             await query.answer("⚠️ Неизвестная настройка", show_alert=True)
     
     async def toggle_risk_setting(self, query, setting_name: str):
@@ -1478,8 +1488,20 @@ class TelegramBot:
             from pathlib import Path
             import json
             
-            config_file = Path("ml_settings.json")
+            # Используем абсолютный путь относительно корня проекта
+            project_root = Path(__file__).parent.parent
+            config_file = project_root / "ml_settings.json"
             
+            # Загружаем существующие настройки, если файл есть (для сохранения других параметров)
+            existing_dict = {}
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        existing_dict = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Could not read existing ml_settings.json: {e}")
+            
+            # Создаем полный словарь настроек
             ml_dict = {
                 "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
                 "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
@@ -1492,13 +1514,64 @@ class TelegramBot:
                 "auto_optimize_hour": self.settings.ml_strategy.auto_optimize_hour,
             }
             
+            # Сохраняем все настройки
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(ml_dict, f, indent=2, ensure_ascii=False)
             
-            logger.info("ML settings saved to ml_settings.json")
+            logger.info(f"ML settings saved to {config_file}: use_mtf_strategy={ml_dict['use_mtf_strategy']}, auto_optimize_strategies={ml_dict['auto_optimize_strategies']}")
+            logger.debug(f"Full ML settings dict: {ml_dict}")
         
         except Exception as e:
-            logger.error(f"Error saving ML settings: {e}")
+            logger.error(f"Error saving ML settings: {e}", exc_info=True)
+    
+    def _ensure_ml_settings_file(self):
+        """Проверяет и обновляет файл ml_settings.json, добавляя недостающие поля"""
+        try:
+            from pathlib import Path
+            import json
+            
+            project_root = Path(__file__).parent.parent
+            config_file = project_root / "ml_settings.json"
+            
+            # Если файл существует, загружаем его и проверяем наличие всех полей
+            existing_dict = {}
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        existing_dict = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Could not read ml_settings.json: {e}")
+                    existing_dict = {}
+            
+            # Список обязательных полей
+            required_fields = {
+                "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+                "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
+                "mtf_confidence_threshold_1h": self.settings.ml_strategy.mtf_confidence_threshold_1h,
+                "mtf_confidence_threshold_15m": self.settings.ml_strategy.mtf_confidence_threshold_15m,
+                "mtf_alignment_mode": self.settings.ml_strategy.mtf_alignment_mode,
+                "mtf_require_alignment": self.settings.ml_strategy.mtf_require_alignment,
+                "auto_optimize_strategies": self.settings.ml_strategy.auto_optimize_strategies,
+                "auto_optimize_day": self.settings.ml_strategy.auto_optimize_day,
+                "auto_optimize_hour": self.settings.ml_strategy.auto_optimize_hour,
+            }
+            
+            # Проверяем, нужно ли обновить файл
+            needs_update = False
+            for field, default_value in required_fields.items():
+                if field not in existing_dict:
+                    existing_dict[field] = default_value
+                    needs_update = True
+                    logger.info(f"Adding missing field to ml_settings.json: {field}={default_value}")
+            
+            # Сохраняем обновленный файл, если нужно
+            if needs_update:
+                with open(config_file, 'w', encoding='utf-8') as f:
+                    json.dump(existing_dict, f, indent=2, ensure_ascii=False)
+                logger.info(f"Updated ml_settings.json with missing fields")
+        
+        except Exception as e:
+            logger.error(f"Error ensuring ml_settings.json: {e}", exc_info=True)
     
     def save_risk_settings(self):
         """Сохраняет настройки риска в файл"""

@@ -395,6 +395,8 @@ def load_settings() -> AppSettings:
                 if "use_mtf_strategy" in ml_dict:
                     settings.ml_strategy.use_mtf_strategy = bool(ml_dict["use_mtf_strategy"])
                     logger.info(f"Loaded use_mtf_strategy from ml_settings.json: {settings.ml_strategy.use_mtf_strategy}")
+                else:
+                    logger.info(f"use_mtf_strategy not found in ml_settings.json, using default: {settings.ml_strategy.use_mtf_strategy}")
                 if "mtf_confidence_threshold_1h" in ml_dict:
                     settings.ml_strategy.mtf_confidence_threshold_1h = float(ml_dict["mtf_confidence_threshold_1h"])
                 if "mtf_confidence_threshold_15m" in ml_dict:
