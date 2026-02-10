@@ -34,6 +34,7 @@ class TelegramBot:
         self.model_manager = model_manager
         self.bybit = bybit_client
         self.app = None
+        self.trading_loop = None  # Будет установлен из run_bot.py
         self.waiting_for_symbol = {}  # user_id -> True если ждем ввод символа
         self.waiting_for_risk_setting = {}  # user_id -> setting_name для редактирования настроек риска
         self.waiting_for_ml_setting = {}  # user_id -> setting_name для редактирования ML настроек
@@ -1387,6 +1388,13 @@ class TelegramBot:
             
             # Сохраняем настройки
             self.save_ml_settings()
+            
+            # Сбрасываем стратегии для всех активных символов, чтобы они переинициализировались
+            if self.trading_loop:
+                for symbol in self.settings.active_symbols:
+                    if symbol in self.trading_loop.strategies:
+                        del self.trading_loop.strategies[symbol]
+                        logger.info(f"[{symbol}] Strategy reset due to MTF setting change")
             
             status = "включена" if ml_settings.use_mtf_strategy else "выключена"
             await query.answer(f"✅ MTF стратегия {status}", show_alert=True)

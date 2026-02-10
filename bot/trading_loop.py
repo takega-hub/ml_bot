@@ -430,26 +430,26 @@ class TradingLoop:
                 
                 if not use_mtf:
                     # Используем обычную стратегию (15m или 1h)
-                    model_path = self.state.symbol_models.get(symbol)
-                    # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
-                    if not model_path:
-                        # Пытаемся найти модель в папке ml_models
-                        models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                        if models:
-                            model_path = str(models[0])
-                            self.state.symbol_models[symbol] = model_path
-                    
-                    if model_path:
-                        logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
-                        self.strategies[symbol] = MLStrategy(
-                            model_path=model_path,
-                            confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                            min_signal_strength=self.settings.ml_strategy.min_signal_strength
-                        )
-                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
-                    else:
-                        logger.warning(f"No model found for {symbol}, skipping...")
-                        return
+                model_path = self.state.symbol_models.get(symbol)
+                # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
+                if not model_path:
+                    # Пытаемся найти модель в папке ml_models
+                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
+                    if models:
+                        model_path = str(models[0])
+                        self.state.symbol_models[symbol] = model_path
+                
+                if model_path:
+                    logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
+                    self.strategies[symbol] = MLStrategy(
+                        model_path=model_path,
+                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
+                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                    )
+                    logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
+                else:
+                    logger.warning(f"No model found for {symbol}, skipping...")
+                    return
 
             # 3. Генерируем сигнал
             strategy = self.strategies[symbol]
@@ -553,12 +553,12 @@ class TradingLoop:
                 # Для обычной стратегии передаем df как обычно
                 if hasattr(strategy, 'predict_combined'):
                     # Это MTF стратегия - передаем df_15m
-                    signal = await asyncio.to_thread(
-                        strategy.generate_signal,
-                        row=row,
+                signal = await asyncio.to_thread(
+                    strategy.generate_signal,
+                    row=row,
                         df_15m=df_for_strategy,  # 15m данные
                         df_1h=None,  # Будет агрегировано внутри стратегии
-                        has_position=has_pos,
+                    has_position=has_pos,
                         current_price=current_price,
                         leverage=self.settings.leverage,
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
@@ -572,8 +572,8 @@ class TradingLoop:
                         df=df_for_strategy,
                         has_position=has_pos,
                         current_price=current_price,
-                        leverage=self.settings.leverage
-                    )
+                    leverage=self.settings.leverage
+                )
                 logger.info(f"[{symbol}] ✅ strategy.generate_signal() completed")
             except Exception as e:
                 logger.error(f"Error generating signal for {symbol}: {e}")
