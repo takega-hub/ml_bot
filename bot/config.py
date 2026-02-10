@@ -51,6 +51,15 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     mtf_enabled: bool = False  # Использовать мультитаймфреймовые модели
     feature_engineering_enabled: bool = True  # Использовать фичи инжиниринг
     
+    # Параметры комбинированной MTF стратегии (1h + 15m)
+    # ВАЖНО: По умолчанию False для безопасности. Включите через конфигурацию после настройки моделей.
+    # Для включения установите use_mtf_strategy = True в конфигурационном файле или через Telegram бота.
+    use_mtf_strategy: bool = False  # Использовать комбинированную стратегию (1h фильтр + 15m вход)
+    mtf_confidence_threshold_1h: float = 0.50  # Порог уверенности для 1h модели (фильтр)
+    mtf_confidence_threshold_15m: float = 0.35  # Порог уверенности для 15m модели (вход)
+    mtf_alignment_mode: str = "strict"  # Режим выравнивания: "strict" или "weighted"
+    mtf_require_alignment: bool = True  # Требовать совпадение направлений обеих моделей
+    
     # Параметры для ретрейна
     retrain_days: int = 7  # Количество дней данных для ретрейна
     retrain_interval_hours: int = 24  # Интервал переобучения в часах
@@ -73,6 +82,14 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
         # Убедимся, что максимальный убыток положительный
         if self.max_loss_pct_margin <= 0:
             self.max_loss_pct_margin = 10.0
+        
+        # Валидация параметров MTF стратегии
+        if not 0 <= self.mtf_confidence_threshold_1h <= 1:
+            self.mtf_confidence_threshold_1h = 0.50
+        if not 0 <= self.mtf_confidence_threshold_15m <= 1:
+            self.mtf_confidence_threshold_15m = 0.35
+        if self.mtf_alignment_mode not in ["strict", "weighted"]:
+            self.mtf_alignment_mode = "strict"
 
 
 @dataclass

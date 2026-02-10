@@ -8,6 +8,7 @@ from bot.config import AppSettings
 from bot.state import BotState, TradeRecord
 from bot.exchange.bybit_client import BybitClient
 from bot.ml.strategy_ml import MLStrategy, build_ml_signals
+from typing import Union
 from bot.strategy import Action, Signal, Bias
 from bot.notification_manager import NotificationManager, NotificationLevel
 
@@ -26,12 +27,38 @@ class TradingLoop:
         self.bybit = bybit
         self.tg_bot = tg_bot
         self.notifier = NotificationManager(tg_bot, settings)
-        self.strategies: Dict[str, MLStrategy] = {}
+        self.strategies: Dict[str, Union[MLStrategy, 'MultiTimeframeMLStrategy']] = {}
         # Отслеживаем последнюю обработанную свечу для каждого символа
         self.last_processed_candle: Dict[str, Optional[pd.Timestamp]] = {}
         # Кэш сигнала BTCUSDT для проверки направления других пар (обновляется каждые 5 минут)
         self._btc_signal_cache: Optional[Dict] = None
         self._btc_signal_cache_time: Optional[float] = None
+        
+        # Валидация моделей при старте
+        if self.settings.ml_strategy.use_mtf_strategy:
+            self._validate_mtf_models()
+    
+    def _validate_mtf_models(self):
+        """Проверяет наличие MTF моделей для активных символов при старте"""
+        from bot.ml.model_selector import select_best_models
+        
+        logger.info("🔍 Валидация MTF моделей для активных символов...")
+        missing_models = []
+        
+        for symbol in self.state.active_symbols:
+            model_1h, model_15m, model_info = select_best_models(symbol=symbol)
+            
+            if not model_1h or not model_15m:
+                missing_models.append(symbol)
+                logger.warning(f"[{symbol}] ⚠️ MTF модели не найдены (1h: {model_1h is not None}, 15m: {model_15m is not None})")
+            else:
+                logger.info(f"[{symbol}] ✅ MTF модели найдены (source: {model_info.get('source', 'unknown')})")
+        
+        if missing_models:
+            logger.warning(f"⚠️ MTF стратегия включена, но модели не найдены для: {', '.join(missing_models)}")
+            logger.warning("Бот будет использовать обычную стратегию для этих символов")
+        else:
+            logger.info("✅ Все активные символы имеют MTF модели")
 
     async def run(self):
         logger.info("Starting Trading Loop...")
@@ -340,27 +367,89 @@ class TradingLoop:
 
             # 2. Инициализируем стратегию если нужно
             if symbol not in self.strategies:
-                model_path = self.state.symbol_models.get(symbol)
-                # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
-                if not model_path:
-                    # Пытаемся найти модель в папке ml_models
-                    from pathlib import Path
-                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                    if models:
-                        model_path = str(models[0])
-                        self.state.symbol_models[symbol] = model_path
+                from pathlib import Path
                 
-                if model_path:
-                    logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
-                    self.strategies[symbol] = MLStrategy(
-                        model_path=model_path,
-                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                # Проверяем, включена ли MTF стратегия и есть ли обе модели
+                use_mtf = self.settings.ml_strategy.use_mtf_strategy
+                
+                if use_mtf:
+                    # Используем комбинированную MTF стратегию
+                    from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
+                    from bot.ml.model_selector import select_best_models
+                    
+                    # Выбираем лучшие модели автоматически
+                    model_1h, model_15m, model_info = select_best_models(
+                        symbol=symbol,
+                        use_best_from_comparison=True,
                     )
-                    logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
-                else:
-                    logger.warning(f"No model found for {symbol}, skipping...")
-                    return
+                    
+                    if model_1h and model_15m:
+                        # Используем параметры из best_strategies.json, если доступны
+                        confidence_threshold_1h = model_info.get(
+                            'confidence_threshold_1h',
+                            self.settings.ml_strategy.mtf_confidence_threshold_1h
+                        )
+                        confidence_threshold_15m = model_info.get(
+                            'confidence_threshold_15m',
+                            self.settings.ml_strategy.mtf_confidence_threshold_15m
+                        )
+                        alignment_mode = model_info.get(
+                            'alignment_mode',
+                            self.settings.ml_strategy.mtf_alignment_mode
+                        )
+                        require_alignment = model_info.get(
+                            'require_alignment',
+                            self.settings.ml_strategy.mtf_require_alignment
+                        )
+                        
+                        logger.info(f"[{symbol}] 🔄 Loading MTF strategy:")
+                        logger.info(f"  Source: {model_info.get('source', 'unknown')}")
+                        logger.info(f"  1h model: {Path(model_1h).name}")
+                        logger.info(f"  15m model: {Path(model_15m).name}")
+                        if model_info.get('metrics'):
+                            metrics = model_info['metrics']
+                            logger.info(f"  Expected metrics: PnL={metrics.get('total_pnl_pct', 0):.2f}%, "
+                                      f"WR={metrics.get('win_rate', 0):.1f}%, "
+                                      f"PF={metrics.get('profit_factor', 0):.2f}")
+                        
+                        self.strategies[symbol] = MultiTimeframeMLStrategy(
+                            model_1h_path=model_1h,
+                            model_15m_path=model_15m,
+                            confidence_threshold_1h=confidence_threshold_1h,
+                            confidence_threshold_15m=confidence_threshold_15m,
+                            require_alignment=require_alignment,
+                            alignment_mode=alignment_mode,
+                        )
+                        logger.info(f"[{symbol}] ✅ MTF strategy loaded successfully")
+                    else:
+                        # Нет обеих моделей - используем обычную стратегию
+                        logger.warning(f"[{symbol}] MTF strategy enabled but models not found:")
+                        logger.warning(f"  1h model: {model_1h}, 15m model: {model_15m}")
+                        logger.warning(f"[{symbol}] Falling back to single timeframe strategy")
+                        use_mtf = False
+                
+                if not use_mtf:
+                    # Используем обычную стратегию (15m или 1h)
+                    model_path = self.state.symbol_models.get(symbol)
+                    # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
+                    if not model_path:
+                        # Пытаемся найти модель в папке ml_models
+                        models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
+                        if models:
+                            model_path = str(models[0])
+                            self.state.symbol_models[symbol] = model_path
+                    
+                    if model_path:
+                        logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
+                        self.strategies[symbol] = MLStrategy(
+                            model_path=model_path,
+                            confidence_threshold=self.settings.ml_strategy.confidence_threshold,
+                            min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                        )
+                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
+                    else:
+                        logger.warning(f"No model found for {symbol}, skipping...")
+                        return
 
             # 3. Генерируем сигнал
             strategy = self.strategies[symbol]
@@ -456,17 +545,40 @@ class TradingLoop:
             # Оборачиваем в to_thread() чтобы не блокировать event loop
             try:
                 logger.info(f"[{symbol}] 🔄 Calling strategy.generate_signal() in thread...")
-                signal = await asyncio.to_thread(
-                    strategy.generate_signal,
-                    row=row,
-                    df=df.iloc[:-1] if len(df) >= 2 else df,  # Используем все данные кроме последней незакрытой свечи
-                    has_position=has_pos,
-                    current_price=current_price,  # Используем текущую цену из последней свечи
-                    leverage=self.settings.leverage
-                )
+                
+                # Подготавливаем данные для стратегии
+                df_for_strategy = df.iloc[:-1] if len(df) >= 2 else df  # Используем все данные кроме последней незакрытой свечи
+                
+                # Для MTF стратегии передаем df_15m (текущие данные) и df_1h=None (будет агрегировано внутри)
+                # Для обычной стратегии передаем df как обычно
+                if hasattr(strategy, 'predict_combined'):
+                    # Это MTF стратегия - передаем df_15m
+                    signal = await asyncio.to_thread(
+                        strategy.generate_signal,
+                        row=row,
+                        df_15m=df_for_strategy,  # 15m данные
+                        df_1h=None,  # Будет агрегировано внутри стратегии
+                        has_position=has_pos,
+                        current_price=current_price,
+                        leverage=self.settings.leverage,
+                        target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
+                        max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
+                    )
+                else:
+                    # Обычная стратегия - передаем df как обычно
+                    signal = await asyncio.to_thread(
+                        strategy.generate_signal,
+                        row=row,
+                        df=df_for_strategy,
+                        has_position=has_pos,
+                        current_price=current_price,
+                        leverage=self.settings.leverage
+                    )
                 logger.info(f"[{symbol}] ✅ strategy.generate_signal() completed")
             except Exception as e:
                 logger.error(f"Error generating signal for {symbol}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 return
             
             if not signal:
