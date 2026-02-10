@@ -236,12 +236,22 @@ class TelegramBot:
                     model_15m_path = getattr(strategy, 'model_15m_path', None)
                     
                     if model_1h_path and model_15m_path:
-                        model_1h_name = Path(model_1h_path).stem
-                        model_15m_name = Path(model_15m_path).stem
+                        model_1h_name = Path(model_1h_path).stem if isinstance(model_1h_path, (str, Path)) else str(model_1h_path)
+                        model_15m_name = Path(model_15m_path).stem if isinstance(model_15m_path, (str, Path)) else str(model_15m_path)
                         status_text += f"Пара: {symbol} | 🔄 MTF стратегия:\n"
                         status_text += f"   1h: {model_1h_name}\n"
                         status_text += f"   15m: {model_15m_name}\n"
-                        status_text += f"   🎯 Уверенность 1h: ≥{strategy.confidence_threshold_1h*100:.0f}% | 15m: ≥{strategy.confidence_threshold_15m*100:.0f}%\n"
+                        
+                        # Безопасное получение порогов уверенности
+                        conf_1h = getattr(strategy, 'confidence_threshold_1h', None)
+                        conf_15m = getattr(strategy, 'confidence_threshold_15m', None)
+                        if conf_1h is not None and conf_15m is not None:
+                            status_text += f"   🎯 Уверенность 1h: ≥{conf_1h*100:.0f}% | 15m: ≥{conf_15m*100:.0f}%\n"
+                        else:
+                            # Используем значения из настроек, если параметры стратегии не установлены
+                            conf_1h = self.settings.ml_strategy.mtf_confidence_threshold_1h
+                            conf_15m = self.settings.ml_strategy.mtf_confidence_threshold_15m
+                            status_text += f"   🎯 Уверенность 1h: ≥{conf_1h*100:.0f}% | 15m: ≥{conf_15m*100:.0f}%\n"
                     else:
                         status_text += f"Пара: {symbol} | 🔄 MTF стратегия (модели загружаются...)\n"
                 elif strategy:

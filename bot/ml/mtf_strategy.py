@@ -80,8 +80,8 @@ class MultiTimeframeMLStrategy:
         )
         
         logger.info(f"[MTF Strategy] Инициализация завершена")
-        logger.info(f"  1h порог: {confidence_threshold_1h}, 15m порог: {confidence_threshold_15m}")
-        logger.info(f"  Режим выравнивания: {alignment_mode}, require_alignment: {require_alignment}")
+        logger.info(f"  1h порог: {self.confidence_threshold_1h}, 15m порог: {self.confidence_threshold_15m}")
+        logger.info(f"  Режим выравнивания: {self.alignment_mode}, require_alignment: {self.require_alignment}")
     
     def predict_combined(
         self,
@@ -106,12 +106,25 @@ class MultiTimeframeMLStrategy:
         # 1. Получаем предсказание от 1h модели
         if df_1h is None or df_1h.empty:
             # Агрегируем 1h из 15m данных
-            if not isinstance(df_15m.index, pd.DatetimeIndex):
-                # Пытаемся преобразовать индекс
-                if "timestamp" in df_15m.columns:
-                    df_15m = df_15m.set_index("timestamp")
+            # DataFrame из get_kline_df имеет RangeIndex и колонку timestamp
+            df_15m_work = df_15m.copy()
+            
+            # Преобразуем в DatetimeIndex для агрегации
+            if not isinstance(df_15m_work.index, pd.DatetimeIndex):
+                if "timestamp" in df_15m_work.columns:
+                    # Используем колонку timestamp для создания DatetimeIndex
+                    df_15m_work = df_15m_work.set_index("timestamp")
+                    # Преобразуем timestamp из миллисекунд в DatetimeIndex
+                    df_15m_work.index = pd.to_datetime(df_15m_work.index, unit='ms', errors='coerce')
                 else:
-                    df_15m.index = pd.to_datetime(df_15m.index, errors='coerce')
+                    # Пытаемся преобразовать существующий индекс
+                    df_15m_work.index = pd.to_datetime(df_15m_work.index, errors='coerce')
+            
+            # Проверяем, что индекс теперь DatetimeIndex
+            if not isinstance(df_15m_work.index, pd.DatetimeIndex):
+                logger.error(f"[MTF Strategy] Не удалось преобразовать индекс в DatetimeIndex. Тип индекса: {type(df_15m_work.index)}")
+                logger.error(f"[MTF Strategy] Колонки DataFrame: {df_15m_work.columns.tolist()}")
+                return 0, 0.0, {"reason": "cannot_convert_to_datetime_index"}
             
             ohlcv_agg = {
                 "open": "first",
@@ -121,9 +134,9 @@ class MultiTimeframeMLStrategy:
                 "volume": "sum",
             }
             # Агрегируем только OHLCV колонки
-            agg_cols = {k: v for k, v in ohlcv_agg.items() if k in df_15m.columns}
+            agg_cols = {k: v for k, v in ohlcv_agg.items() if k in df_15m_work.columns}
             if agg_cols:
-                df_1h = df_15m.resample("60min").agg(agg_cols).dropna()
+                df_1h = df_15m_work.resample("60min").agg(agg_cols).dropna()
                 
                 # ОТЛАДКА: Проверяем результат агрегации
                 if not hasattr(self, '_debug_count'):

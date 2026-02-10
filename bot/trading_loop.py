@@ -425,6 +425,7 @@ class TradingLoop:
                         logger.info(f"  Source: {model_info.get('source', 'unknown')}")
                         logger.info(f"  1h model: {Path(model_1h).name}")
                         logger.info(f"  15m model: {Path(model_15m).name}")
+                        logger.info(f"  Parameters: 1h_threshold={confidence_threshold_1h}, 15m_threshold={confidence_threshold_15m}, alignment_mode={alignment_mode}, require_alignment={require_alignment}")
                         if model_info.get('metrics'):
                             metrics = model_info['metrics']
                             logger.info(f"  Expected metrics: PnL={metrics.get('total_pnl_pct', 0):.2f}%, "
