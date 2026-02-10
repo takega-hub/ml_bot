@@ -240,7 +240,25 @@ class BybitClient:
                 '1d': 24 * 60 * 60 * 1000,
                 '1w': 7 * 24 * 60 * 60 * 1000,
             }
-            interval_ms = interval_ms_map.get(interval.lower(), 15 * 60 * 1000)  # По умолчанию 15m (используем оригинальный interval для расчета)
+            # Пробуем сначала оригинальный интервал, потом bybit_interval
+            interval_ms = interval_ms_map.get(interval.lower(), None)
+            if interval_ms is None:
+                # Добавляем числовые форматы Bybit
+                interval_ms_map_bybit = {
+                    '1': 60 * 1000,
+                    '3': 3 * 60 * 1000,
+                    '5': 5 * 60 * 1000,
+                    '15': 15 * 60 * 1000,
+                    '30': 30 * 60 * 1000,
+                    '60': 60 * 60 * 1000,
+                    '120': 2 * 60 * 60 * 1000,
+                    '240': 4 * 60 * 60 * 1000,
+                    '360': 6 * 60 * 60 * 1000,
+                    '720': 12 * 60 * 60 * 1000,
+                    'D': 24 * 60 * 60 * 1000,
+                    'W': 7 * 24 * 60 * 60 * 1000,
+                }
+                interval_ms = interval_ms_map_bybit.get(bybit_interval, 15 * 60 * 1000)  # По умолчанию 15 минут
             
             # Вычисляем start время на основе limit
             if end is None:
@@ -253,6 +271,7 @@ class BybitClient:
             current_end = end if end is not None else int(datetime.now().timestamp() * 1000)
             
             # Вычисляем интервал в миллисекундах для одного бара
+            # Поддерживаем как строковые форматы ('15m', '1h'), так и числовые Bybit форматы ('15', '60')
             interval_ms_map = {
                 '1m': 60 * 1000,
                 '3m': 3 * 60 * 1000,
@@ -266,8 +285,24 @@ class BybitClient:
                 '12h': 12 * 60 * 60 * 1000,
                 '1d': 24 * 60 * 60 * 1000,
                 '1w': 7 * 24 * 60 * 60 * 1000,
+                # Числовые форматы Bybit
+                '1': 60 * 1000,
+                '3': 3 * 60 * 1000,
+                '5': 5 * 60 * 1000,
+                '15': 15 * 60 * 1000,
+                '30': 30 * 60 * 1000,
+                '60': 60 * 60 * 1000,
+                '120': 2 * 60 * 60 * 1000,
+                '240': 4 * 60 * 60 * 1000,
+                '360': 6 * 60 * 60 * 1000,
+                '720': 12 * 60 * 60 * 1000,
+                'D': 24 * 60 * 60 * 1000,
+                'W': 7 * 24 * 60 * 60 * 1000,
             }
-            interval_ms = interval_ms_map.get(interval.lower(), 15 * 60 * 1000)
+            # Пробуем сначала оригинальный интервал, потом bybit_interval
+            interval_ms = interval_ms_map.get(interval.lower(), None)
+            if interval_ms is None:
+                interval_ms = interval_ms_map.get(bybit_interval, 15 * 60 * 1000)  # По умолчанию 15 минут
             
             # Вычисляем start время если не указано
             if start is None:
@@ -276,8 +311,12 @@ class BybitClient:
             remaining = limit
             seen_timestamps = set()  # Для предотвращения дубликатов
             is_first_batch = True  # Флаг для первого батча
+            batch_count = 0  # Счетчик батчей для диагностики
+            
+            print(f"[bybit_client] Загрузка данных батчами: требуется {limit} свечей, интервал {bybit_interval}, interval_ms={interval_ms}ms")
             
             while remaining > 0:
+                batch_count += 1
                 batch_limit = min(remaining, MAX_LIMIT_PER_REQUEST)
                 
                 # Для первого батча пробуем без end параметра (получаем самые свежие данные)
@@ -387,6 +426,7 @@ class BybitClient:
                 current_end = oldest_ts - 1  # Минус 1 мс чтобы не дублировать последнюю свечу
                 
                 remaining -= len(batch_rows)
+                print(f"[bybit_client] Батч {batch_count}: получено {len(batch_rows)} свечей, осталось {remaining}, всего загружено {len(all_rows)}")
                 
                 # Если получили меньше данных, чем запрашивали, значит данных больше нет
                 if len(raw_list) < batch_limit:

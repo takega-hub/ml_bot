@@ -870,6 +870,30 @@ class TradingLoop:
                     )
                     
                     # Добавляем в историю (пока как открытую)
+                    indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+                    confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
+                    signal_strength = indicators_info.get('strength', '') if isinstance(indicators_info, dict) else ''
+                    
+                    # Извлекаем TP/SL проценты из сигнала
+                    signal_tp = signal.take_profit or indicators_info.get('take_profit')
+                    signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
+                    tp_pct = None
+                    sl_pct = None
+                    if signal_tp and signal.price:
+                        tp_pct = abs(signal_tp - signal.price) / signal.price
+                    if signal_sl and signal.price:
+                        sl_pct = abs(signal.price - signal_sl) / signal.price
+                    
+                    # Вычисляем маржу
+                    margin_usd = fixed_margin_usd
+                    
+                    # Параметры сигнала
+                    signal_parameters = {
+                        'take_profit_pct': tp_pct,
+                        'stop_loss_pct': sl_pct,
+                        'risk_reward_ratio': (tp_pct / sl_pct) if (tp_pct and sl_pct and sl_pct > 0) else None,
+                    }
+                    
                     trade = TradeRecord(
                         symbol=symbol,
                         side=side,
@@ -878,6 +902,14 @@ class TradingLoop:
                         status="open",
                         model_name=self.state.symbol_models.get(symbol, ""),
                         horizon=position_horizon or self._classify_position_horizon(signal),
+                        entry_reason=signal.reason or "",
+                        confidence=confidence,
+                        take_profit=signal_tp,
+                        stop_loss=signal_sl,
+                        leverage=self.settings.leverage,
+                        margin_usd=margin_usd,
+                        signal_strength=signal_strength,
+                        signal_parameters=signal_parameters,
                     )
                     self.state.add_trade(trade)
             else:
@@ -1489,12 +1521,15 @@ class TradingLoop:
             
             logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.2f}%, pnl_usd={pnl_usd:.2f}")
             
+            # Определяем причину закрытия
+            exit_reason = "TP" if pnl_usd > 0 else "SL"
+            # Можно добавить более детальную причину, если доступна информация о trailing stop и т.д.
+            
             # Обновляем статус сделки
-            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
+            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, exit_reason)
             
             # Отправляем уведомление
             pnl_emoji = "✅" if pnl_usd > 0 else "❌"
-            reason = "TP" if pnl_usd > 0 else "SL"
             await self.notifier.high(
                 f"{pnl_emoji} ПОЗИЦИЯ ЗАКРЫТА ({reason})\n"
                 f"{symbol} {local_pos.side}\n"
@@ -1530,15 +1565,15 @@ class TradingLoop:
                         pnl_usd -= fee_usd
                         if margin > 0:
                             pnl_pct = (pnl_usd / margin) * 100
-                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct)
+                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, "MANUAL_CLOSE")
                 else:
                     # Если не удалось получить цену, используем entry_price с нулевым PnL
-                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
+                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
             except Exception as e2:
                 logger.error(f"Error in fallback close handling for {symbol}: {e2}")
                 # Последняя попытка - закрываем с entry_price
                 try:
-                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0)
+                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
                 except:
                     pass
     

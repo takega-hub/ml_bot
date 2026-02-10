@@ -108,18 +108,19 @@ def find_all_symbols(models_dir: Path) -> List[str]:
     return sorted(list(symbols))
 
 
-def find_models_for_symbol(models_dir: Path, symbol: str) -> List[Path]:
+def find_models_for_symbol(models_dir: Path, symbol: str, only_1h: bool = False) -> List[Path]:
     """
     Ищет все ML модели для указанного символа.
     
     Ожидаемый формат имени файла:
         {model_type}_{SYMBOL}_{INTERVAL}.pkl
-        {model_type}_{SYMBOL}_{INTERVAL}_{mode_suffix}.pkl  # mtf / 15m
+        {model_type}_{SYMBOL}_{INTERVAL}_{mode_suffix}.pkl  # mtf / 15m / 1h
     
     Примеры:
         ensemble_BTCUSDT_15.pkl
         ensemble_BTCUSDT_15_mtf.pkl
         quad_ensemble_ETHUSDT_15_15m.pkl
+        rf_BTCUSDT_60_1h.pkl
     """
     if not models_dir.exists():
         print(f"⚠️  Директория {models_dir} не существует")
@@ -134,6 +135,15 @@ def find_models_for_symbol(models_dir: Path, symbol: str) -> List[Path]:
     for pattern in patterns:
         for f in models_dir.glob(pattern):
             if f.is_file() and f not in results:
+                # Фильтрация по интервалу, если нужно
+                if only_1h:
+                    model_interval = extract_interval_from_model(f)
+                    # Проверяем, что это 1h модель (интервал 60)
+                    if model_interval != "60":
+                        continue
+                    # Дополнительная проверка по имени файла
+                    if "_60_" not in f.name and "_1h" not in f.name:
+                        continue
                 results.append(f)
     
     # Убираем дубликаты и сортируем по имени
@@ -265,8 +275,13 @@ def test_single_model(args_tuple: Tuple) -> Optional[Dict[str, Any]]:
         
         # Определяем интервал из имени модели, если не указан явно
         model_interval = extract_interval_from_model(model_path)
-        if interval == "15m" and model_interval != "15":
-            # Используем интервал из имени модели
+        
+        # Приоритет: интервал из имени модели, если он отличается от дефолтного
+        if model_interval in ["60", "240", "D"]:
+            # Используем интервал из имени модели (1h, 4h, 1d)
+            test_interval = model_interval
+        elif interval == "15m" and model_interval != "15":
+            # Используем интервал из имени модели, если он не 15
             test_interval = model_interval
         else:
             # Используем указанный интервал или извлекаем из имени
@@ -382,6 +397,7 @@ def compare_models(
     leverage: int = 10,
     workers: int = 4,
     check_overfitting: bool = False,
+    only_1h: bool = False,
 ) -> pd.DataFrame:
     """
     Запускает бэктест для всех моделей и возвращает DataFrame с результатами.
@@ -395,6 +411,8 @@ def compare_models(
     print(f"📊 Symbols: {', '.join(symbols)}")
     print(f"📁 Models dir: {models_dir}")
     print(f"⚙️  Days: {days}, Interval: {interval}")
+    if only_1h:
+        print(f"⏰ Filter: ONLY 1-HOUR TIMEFRAME MODELS")
     print(f"💰 Initial balance: ${initial_balance:.2f}")
     print(f"🎯 Risk per trade: {risk_per_trade*100:.1f}%, Leverage: {leverage}x")
     print(f"⚡ Workers: {workers}")
@@ -405,9 +423,9 @@ def compare_models(
     total_models = 0
     
     for symbol in symbols:
-        models = find_models_for_symbol(models_dir, symbol)
+        models = find_models_for_symbol(models_dir, symbol, only_1h=only_1h)
         if not models:
-            print(f"⚠️  No models found for {symbol}")
+            print(f"⚠️  No models found for {symbol}" + (" (1h only)" if only_1h else ""))
             continue
         
         total_models += len(models)
@@ -1420,6 +1438,9 @@ Examples:
   # Базовая команда
   python compare_ml_models.py
   
+  # Тестирование только 1-часовых моделей
+  python compare_ml_models.py --only-1h --detailed-analysis
+  
   # После переобучения - сравнение с предыдущими результатами
   python compare_ml_models.py --compare-with ml_models_comparison_20260205_120000.csv --detailed-analysis
   
@@ -1504,6 +1525,11 @@ Examples:
         action="store_true",
         help="Run detailed analysis (signal distribution, quality metrics, etc.)",
     )
+    parser.add_argument(
+        "--only-1h",
+        action="store_true",
+        help="Test only 1-hour timeframe models (filter out 15m models)",
+    )
     
     args = parser.parse_args()
     
@@ -1545,6 +1571,7 @@ Examples:
             leverage=args.leverage,
             workers=args.workers,
             check_overfitting=args.check_overfitting,
+            only_1h=args.only_1h,
         )
     except Exception as e:
         print(f"❌ Fatal error during model comparison: {e}")

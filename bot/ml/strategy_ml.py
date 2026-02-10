@@ -1407,6 +1407,21 @@ def build_ml_signals(
                        Action.HOLD, "ml_missing_data", 0.0) 
                 for i in range(len(df_work))]
     
+    # Определяем интервал модели из имени файла (ДО try блока, чтобы была доступна везде)
+    from pathlib import Path
+    model_filename = Path(model_path).stem
+    model_parts = model_filename.split("_")
+    
+    # Извлекаем интервал из имени модели
+    base_interval = "15"  # По умолчанию 15 минут
+    for part in model_parts:
+        if part in ["15", "60", "240", "D"]:
+            base_interval = part
+            break
+    
+    # Логируем определенный интервал для диагностики
+    logger.info(f"[build_ml_signals] Model interval detected: {base_interval}min from {model_filename}")
+    
     # ОПТИМИЗАЦИЯ: Вычисляем фичи один раз для всего DataFrame
     try:
         # Определяем, включен ли MTF-режим
@@ -1414,37 +1429,60 @@ def build_ml_signals(
         ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
         ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
 
-        # Базовые технические индикаторы на 15m
+        # Базовые технические индикаторы на базовом интервале
+        # Для 1h моделей данные уже в правильном формате (1h), не нужно агрегировать
+        logger.debug(f"[build_ml_signals] Creating technical indicators for {base_interval}min model, data shape: {df_work.shape}")
         df_with_features = strategy.feature_engineer.create_technical_indicators(df_work)
+        logger.debug(f"[build_ml_signals] Features created, shape: {df_with_features.shape}, columns: {len(df_with_features.columns)}")
 
-        # Если включен MTF-режим, добавляем фичи 1h/4h
+        # Если включен MTF-режим, добавляем фичи высших таймфреймов
         if ml_mtf_enabled:
             try:
-                # Строим агрегированные OHLCV для 1h и 4h из 15m данных
-                ohlcv_agg = {
-                    "open": "first",
-                    "high": "max",
-                    "low": "min",
-                    "close": "last",
-                    "volume": "sum",
-                }
-                df_1h = df_work.resample("60min").agg(ohlcv_agg).dropna()
-                df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
-
                 higher_timeframes = {}
-                if df_1h is not None and not df_1h.empty:
-                    higher_timeframes["60"] = df_1h
-                if df_4h is not None and not df_4h.empty:
-                    higher_timeframes["240"] = df_4h
+                
+                if base_interval == "15":
+                    # Для 15m моделей: агрегируем 1h и 4h из 15m данных
+                    ohlcv_agg = {
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                    }
+                    df_1h = df_work.resample("60min").agg(ohlcv_agg).dropna()
+                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
+                    
+                    if df_1h is not None and not df_1h.empty:
+                        higher_timeframes["60"] = df_1h
+                    if df_4h is not None and not df_4h.empty:
+                        higher_timeframes["240"] = df_4h
+                        
+                elif base_interval == "60":
+                    # Для 1h моделей: агрегируем 4h и 1d из 1h данных
+                    ohlcv_agg = {
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                    }
+                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
+                    df_1d = df_work.resample("1D").agg(ohlcv_agg).dropna()
+                    
+                    if df_4h is not None and not df_4h.empty:
+                        higher_timeframes["240"] = df_4h
+                    if df_1d is not None and not df_1d.empty:
+                        higher_timeframes["D"] = df_1d
 
                 if higher_timeframes:
                     df_with_features = strategy.feature_engineer.add_mtf_features(
                         df_with_features,
                         higher_timeframes,
                     )
-                    logger.debug(f"[ml_strategy] MTF features enabled for ML signals (1h/4h). Columns: {len(df_with_features.columns)}")
+                    tf_names = "/".join([f"{k}min" if k != "D" else "1d" for k in higher_timeframes.keys()])
+                    logger.debug(f"[ml_strategy] MTF features enabled for ML signals (base: {base_interval}min, higher: {tf_names}). Columns: {len(df_with_features.columns)}")
                 else:
-                    logger.warning("[ml_strategy] MTF enabled but failed to build 1h/4h data – using 15m-only features")
+                    logger.warning(f"[ml_strategy] MTF enabled but failed to build higher timeframe data for {base_interval}min model – using base-only features")
             except Exception as mtf_err:
                 logger.warning(f"[ml_strategy] Warning: failed to add MTF features in build_ml_signals: {mtf_err}")
     except Exception as e:
@@ -1453,13 +1491,18 @@ def build_ml_signals(
                        Action.HOLD, f"ml_error_{str(e)[:20]}", 0.0) 
                 for i in range(len(df_work))]
     
+    # Определяем минимальное количество баров в зависимости от интервала
+    # Для 15m: 200 баров = ~2 дня, для 1h: 200 баров = ~8 дней (слишком много)
+    # Используем адаптивный порог: 200 для 15m, 100 для 1h
+    min_bars_required = 200 if base_interval == "15" else 100
+    
     for idx, row in df_with_features.iterrows():
         try:
             # Получаем данные до текущего момента
             df_until_now = df_with_features.loc[:idx]
             
-            # Нужно минимум 200 баров для расчета всех индикаторов
-            if len(df_until_now) < 200:
+            # Нужно минимум N баров для расчета всех индикаторов
+            if len(df_until_now) < min_bars_required:
                 signals.append(Signal(idx, Action.HOLD, "ml_insufficient_data", row["close"]))
                 continue
             

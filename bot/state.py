@@ -21,6 +21,16 @@ class TradeRecord:
     model_name: str = ""
     horizon: str = "short_term"  # short_term, mid_term, long_term
     dca_count: int = 0
+    # Дополнительная информация для анализа
+    entry_reason: str = ""  # Причина входа (reason из сигнала)
+    exit_reason: str = ""  # Причина выхода (TP, SL, trailing, manual и т.д.)
+    confidence: float = 0.0  # Уверенность модели при входе
+    take_profit: Optional[float] = None  # TP цена
+    stop_loss: Optional[float] = None  # SL цена
+    leverage: int = 1  # Плечо
+    margin_usd: float = 0.0  # Маржа в USD
+    signal_strength: str = ""  # Сила сигнала (слабое, умеренное, сильное и т.д.)
+    signal_parameters: Dict[str, Any] = field(default_factory=dict)  # Дополнительные параметры сигнала
 
 @dataclass
 class SignalRecord:
@@ -88,9 +98,20 @@ class BotState:
                         self.known_symbols.append(s)
                 self.symbol_models = data.get("symbol_models", {})
                 
-                # Load trades
+                # Load trades (с поддержкой обратной совместимости для старых записей)
                 for t in data.get("trades", []):
-                    self.trades.append(TradeRecord(**t))
+                    # Устанавливаем значения по умолчанию для новых полей, если их нет
+                    trade_dict = dict(t)
+                    trade_dict.setdefault("entry_reason", "")
+                    trade_dict.setdefault("exit_reason", "")
+                    trade_dict.setdefault("confidence", 0.0)
+                    trade_dict.setdefault("take_profit", None)
+                    trade_dict.setdefault("stop_loss", None)
+                    trade_dict.setdefault("leverage", 1)
+                    trade_dict.setdefault("margin_usd", 0.0)
+                    trade_dict.setdefault("signal_strength", "")
+                    trade_dict.setdefault("signal_parameters", {})
+                    self.trades.append(TradeRecord(**trade_dict))
                 
                 # Load signals
                 for s in data.get("signals", []):
@@ -313,8 +334,19 @@ class BotState:
             
             return consecutive_losses
     
-    def update_trade_on_close(self, symbol: str, exit_price: float, pnl_usd: float, pnl_pct: float):
-        """Обновляет сделку при закрытии и проверяет необходимость cooldown"""
+    def update_trade_on_close(
+        self, 
+        symbol: str, 
+        exit_price: float, 
+        pnl_usd: float, 
+        pnl_pct: float,
+        exit_reason: str = ""
+    ):
+        """
+        Обновляет сделку при закрытии и проверяет необходимость cooldown.
+        Также экспортирует закрытую сделку в Excel.
+        """
+        closed_trade = None
         with self.lock:
             # Находим открытую сделку для символа
             for trade in reversed(self.trades):
@@ -324,7 +356,24 @@ class BotState:
                     trade.pnl_usd = pnl_usd
                     trade.pnl_pct = pnl_pct
                     trade.status = "closed"
+                    if exit_reason:
+                        trade.exit_reason = exit_reason
+                    closed_trade = trade
                     break
+        
+        # Экспортируем закрытую сделку в Excel
+        if closed_trade:
+            try:
+                from bot.trade_exporter import export_trades_to_excel
+                export_trades_to_excel(
+                    [closed_trade],
+                    output_dir="trade_history",
+                    filename=None  # Автоматическое имя файла
+                )
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to export trade to Excel: {e}")
         
         # Проверяем, была ли сделка убыточной
         if pnl_usd < 0:
