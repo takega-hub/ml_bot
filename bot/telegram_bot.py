@@ -318,6 +318,18 @@ class TelegramBot:
             self.state.remove_cooldown(symbol)
             await query.answer(f"✅ Разморозка снята для {symbol}", show_alert=True)
             await self.show_pairs_settings(query)
+        elif query.data.startswith("toggle_ml_"):
+            # Обрабатываем переключение ML настроек ПЕРЕД общим toggle_
+            setting_name = query.data.replace("toggle_ml_", "")
+            logger.info(f"Handling toggle_ml callback: query.data={query.data}, setting_name={setting_name}")
+            try:
+                await self.toggle_ml_setting(query, setting_name)
+            except Exception as e:
+                logger.error(f"Error in toggle_ml_setting: {e}", exc_info=True)
+                await query.answer(f"❌ Ошибка при переключении настройки: {str(e)}", show_alert=True)
+        elif query.data.startswith("toggle_risk_"):
+            setting_name = query.data.replace("toggle_risk_", "")
+            await self.toggle_risk_setting(query, setting_name)
         elif query.data.startswith("toggle_"):
             symbol = query.data.split("_", 1)[1]
             # Защита от конфликтов с другими callback_data
@@ -391,14 +403,6 @@ class TelegramBot:
         elif query.data.startswith("edit_ml_"):
             setting_name = query.data.replace("edit_ml_", "")
             await self.start_edit_ml_setting(query, setting_name)
-        elif query.data.startswith("toggle_ml_"):
-            setting_name = query.data.replace("toggle_ml_", "")
-            logger.info(f"Handling toggle_ml callback: query.data={query.data}, setting_name={setting_name}")
-            try:
-                await self.toggle_ml_setting(query, setting_name)
-            except Exception as e:
-                logger.error(f"Error in toggle_ml_setting: {e}", exc_info=True)
-                await query.answer(f"❌ Ошибка при переключении настройки: {str(e)}", show_alert=True)
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
