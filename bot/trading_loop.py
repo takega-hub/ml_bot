@@ -404,22 +404,30 @@ class TradingLoop:
                     
                     if model_1h and model_15m:
                         # Используем параметры из best_strategies.json, если доступны
-                        confidence_threshold_1h = model_info.get(
-                            'confidence_threshold_1h',
-                            self.settings.ml_strategy.mtf_confidence_threshold_1h
-                        )
-                        confidence_threshold_15m = model_info.get(
-                            'confidence_threshold_15m',
-                            self.settings.ml_strategy.mtf_confidence_threshold_15m
-                        )
-                        alignment_mode = model_info.get(
-                            'alignment_mode',
-                            self.settings.ml_strategy.mtf_alignment_mode
-                        )
-                        require_alignment = model_info.get(
-                            'require_alignment',
-                            self.settings.ml_strategy.mtf_require_alignment
-                        )
+                        # Если параметр None, используем значение из настроек, если и оно None - используем значения по умолчанию
+                        confidence_threshold_1h = model_info.get('confidence_threshold_1h')
+                        if confidence_threshold_1h is None:
+                            confidence_threshold_1h = self.settings.ml_strategy.mtf_confidence_threshold_1h
+                        if confidence_threshold_1h is None:
+                            confidence_threshold_1h = 0.50  # Значение по умолчанию
+                        
+                        confidence_threshold_15m = model_info.get('confidence_threshold_15m')
+                        if confidence_threshold_15m is None:
+                            confidence_threshold_15m = self.settings.ml_strategy.mtf_confidence_threshold_15m
+                        if confidence_threshold_15m is None:
+                            confidence_threshold_15m = 0.35  # Значение по умолчанию
+                        
+                        alignment_mode = model_info.get('alignment_mode')
+                        if alignment_mode is None:
+                            alignment_mode = self.settings.ml_strategy.mtf_alignment_mode
+                        if alignment_mode is None:
+                            alignment_mode = "strict"  # Значение по умолчанию
+                        
+                        require_alignment = model_info.get('require_alignment')
+                        if require_alignment is None:
+                            require_alignment = self.settings.ml_strategy.mtf_require_alignment
+                        if require_alignment is None:
+                            require_alignment = True  # Значение по умолчанию
                         
                         logger.info(f"[{symbol}] 🔄 Loading MTF strategy:")
                         logger.info(f"  Source: {model_info.get('source', 'unknown')}")

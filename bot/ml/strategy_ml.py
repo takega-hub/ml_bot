@@ -579,6 +579,8 @@ class MLStrategy:
                 # Используем confidence_threshold из настроек как минимальный порог
                 # Это гарантирует единообразную обработку для всех типов моделей
                 ensemble_min = self.confidence_threshold
+                if ensemble_min is None:
+                    ensemble_min = 0.35  # Значение по умолчанию
                 
                 # Вычисляем разницу между LONG и SHORT
                 prob_diff = abs(long_prob - short_prob)
@@ -587,13 +589,13 @@ class MLStrategy:
                 # Для ансамблей требуем:
                 # 1. Вероятность >= confidence_threshold из настроек
                 # 2. Минимальная разница между LONG и SHORT (15%)
-                if long_prob >= ensemble_min and long_prob > short_prob and prob_diff >= self.min_confidence_difference:
+                if ensemble_min is not None and long_prob >= ensemble_min and long_prob > short_prob and prob_diff >= self.min_confidence_difference:
                     prediction = 1  # LONG
                     # Confidence = базовая вероятность (без искусственного увеличения)
                     confidence = long_prob
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = long_prob
-                elif short_prob >= ensemble_min and short_prob > long_prob and prob_diff >= self.min_confidence_difference:
+                elif ensemble_min is not None and short_prob >= ensemble_min and short_prob > long_prob and prob_diff >= self.min_confidence_difference:
                     prediction = -1  # SHORT
                     # Confidence = базовая вероятность (без искусственного увеличения)
                     confidence = short_prob
