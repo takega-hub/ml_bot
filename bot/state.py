@@ -1,10 +1,13 @@
 import json
 import os
+import logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 from datetime import datetime, timedelta
 import threading
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeRecord:
@@ -346,6 +349,8 @@ class BotState:
         Обновляет сделку при закрытии и проверяет необходимость cooldown.
         Также экспортирует закрытую сделку в Excel.
         """
+        logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, exit_reason={exit_reason}")
+        
         closed_trade = None
         with self.lock:
             # Находим открытую сделку для символа
@@ -363,17 +368,24 @@ class BotState:
         
         # Экспортируем закрытую сделку в Excel
         if closed_trade:
+            logger.info(f"[{symbol}] 📊 Exporting closed trade to Excel...")
             try:
                 from bot.trade_exporter import export_trades_to_excel
-                export_trades_to_excel(
+                filepath = export_trades_to_excel(
                     [closed_trade],
                     output_dir="trade_history",
                     filename=None  # Автоматическое имя файла
                 )
+                if filepath:
+                    logger.info(f"[{symbol}] ✅ Trade exported to Excel: {filepath}")
+                else:
+                    logger.warning(f"[{symbol}] ⚠️ Trade export returned empty path")
+            except ImportError as e:
+                logger.warning(f"[{symbol}] ⚠️ Failed to import trade_exporter: {e}. Install openpyxl: pip install openpyxl")
             except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to export trade to Excel: {e}")
+                logger.error(f"[{symbol}] ❌ Failed to export trade to Excel: {e}", exc_info=True)
+        else:
+            logger.warning(f"[{symbol}] ⚠️ No closed trade found to export (trade might not have been in state)")
         
         # Проверяем, была ли сделка убыточной
         if pnl_usd < 0:

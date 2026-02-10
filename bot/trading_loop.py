@@ -1531,7 +1531,7 @@ class TradingLoop:
             # Отправляем уведомление
             pnl_emoji = "✅" if pnl_usd > 0 else "❌"
             await self.notifier.high(
-                f"{pnl_emoji} ПОЗИЦИЯ ЗАКРЫТА ({reason})\n"
+                f"{pnl_emoji} ПОЗИЦИЯ ЗАКРЫТА ({exit_reason})\n"
                 f"{symbol} {local_pos.side}\n"
                 f"Вход: ${local_pos.entry_price:.2f}\n"
                 f"Выход: ${exit_price:.2f}\n"

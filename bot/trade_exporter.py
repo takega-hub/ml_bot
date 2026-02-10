@@ -32,9 +32,12 @@ def export_trades_to_excel(
         logger.warning("No trades to export")
         return ""
     
+    logger.info(f"📊 Starting export of {len(trades)} trade(s) to Excel...")
+    
     # Создаем директорию если не существует
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    logger.debug(f"Output directory: {output_path}")
     
     # Генерируем имя файла если не указано
     if filename is None:

@@ -4,7 +4,9 @@
 Улучшения:
 1. Более агрессивный таргет (movement > 1%)
 2. Балансировка классов (class_weight)
-3. Увеличенные данные (30 дней)
+3. Увеличенные данные:
+   - 15m модели: 30 дней
+   - 1h модели: 180 дней (для лучшего качества обучения)
 4. Оптимизированные гиперпараметры
 """
 import warnings
@@ -243,13 +245,24 @@ def main():
         safe_print(f"📊 ОБУЧЕНИЕ МОДЕЛИ ДЛЯ {symbol}")
         safe_print("=" * 80)
         
-        # === Шаг 1: Сбор данных (30 дней) ===
+        # === Шаг 1: Сбор данных ===
+        # Для 1h моделей используем 180 дней, для 15m - 30 дней
+        from datetime import datetime, timedelta
+        if base_interval == "60":  # 1h модели
+            training_days = 180
+            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 4h, 1d) для {symbol}...")
+            safe_print(f"   Период обучения: {training_days} дней (для 1h моделей)")
+            start_date = datetime.now() - timedelta(days=training_days)
+        else:  # 15m модели
+            training_days = 30
+            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 1h, 4h) для {symbol}...")
+            safe_print(f"   Период обучения: {training_days} дней (для 15m моделей)")
+            start_date = None  # Используем дефолт (30 дней)
+        
         if ml_mtf_enabled:
             if base_interval == "15":
-                safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 1h, 4h) для {symbol}...")
                 mtf_intervals = [base_interval, "60", "240"]  # 15m, 1h, 4h
             else:  # base_interval == "60" (1h)
-                safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 4h, 1d) для {symbol}...")
                 mtf_intervals = [base_interval, "240", "D"]  # 1h, 4h, 1d
         else:
             safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display} only) для {symbol}...")
@@ -260,7 +273,7 @@ def main():
             mtf_data = collector.collect_multiple_timeframes(
                 symbol=symbol,
                 intervals=mtf_intervals,
-                start_date=None,
+                start_date=start_date,
                 end_date=None,
             )
             
@@ -280,12 +293,18 @@ def main():
             safe_print(f"✅ Собрано {len(df_raw_base)} свечей {interval_display} (~{len(df_raw_base)/candles_per_day:.1f} дней)")
         else:
             # Собираем только базовые данные
+            # Для 1h моделей увеличиваем limit для 180 дней
+            if base_interval == "60":  # 1h модели
+                limit = 180 * 24  # 180 дней * 24 свечи/день = 4320 свечей
+            else:  # 15m модели
+                limit = 3000  # 30 дней * 96 свечей/день = 2880, берем с запасом
+            
             df_raw_base = collector.collect_klines(
                 symbol=symbol,
                 interval=base_interval,
-                start_date=None,
+                start_date=start_date,
                 end_date=None,
-                limit=3000,
+                limit=limit,
             )
             if df_raw_base.empty:
                 safe_print(f"❌ Нет данных ({interval_display}) для {symbol}. Пропускаем.")
@@ -329,25 +348,47 @@ def main():
         safe_print(f"✅ Создано {len(feature_names)} признаков")
         
         # === Шаг 3: Создание таргета (оптимизированный) ===
-        safe_print(f"\n[3/5] 🎯 Создание целевой переменной (оптимизированный таргет)...")
-        safe_print("   Параметры:")
-        safe_print("   • Forward periods: 5 (75 минут)")
-        safe_print("   • Threshold: 0.3% (уменьшено для больше сигналов)")
-        safe_print("   • Min profit: 0.3% (уменьшено для больше сигналов)")
-        safe_print("   • Risk/Reward: 1.5:1")
-        safe_print("   • Use ATR threshold: True")
+        safe_print(f"\n[3/5] 🎯 Создание целевой переменной для {symbol}...")
         
-        # Используем УПРОЩЕННЫЕ параметры для большего количества сигналов
-        # КРИТИЧНО: Уменьшены пороги для увеличения использования сигналов (цель: 30-40%)
+        # Параметры target labeling зависят от таймфрейма
+        if base_interval == "60":  # 1h модели
+            # ОЧЕНЬ СТРОГИЕ параметры для 1h моделей (цель: 15-25% сигналов)
+            # На основе анализа: даже Вариант 5 (6, 1.0, 1.0, 3.0) дает 40.55% сигналов
+            # Для BTCUSDT Вариант 5 дает 25.33% - близко к цели, но для других символов 40-51%
+            # Нужны еще более строгие параметры
+            forward_periods = 8  # 8 * 1h = 8 часов (увеличено с 6)
+            threshold_pct = 1.2  # 1.2% (увеличено с 1.0%)
+            min_profit_pct = 1.2  # 1.2% (увеличено с 1.0%)
+            min_risk_reward_ratio = 3.5  # 3.5:1 (увеличено с 3.0:1)
+            max_hold_periods = 48  # 48 * 1h = 48 часов
+            safe_print("   Параметры для 1h моделей (очень строгие, цель: 15-25% сигналов):")
+            safe_print(f"   • Forward periods: {forward_periods} ({forward_periods} часов)")
+            safe_print(f"   • Threshold: {threshold_pct}%")
+            safe_print(f"   • Min profit: {min_profit_pct}%")
+            safe_print(f"   • Risk/Reward: {min_risk_reward_ratio}:1")
+            safe_print(f"   • Max hold: {max_hold_periods} ({max_hold_periods} часов)")
+        else:  # 15m модели
+            # Текущие параметры для 15m моделей
+            forward_periods = 5  # 5 * 15m = 75 минут
+            threshold_pct = 0.3  # 0.3%
+            min_profit_pct = 0.3  # 0.3%
+            min_risk_reward_ratio = 1.5  # 1.5:1
+            max_hold_periods = 96  # 96 * 15m = 24 часа
+            safe_print("   Параметры для 15m моделей:")
+            safe_print(f"   • Forward periods: {forward_periods} (75 минут)")
+            safe_print(f"   • Threshold: {threshold_pct}%")
+            safe_print(f"   • Min profit: {min_profit_pct}%")
+            safe_print(f"   • Risk/Reward: {min_risk_reward_ratio}:1")
+        
         df_with_target = feature_engineer.create_target_variable(
             df_features,
-            forward_periods=5 if base_interval == "15" else 2,  # 5 * 15m = 75 минут или 2 * 1h = 2 часа
-            threshold_pct=0.3,  # УМЕНЬШЕНО с 0.5% до 0.3% для больше сигналов
+            forward_periods=forward_periods,
+            threshold_pct=threshold_pct,
             use_atr_threshold=True,
             use_risk_adjusted=True,
-            min_risk_reward_ratio=1.5,  # УМЕНЬШЕНО с 2.0 до 1.5
-            max_hold_periods=96 if base_interval == "15" else 24,  # 96 * 15m = 24 часа или 24 * 1h = 24 часа
-            min_profit_pct=0.3,  # УМЕНЬШЕНО с 0.5% до 0.3% для больше сигналов
+            min_risk_reward_ratio=min_risk_reward_ratio,
+            max_hold_periods=max_hold_periods,
+            min_profit_pct=min_profit_pct,
         )
         
         # Анализ распределения классов
