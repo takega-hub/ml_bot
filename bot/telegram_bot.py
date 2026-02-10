@@ -224,30 +224,68 @@ class TelegramBot:
             status_text += "  (нет активных пар)\n"
         else:
             for symbol in self.state.active_symbols:
-                model_path = self.state.symbol_models.get(symbol)
-                if model_path and Path(model_path).exists():
-                    model_name = Path(model_path).stem
+                # Проверяем, есть ли стратегия в trading_loop (это актуальная информация)
+                strategy = None
+                if hasattr(self, 'trading_loop') and self.trading_loop:
+                    strategy = self.trading_loop.strategies.get(symbol)
+                
+                if strategy and hasattr(strategy, 'predict_combined'):
+                    # Это MTF стратегия
+                    from pathlib import Path
+                    model_1h_path = getattr(strategy, 'model_1h_path', None)
+                    model_15m_path = getattr(strategy, 'model_15m_path', None)
                     
-                    # Определяем тип модели
-                    is_ensemble = "ensemble" in model_name.lower()
-                    min_strength = 0.3 if is_ensemble else 60.0
-                    
-                    status_text += f"Пара: {symbol} | Модель: {model_name}\n"
-                    status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
-                else:
-                    # Пытаемся найти модель автоматически
-                    models = self.model_manager.find_models_for_symbol(symbol)
-                    if models:
-                        # Берем самую новую
-                        model_path = str(models[0])
-                        self.model_manager.apply_model(symbol, model_path)
-                        model_name = models[0].stem
+                    if model_1h_path and model_15m_path:
+                        model_1h_name = Path(model_1h_path).stem
+                        model_15m_name = Path(model_15m_path).stem
+                        status_text += f"Пара: {symbol} | 🔄 MTF стратегия:\n"
+                        status_text += f"   1h: {model_1h_name}\n"
+                        status_text += f"   15m: {model_15m_name}\n"
+                        status_text += f"   🎯 Уверенность 1h: ≥{strategy.confidence_threshold_1h*100:.0f}% | 15m: ≥{strategy.confidence_threshold_15m*100:.0f}%\n"
+                    else:
+                        status_text += f"Пара: {symbol} | 🔄 MTF стратегия (модели загружаются...)\n"
+                elif strategy:
+                    # Обычная стратегия
+                    model_path = getattr(strategy, 'model_path', None)
+                    if model_path and Path(model_path).exists():
+                        model_name = Path(model_path).stem
                         
                         # Определяем тип модели
                         is_ensemble = "ensemble" in model_name.lower()
                         min_strength = 0.3 if is_ensemble else 60.0
                         
-                        status_text += f"Пара: {symbol} | Модель: {model_name} (авто)\n"
+                        status_text += f"Пара: {symbol} | Модель: {model_name}\n"
+                        status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
+                    else:
+                        # Fallback к старому способу
+                        model_path = self.state.symbol_models.get(symbol)
+                        if model_path and Path(model_path).exists():
+                            model_name = Path(model_path).stem
+                            is_ensemble = "ensemble" in model_name.lower()
+                            min_strength = 0.3 if is_ensemble else 60.0
+                            status_text += f"Пара: {symbol} | Модель: {model_name}\n"
+                            status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
+                        else:
+                            # Пытаемся найти модель автоматически
+                            models = self.model_manager.find_models_for_symbol(symbol)
+                            if models:
+                                model_path = str(models[0])
+                                self.model_manager.apply_model(symbol, model_path)
+                                model_name = models[0].stem
+                                is_ensemble = "ensemble" in model_name.lower()
+                                min_strength = 0.3 if is_ensemble else 60.0
+                                status_text += f"Пара: {symbol} | Модель: {model_name} (авто)\n"
+                                status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
+                            else:
+                                status_text += f"Пара: {symbol} | Модель: ❌ Не найдена\n"
+                else:
+                    # Стратегия еще не инициализирована
+                    model_path = self.state.symbol_models.get(symbol)
+                    if model_path and Path(model_path).exists():
+                        model_name = Path(model_path).stem
+                        is_ensemble = "ensemble" in model_name.lower()
+                        min_strength = 0.3 if is_ensemble else 60.0
+                        status_text += f"Пара: {symbol} | Модель: {model_name} (ожидание инициализации)\n"
                         status_text += f"   🎯 Уверенность: ≥{self.settings.ml_strategy.confidence_threshold*100:.0f}% | Сила: ≥{min_strength:.1f}%\n"
                     else:
                         status_text += f"Пара: {symbol} | Модель: ❌ Не найдена\n"

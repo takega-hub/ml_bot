@@ -368,6 +368,19 @@ class TradingLoop:
                 return
 
             # 2. Инициализируем стратегию если нужно
+            # Проверяем, нужно ли переинициализировать стратегию из-за изменения настроек MTF
+            current_strategy = self.strategies.get(symbol)
+            use_mtf = self.settings.ml_strategy.use_mtf_strategy
+            
+            if current_strategy is not None:
+                # Проверяем, соответствует ли текущая стратегия настройкам
+                is_mtf_strategy = hasattr(current_strategy, 'predict_combined')
+                if is_mtf_strategy != use_mtf:
+                    logger.info(f"[{symbol}] Strategy type mismatch: current={'MTF' if is_mtf_strategy else 'Single'}, required={'MTF' if use_mtf else 'Single'}")
+                    logger.info(f"[{symbol}] Removing old strategy to reinitialize with new settings")
+                    del self.strategies[symbol]
+                    current_strategy = None  # Помечаем, что нужно переинициализировать
+            
             if symbol not in self.strategies:
                 from pathlib import Path
                 
