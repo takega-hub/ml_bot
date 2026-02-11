@@ -444,6 +444,16 @@ class TelegramBot:
             await self.show_signals(query)
         elif query.data == "history_trades":
             await self.show_trades(query)
+        elif query.data == "logs_menu":
+            await self.show_logs_menu(query)
+        elif query.data == "logs_bot":
+            await self.show_bot_logs(query)
+        elif query.data == "logs_trades":
+            await self.show_trades_logs(query)
+        elif query.data == "logs_signals":
+            await self.show_signals_logs(query)
+        elif query.data == "logs_errors":
+            await self.show_errors_logs(query)
         elif query.data == "stats":
             await self.show_stats(query)
         elif query.data == "settings_models":
@@ -561,6 +571,7 @@ class TelegramBot:
         keyboard = [
             [InlineKeyboardButton("🔍 ИСТОРИЯ СИГНАЛОВ", callback_data="history_signals")],
             [InlineKeyboardButton("📈 ИСТОРИЯ СДЕЛОК", callback_data="history_trades")],
+            [InlineKeyboardButton("📋 ЛОГИ", callback_data="logs_menu")],
             [InlineKeyboardButton("🔙 Назад", callback_data="status_info")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
@@ -681,6 +692,130 @@ class TelegramBot:
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    def _read_log_file(self, log_path: Path, max_lines: int = 50) -> list:
+        """Читает последние N строк из лог-файла"""
+        try:
+            if not log_path.exists():
+                return []
+            
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+                # Возвращаем последние max_lines строк
+                return lines[-max_lines:] if len(lines) > max_lines else lines
+        except Exception as e:
+            logger.error(f"Error reading log file {log_path}: {e}", exc_info=True)
+            return []
+
+    async def show_logs_menu(self, query):
+        """Показывает меню выбора типа логов"""
+        keyboard = [
+            [InlineKeyboardButton("📋 Основной лог", callback_data="logs_bot")],
+            [InlineKeyboardButton("📈 Лог сделок", callback_data="logs_trades")],
+            [InlineKeyboardButton("🔍 Лог сигналов", callback_data="logs_signals")],
+            [InlineKeyboardButton("🚨 Лог ошибок", callback_data="logs_errors")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("📋 Выберите тип логов для просмотра:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def show_bot_logs(self, query):
+        """Показывает последние записи из основного лога"""
+        log_path = Path("logs/bot.log")
+        lines = self._read_log_file(log_path, max_lines=50)
+        
+        if not lines:
+            text = "📋 ОСНОВНОЙ ЛОГ\n\nЛог-файл пуст или не найден."
+        else:
+            text = "📋 ПОСЛЕДНИЕ ЗАПИСИ ИЗ ОСНОВНОГО ЛОГА:\n\n"
+            # Показываем последние 30 строк (чтобы поместилось в сообщение)
+            for line in lines[-30:]:
+                # Ограничиваем длину строки для Telegram (макс 4096 символов на сообщение)
+                if len(line) > 200:
+                    line = line[:197] + "..."
+                text += line
+                if len(text) > 3500:  # Оставляем запас для заголовка и кнопок
+                    text += "\n\n... (показаны последние записи)"
+                    break
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="logs_bot")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def show_trades_logs(self, query):
+        """Показывает последние записи из лога сделок"""
+        log_path = Path("logs/trades.log")
+        lines = self._read_log_file(log_path, max_lines=50)
+        
+        if not lines:
+            text = "📈 ЛОГ СДЕЛОК\n\nЛог-файл пуст или не найден."
+        else:
+            text = "📈 ПОСЛЕДНИЕ ЗАПИСИ ИЗ ЛОГА СДЕЛОК:\n\n"
+            for line in lines[-30:]:
+                if len(line) > 200:
+                    line = line[:197] + "..."
+                text += line
+                if len(text) > 3500:
+                    text += "\n\n... (показаны последние записи)"
+                    break
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="logs_trades")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def show_signals_logs(self, query):
+        """Показывает последние записи из лога сигналов"""
+        log_path = Path("logs/signals.log")
+        lines = self._read_log_file(log_path, max_lines=50)
+        
+        if not lines:
+            text = "🔍 ЛОГ СИГНАЛОВ\n\nЛог-файл пуст или не найден."
+        else:
+            text = "🔍 ПОСЛЕДНИЕ ЗАПИСИ ИЗ ЛОГА СИГНАЛОВ:\n\n"
+            for line in lines[-30:]:
+                if len(line) > 200:
+                    line = line[:197] + "..."
+                text += line
+                if len(text) > 3500:
+                    text += "\n\n... (показаны последние записи)"
+                    break
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="logs_signals")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def show_errors_logs(self, query):
+        """Показывает последние записи из лога ошибок"""
+        log_path = Path("logs/errors.log")
+        lines = self._read_log_file(log_path, max_lines=50)
+        
+        if not lines:
+            text = "🚨 ЛОГ ОШИБОК\n\nЛог-файл пуст или не найден."
+        else:
+            text = "🚨 ПОСЛЕДНИЕ ЗАПИСИ ИЗ ЛОГА ОШИБОК:\n\n"
+            for line in lines[-30:]:
+                if len(line) > 200:
+                    line = line[:197] + "..."
+                text += line
+                if len(text) > 3500:
+                    text += "\n\n... (показаны последние записи)"
+                    break
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="logs_errors")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
