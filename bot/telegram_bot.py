@@ -720,7 +720,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text("📋 Выберите тип логов для просмотра:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, "📋 Выберите тип логов для просмотра:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_bot_logs(self, query):
         """Показывает последние записи из основного лога"""
@@ -746,7 +746,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_trades_logs(self, query):
         """Показывает последние записи из лога сделок"""
@@ -770,7 +770,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_signals_logs(self, query):
         """Показывает последние записи из лога сигналов"""
@@ -794,7 +794,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_errors_logs(self, query):
         """Показывает последние записи из лога ошибок"""
@@ -818,7 +818,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="logs_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_models_settings(self, query):
         text = "🤖 УПРАВЛЕНИЕ МОДЕЛЯМИ:\n\n"
