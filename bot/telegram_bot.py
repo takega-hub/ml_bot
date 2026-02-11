@@ -268,7 +268,6 @@ class TelegramBot:
                 
                 if strategy and hasattr(strategy, 'predict_combined'):
                     # Это MTF стратегия
-                    from pathlib import Path
                     model_1h_path = getattr(strategy, 'model_1h_path', None)
                     model_15m_path = getattr(strategy, 'model_15m_path', None)
                     
