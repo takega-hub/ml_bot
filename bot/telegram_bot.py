@@ -475,23 +475,38 @@ class TelegramBot:
         elif query.data.startswith("select_model_"):
             symbol = query.data.replace("select_model_", "")
             await self.show_model_selection(query, symbol)
-        elif query.data.startswith("select_mtf_"):
-            symbol = query.data.replace("select_mtf_", "")
-            await self.show_mtf_model_selection(query, symbol)
         elif query.data.startswith("select_mtf_1h_"):
-            symbol = query.data.replace("select_mtf_1h_", "")
+            # Проверяем более специфичный префикс первым
+            symbol = query.data.replace("select_mtf_1h_", "").upper()
+            logger.debug(f"MTF 1h selection: callback_data={query.data}, extracted symbol={symbol}")
             await self.show_mtf_timeframe_selection(query, symbol, "1h")
         elif query.data.startswith("select_mtf_15m_"):
-            symbol = query.data.replace("select_mtf_15m_", "")
+            # Проверяем более специфичный префикс первым
+            symbol = query.data.replace("select_mtf_15m_", "").upper()
+            logger.debug(f"MTF 15m selection: callback_data={query.data}, extracted symbol={symbol}")
             await self.show_mtf_timeframe_selection(query, symbol, "15m")
+        elif query.data.startswith("select_mtf_"):
+            symbol = query.data.replace("select_mtf_", "").upper()
+            logger.debug(f"MTF model selection: callback_data={query.data}, extracted symbol={symbol}")
+            await self.show_mtf_model_selection(query, symbol)
         elif query.data.startswith("apply_mtf_model_"):
             # Формат: apply_mtf_model_{symbol}_{timeframe}_{model_index}
-            parts = query.data.replace("apply_mtf_model_", "").split("_", 2)
+            # Символы обычно не содержат подчеркиваний, так что split должен работать
+            remaining = query.data.replace("apply_mtf_model_", "")
+            parts = remaining.split("_", 2)  # Разбиваем максимум на 3 части
             if len(parts) == 3:
-                symbol = parts[0]
+                symbol = parts[0].upper()
                 timeframe = parts[1]  # "1h" или "15m"
-                model_index = int(parts[2])
-                await self.apply_mtf_model_selection(query, symbol, timeframe, model_index)
+                try:
+                    model_index = int(parts[2])
+                    logger.debug(f"apply_mtf_model: symbol={symbol}, timeframe={timeframe}, index={model_index}")
+                    await self.apply_mtf_model_selection(query, symbol, timeframe, model_index)
+                except ValueError:
+                    logger.error(f"Invalid model_index in callback_data: {query.data}, parts={parts}")
+                    await query.answer("❌ Ошибка: некорректный индекс модели", show_alert=True)
+            else:
+                logger.error(f"Invalid callback_data format: {query.data}, parts={parts}")
+                await query.answer("❌ Ошибка: некорректный формат данных", show_alert=True)
         elif query.data.startswith("apply_mtf_strategy_"):
             symbol = query.data.replace("apply_mtf_strategy_", "")
             await self.apply_mtf_strategy(query, symbol)
@@ -1154,6 +1169,10 @@ class TelegramBot:
     
     async def show_mtf_model_selection(self, query, symbol: str):
         """Показывает меню выбора MTF моделей (1h и 15m)"""
+        # Нормализуем символ
+        symbol = symbol.upper()
+        logger.debug(f"show_mtf_model_selection called with symbol={symbol}")
+        
         # Загружаем сохраненные MTF модели для символа
         mtf_models = self.load_mtf_models_for_symbol(symbol)
         
@@ -1181,6 +1200,10 @@ class TelegramBot:
     
     async def show_mtf_timeframe_selection(self, query, symbol: str, timeframe: str):
         """Показывает список моделей для выбранного таймфрейма"""
+        # Нормализуем символ
+        symbol = symbol.upper()
+        logger.debug(f"show_mtf_timeframe_selection called with symbol={symbol}, timeframe={timeframe}")
+        
         models = self.find_models_for_timeframe(symbol, timeframe)
         
         if not models:
@@ -1241,6 +1264,10 @@ class TelegramBot:
     
     async def apply_mtf_model_selection(self, query, symbol: str, timeframe: str, model_index: int):
         """Применяет выбранную модель для MTF стратегии"""
+        # Нормализуем символ
+        symbol = symbol.upper()
+        logger.debug(f"apply_mtf_model_selection called with symbol={symbol}, timeframe={timeframe}, model_index={model_index}")
+        
         models = self.find_models_for_timeframe(symbol, timeframe)
         
         if model_index >= len(models):
