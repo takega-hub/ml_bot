@@ -2,6 +2,7 @@
 Утилита для автоматического выбора лучших моделей для MTF стратегии.
 
 Приоритет выбора:
+0. Вручную выбранные модели из ml_settings.json (высший приоритет)
 1. Файл best_strategies_*.json (последний по времени)
 2. comparison_15m_vs_1h.csv
 3. ml_models_comparison_*.csv (последний файл)
@@ -15,6 +16,35 @@ from typing import Optional, Tuple, Dict, Any, List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def load_manual_mtf_models(symbol: str) -> Optional[Dict[str, str]]:
+    """
+    Загружает вручную выбранные MTF модели для символа из ml_settings.json.
+    
+    Returns:
+        Словарь с ключами 'model_1h' и 'model_15m' или None
+    """
+    try:
+        config_file = Path("ml_settings.json")
+        if not config_file.exists():
+            return None
+        
+        with open(config_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        mtf_models = data.get("mtf_models", {})
+        symbol_upper = symbol.upper()
+        
+        if symbol_upper in mtf_models:
+            models = mtf_models[symbol_upper]
+            if models.get("model_1h") and models.get("model_15m"):
+                return models
+        
+        return None
+    except Exception as e:
+        logger.debug(f"Ошибка загрузки ручных MTF моделей для {symbol}: {e}")
+        return None
 
 
 def load_best_strategies_from_file(symbol: str) -> Optional[Dict[str, Any]]:
@@ -211,7 +241,32 @@ def select_best_models(
         logger.error(f"Директория {models_dir} не существует")
         return None, None, info
     
-    # 1. Проверяем best_strategies_*.json (высший приоритет)
+    # 0. Проверяем сохраненные вручную выбранные модели (высший приоритет - ручной выбор)
+    manual_mtf_models = load_manual_mtf_models(symbol)
+    if manual_mtf_models and manual_mtf_models.get('model_1h') and manual_mtf_models.get('model_15m'):
+        model_1h_name_manual = manual_mtf_models['model_1h'].replace('.pkl', '')
+        model_15m_name_manual = manual_mtf_models['model_15m'].replace('.pkl', '')
+        
+        model_1h_path = models_dir / f"{model_1h_name_manual}.pkl"
+        model_15m_path = models_dir / f"{model_15m_name_manual}.pkl"
+        
+        if model_1h_path.exists() and model_15m_path.exists():
+            info.update({
+                "source": "manual_selection",
+                "model_1h": model_1h_name_manual,
+                "model_15m": model_15m_name_manual,
+                "strategy_type": "mtf",
+                "confidence_threshold_1h": None,  # Используются из настроек
+                "confidence_threshold_15m": None,  # Используются из настроек
+                "alignment_mode": None,  # Используются из настроек
+                "require_alignment": None,  # Используются из настроек
+            })
+            logger.info(f"[{symbol}] ✅ Используются вручную выбранные MTF модели")
+            logger.info(f"   1h: {model_1h_name_manual}")
+            logger.info(f"   15m: {model_15m_name_manual}")
+            return str(model_1h_path), str(model_15m_path), info
+    
+    # 1. Проверяем best_strategies_*.json
     best_strategy = load_best_strategies_from_file(symbol)
     if best_strategy and best_strategy.get('strategy_type') == 'mtf':
         model_1h_name_from_strategy = best_strategy.get('model_1h', '').replace('.pkl', '')

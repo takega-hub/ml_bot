@@ -38,6 +38,7 @@ class TelegramBot:
         self.waiting_for_symbol = {}  # user_id -> True если ждем ввод символа
         self.waiting_for_risk_setting = {}  # user_id -> setting_name для редактирования настроек риска
         self.waiting_for_ml_setting = {}  # user_id -> setting_name для редактирования ML настроек
+        self.waiting_for_mtf_selection = {}  # user_id -> {"symbol": str, "step": "1h"|"15m"} для выбора MTF моделей
         
         # Инициализируем файл настроек при старте (добавляем недостающие поля)
         self._ensure_ml_settings_file()
@@ -474,6 +475,26 @@ class TelegramBot:
         elif query.data.startswith("select_model_"):
             symbol = query.data.replace("select_model_", "")
             await self.show_model_selection(query, symbol)
+        elif query.data.startswith("select_mtf_"):
+            symbol = query.data.replace("select_mtf_", "")
+            await self.show_mtf_model_selection(query, symbol)
+        elif query.data.startswith("select_mtf_1h_"):
+            symbol = query.data.replace("select_mtf_1h_", "")
+            await self.show_mtf_timeframe_selection(query, symbol, "1h")
+        elif query.data.startswith("select_mtf_15m_"):
+            symbol = query.data.replace("select_mtf_15m_", "")
+            await self.show_mtf_timeframe_selection(query, symbol, "15m")
+        elif query.data.startswith("apply_mtf_model_"):
+            # Формат: apply_mtf_model_{symbol}_{timeframe}_{model_index}
+            parts = query.data.replace("apply_mtf_model_", "").split("_", 2)
+            if len(parts) == 3:
+                symbol = parts[0]
+                timeframe = parts[1]  # "1h" или "15m"
+                model_index = int(parts[2])
+                await self.apply_mtf_model_selection(query, symbol, timeframe, model_index)
+        elif query.data.startswith("apply_mtf_strategy_"):
+            symbol = query.data.replace("apply_mtf_strategy_", "")
+            await self.apply_mtf_strategy(query, symbol)
         elif query.data.startswith("apply_model_"):
             # Формат: apply_model_{symbol}_{model_index}
             parts = query.data.replace("apply_model_", "").split("_", 1)
@@ -837,6 +858,8 @@ class TelegramBot:
         # Кнопки для выбора модели для каждой пары
         for symbol in self.state.active_symbols:
             keyboard.append([InlineKeyboardButton(f"📌 Выбрать модель для {symbol}", callback_data=f"select_model_{symbol}")])
+            # Добавляем кнопку для выбора MTF моделей
+            keyboard.append([InlineKeyboardButton(f"🔄 Выбрать MTF модели для {symbol}", callback_data=f"select_mtf_{symbol}")])
         
         keyboard.append([InlineKeyboardButton("🔄 Переобучить все модели", callback_data="retrain_all")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="status_info")])
@@ -1098,6 +1121,266 @@ class TelegramBot:
         
         await query.answer(f"✅ Модель применена для {symbol}!", show_alert=True)
         await self.show_models_settings(query)
+    
+    def find_models_for_timeframe(self, symbol: str, timeframe: str) -> list:
+        """Находит модели для указанного таймфрейма (1h или 15m)"""
+        models_dir = Path("ml_models")
+        symbol_upper = symbol.upper()
+        
+        if timeframe == "1h":
+            # Ищем модели 1h: *_{SYMBOL}_60_*.pkl или *_{SYMBOL}_*1h*.pkl
+            patterns = [
+                f"*_{symbol_upper}_60_*.pkl",
+                f"*_{symbol_upper}_*1h*.pkl"
+            ]
+        elif timeframe == "15m":
+            # Ищем модели 15m: *_{SYMBOL}_15_*.pkl или *_{SYMBOL}_*15m*.pkl
+            patterns = [
+                f"*_{symbol_upper}_15_*.pkl",
+                f"*_{symbol_upper}_*15m*.pkl"
+            ]
+        else:
+            return []
+        
+        models = []
+        for pattern in patterns:
+            for model_file in models_dir.glob(pattern):
+                if model_file.is_file() and model_file not in models:
+                    models.append(model_file)
+        
+        # Сортируем по времени изменения (новые первыми)
+        models.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        return models
+    
+    async def show_mtf_model_selection(self, query, symbol: str):
+        """Показывает меню выбора MTF моделей (1h и 15m)"""
+        # Загружаем сохраненные MTF модели для символа
+        mtf_models = self.load_mtf_models_for_symbol(symbol)
+        
+        text = f"🔄 ВЫБОР MTF МОДЕЛЕЙ ДЛЯ {symbol}:\n\n"
+        
+        if mtf_models:
+            model_1h_name = mtf_models.get("model_1h", "Не выбрана")
+            model_15m_name = mtf_models.get("model_15m", "Не выбрана")
+            text += f"📊 Текущие модели:\n"
+            text += f"   1h: {model_1h_name}\n"
+            text += f"   15m: {model_15m_name}\n\n"
+        else:
+            text += "📊 Модели не выбраны\n\n"
+        
+        text += "Выберите таймфрейм для выбора модели:"
+        
+        keyboard = [
+            [InlineKeyboardButton("⏰ Выбрать 1h модель", callback_data=f"select_mtf_1h_{symbol}")],
+            [InlineKeyboardButton("⏱ Выбрать 15m модель", callback_data=f"select_mtf_15m_{symbol}")],
+            [InlineKeyboardButton("✅ Применить MTF стратегию", callback_data=f"apply_mtf_strategy_{symbol}")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="settings_models")]
+        ]
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def show_mtf_timeframe_selection(self, query, symbol: str, timeframe: str):
+        """Показывает список моделей для выбранного таймфрейма"""
+        models = self.find_models_for_timeframe(symbol, timeframe)
+        
+        if not models:
+            await query.edit_message_text(
+                f"❌ Для {symbol} не найдено {timeframe} моделей.\n\n"
+                "Используйте кнопку 'Переобучить модель' для создания модели.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Переобучить", callback_data=f"retrain_{symbol}")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data=f"select_mtf_{symbol}")]
+                ])
+            )
+            return
+        
+        # Загружаем сохраненные MTF модели
+        mtf_models = self.load_mtf_models_for_symbol(symbol)
+        current_model_name = None
+        if timeframe == "1h":
+            current_model_name = mtf_models.get("model_1h") if mtf_models else None
+        else:
+            current_model_name = mtf_models.get("model_15m") if mtf_models else None
+        
+        text = f"📌 ВЫБОР {timeframe.upper()} МОДЕЛИ ДЛЯ {symbol}:\n\n"
+        keyboard = []
+        
+        # Загружаем результаты тестов
+        test_results = self.model_manager.get_model_test_results(symbol)
+        
+        for idx, model_path in enumerate(models):
+            model_name = model_path.stem
+            is_current = current_model_name and model_name == current_model_name
+            prefix = "✅ " if is_current else ""
+            
+            # Получаем результаты теста для этой модели
+            model_results = test_results.get(str(model_path), {})
+            
+            if model_results:
+                pnl = model_results.get("total_pnl_pct", 0)
+                winrate = model_results.get("win_rate", 0)
+                trades = model_results.get("total_trades", 0)
+                profit_factor = model_results.get("profit_factor", 0)
+                
+                pnl_sign = "+" if pnl >= 0 else ""
+                pnl_color = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                text += f"{prefix}{pnl_color} {model_name}\n"
+                text += f"   PnL: {pnl_sign}{pnl:.2f}% | WR: {winrate:.1f}% | PF: {profit_factor:.2f}\n"
+                text += f"   Сделок: {trades}\n\n"
+            else:
+                text += f"{prefix}⚪ {model_name} (не тестирована)\n\n"
+            
+            keyboard.append([InlineKeyboardButton(
+                f"{'✅ ' if is_current else ''}{model_name}",
+                callback_data=f"apply_mtf_model_{symbol}_{timeframe}_{idx}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f"select_mtf_{symbol}")])
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def apply_mtf_model_selection(self, query, symbol: str, timeframe: str, model_index: int):
+        """Применяет выбранную модель для MTF стратегии"""
+        models = self.find_models_for_timeframe(symbol, timeframe)
+        
+        if model_index >= len(models):
+            await query.answer("Ошибка: модель не найдена", show_alert=True)
+            return
+        
+        model_path = models[model_index]
+        model_name = model_path.stem
+        
+        # Сохраняем выбранную модель
+        self.save_mtf_model_for_symbol(symbol, timeframe, model_name)
+        
+        await query.answer(f"✅ {timeframe} модель {model_name} выбрана!", show_alert=True)
+        
+        # Показываем меню выбора MTF моделей снова
+        await self.show_mtf_model_selection(query, symbol)
+    
+    def load_mtf_models_for_symbol(self, symbol: str) -> dict:
+        """Загружает сохраненные MTF модели для символа из ml_settings.json"""
+        try:
+            from pathlib import Path
+            import json
+            
+            project_root = Path(__file__).parent.parent
+            config_file = project_root / "ml_settings.json"
+            
+            if not config_file.exists():
+                return {}
+            
+            with open(config_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Проверяем наличие секции mtf_models
+            mtf_models = data.get("mtf_models", {})
+            return mtf_models.get(symbol.upper(), {})
+        except Exception as e:
+            logger.error(f"Error loading MTF models for {symbol}: {e}")
+            return {}
+    
+    def save_mtf_model_for_symbol(self, symbol: str, timeframe: str, model_name: str):
+        """Сохраняет выбранную MTF модель для символа в ml_settings.json"""
+        try:
+            from pathlib import Path
+            import json
+            
+            project_root = Path(__file__).parent.parent
+            config_file = project_root / "ml_settings.json"
+            
+            # Загружаем существующие настройки
+            data = {}
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Could not read ml_settings.json: {e}")
+            
+            # Инициализируем секцию mtf_models если её нет
+            if "mtf_models" not in data:
+                data["mtf_models"] = {}
+            
+            symbol_upper = symbol.upper()
+            if symbol_upper not in data["mtf_models"]:
+                data["mtf_models"][symbol_upper] = {}
+            
+            # Сохраняем выбранную модель
+            if timeframe == "1h":
+                data["mtf_models"][symbol_upper]["model_1h"] = model_name
+            elif timeframe == "15m":
+                data["mtf_models"][symbol_upper]["model_15m"] = model_name
+            
+            # Сохраняем обратно
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Saved MTF model for {symbol}: {timeframe}={model_name}")
+        except Exception as e:
+            logger.error(f"Error saving MTF model for {symbol}: {e}", exc_info=True)
+    
+    async def apply_mtf_strategy(self, query, symbol: str):
+        """Применяет выбранные MTF модели и перезапускает стратегию"""
+        mtf_models = self.load_mtf_models_for_symbol(symbol)
+        
+        if not mtf_models or not mtf_models.get("model_1h") or not mtf_models.get("model_15m"):
+            await query.answer(
+                "❌ Необходимо выбрать обе модели (1h и 15m) перед применением MTF стратегии!",
+                show_alert=True
+            )
+            await self.show_mtf_model_selection(query, symbol)
+            return
+        
+        # Проверяем, что модели существуют
+        models_dir = Path("ml_models")
+        model_1h_path = models_dir / f"{mtf_models['model_1h']}.pkl"
+        model_15m_path = models_dir / f"{mtf_models['model_15m']}.pkl"
+        
+        if not model_1h_path.exists() or not model_15m_path.exists():
+            await query.answer(
+                "❌ Одна из выбранных моделей не найдена! Проверьте файлы моделей.",
+                show_alert=True
+            )
+            await self.show_mtf_model_selection(query, symbol)
+            return
+        
+        # Убеждаемся, что MTF стратегия включена
+        if not self.settings.ml_strategy.use_mtf_strategy:
+            await query.answer(
+                "⚠️ MTF стратегия не включена в настройках ML. Включите её сначала.",
+                show_alert=True
+            )
+            return
+        
+        # Перезапускаем стратегию в trading_loop
+        if hasattr(self, 'trading_loop') and self.trading_loop:
+            try:
+                # Очищаем существующую стратегию для символа
+                if symbol in self.trading_loop.strategies:
+                    del self.trading_loop.strategies[symbol]
+                    logger.info(f"Cleared existing strategy for {symbol} to apply new MTF models")
+                
+                await query.answer(
+                    f"✅ MTF стратегия применена для {symbol}!\n"
+                    f"1h: {mtf_models['model_1h']}\n"
+                    f"15m: {mtf_models['model_15m']}\n\n"
+                    "Стратегия будет перезагружена при следующем цикле торговли.",
+                    show_alert=True
+                )
+            except Exception as e:
+                logger.error(f"Error applying MTF strategy for {symbol}: {e}", exc_info=True)
+                await query.answer("❌ Ошибка при применении стратегии. Проверьте логи.", show_alert=True)
+        else:
+            await query.answer(
+                f"✅ MTF модели сохранены для {symbol}!\n"
+                f"1h: {mtf_models['model_1h']}\n"
+                f"15m: {mtf_models['model_15m']}\n\n"
+                "Стратегия будет загружена при следующем запуске бота.",
+                show_alert=True
+            )
+        
+        await self.show_mtf_model_selection(query, symbol)
     
     async def test_all_models_async(self, symbol: str, user_id: int):
         """Тестирует все модели для символа"""
