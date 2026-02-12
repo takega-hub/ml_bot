@@ -625,7 +625,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_stats(self, query):
         stats = self.state.get_stats()
@@ -660,7 +660,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="status_info")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def show_trades(self, query):
         closed_trades = [t for t in self.state.trades if t.status == "closed"][-10:]
@@ -729,7 +729,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="history_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     def _read_log_file(self, log_path: Path, max_lines: int = 50) -> list:
         """Читает последние N строк из лог-файла"""
@@ -880,7 +880,7 @@ class TelegramBot:
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="status_info")])
         keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.check_auth(update): return
@@ -1047,7 +1047,7 @@ class TelegramBot:
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="settings_models")])
         keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def send_model_selection_menu(self, symbol: str, user_id: int):
         """Отправляет новое сообщение с меню выбора моделей для символа"""
@@ -1196,7 +1196,37 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад", callback_data="settings_models")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    async def _show_mtf_model_selection_with_status(self, query, symbol: str, status_message: str):
+        """Показывает меню выбора MTF моделей с дополнительным статусом"""
+        symbol = symbol.upper()
+        
+        # Загружаем сохраненные MTF модели для символа
+        mtf_models = self.load_mtf_models_for_symbol(symbol)
+        
+        text = f"🔄 ВЫБОР MTF МОДЕЛЕЙ ДЛЯ {symbol}:\n\n"
+        text += f"{status_message}\n\n"
+        
+        if mtf_models:
+            model_1h_name = mtf_models.get("model_1h", "Не выбрана")
+            model_15m_name = mtf_models.get("model_15m", "Не выбрана")
+            text += f"📊 Текущие модели:\n"
+            text += f"   1h: {model_1h_name}\n"
+            text += f"   15m: {model_15m_name}\n\n"
+        else:
+            text += "📊 Модели не выбраны\n\n"
+        
+        text += "Выберите таймфрейм для выбора модели:"
+        
+        keyboard = [
+            [InlineKeyboardButton("⏰ Выбрать 1h модель", callback_data=f"select_mtf_1h_{symbol}")],
+            [InlineKeyboardButton("⏱ Выбрать 15m модель", callback_data=f"select_mtf_15m_{symbol}")],
+            [InlineKeyboardButton("✅ Применить MTF стратегию", callback_data=f"apply_mtf_strategy_{symbol}")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="settings_models")]
+        ]
+        
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_mtf_timeframe_selection(self, query, symbol: str, timeframe: str):
         """Показывает список моделей для выбранного таймфрейма"""
@@ -1207,7 +1237,8 @@ class TelegramBot:
         models = self.find_models_for_timeframe(symbol, timeframe)
         
         if not models:
-            await query.edit_message_text(
+            await self.safe_edit_message(
+                query,
                 f"❌ Для {symbol} не найдено {timeframe} моделей.\n\n"
                 "Используйте кнопку 'Переобучить модель' для создания модели.",
                 reply_markup=InlineKeyboardMarkup([
@@ -1260,7 +1291,7 @@ class TelegramBot:
         
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f"select_mtf_{symbol}")])
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def apply_mtf_model_selection(self, query, symbol: str, timeframe: str, model_index: int):
         """Применяет выбранную модель для MTF стратегии"""
@@ -1395,6 +1426,8 @@ class TelegramBot:
                     "Стратегия будет перезагружена при следующем цикле торговли.",
                     show_alert=True
                 )
+                # Обновляем сообщение с информацией о применении
+                await self._show_mtf_model_selection_with_status(query, symbol, "✅ Стратегия применена!")
             except Exception as e:
                 logger.error(f"Error applying MTF strategy for {symbol}: {e}", exc_info=True)
                 await query.answer("❌ Ошибка при применении стратегии. Проверьте логи.", show_alert=True)
@@ -1406,8 +1439,8 @@ class TelegramBot:
                 "Стратегия будет загружена при следующем запуске бота.",
                 show_alert=True
             )
-        
-        await self.show_mtf_model_selection(query, symbol)
+            # Обновляем сообщение с информацией о сохранении
+            await self._show_mtf_model_selection_with_status(query, symbol, "✅ Модели сохранены!")
     
     async def test_all_models_async(self, symbol: str, user_id: int):
         """Тестирует все модели для символа"""
@@ -2209,7 +2242,7 @@ class TelegramBot:
             [InlineKeyboardButton("🔙 Назад к настройкам", callback_data="settings_risk")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_ml_settings(self, query):
         """Показывает настройки ML стратегии"""
@@ -2263,7 +2296,7 @@ class TelegramBot:
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def start_edit_ml_setting(self, query, setting_name: str):
         """Начинает редактирование ML настройки"""
@@ -2360,7 +2393,7 @@ class TelegramBot:
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ])
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def show_emergency_menu(self, query):
         """Показывает меню экстренных действий"""
@@ -2374,7 +2407,7 @@ class TelegramBot:
             [InlineKeyboardButton("❌ Отмена", callback_data="main_menu")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
     
     async def emergency_stop_all(self, query):
         """Экстренная остановка с закрытием всех позиций"""
@@ -2553,4 +2586,4 @@ class TelegramBot:
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard))
