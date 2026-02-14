@@ -589,21 +589,43 @@ class MLStrategy:
                 # Для ансамблей требуем:
                 # 1. Вероятность >= confidence_threshold из настроек
                 # 2. Минимальная разница между LONG и SHORT (15%)
+                # Логируем для диагностики (первые несколько раз)
+                if hasattr(self, '_predict_debug_count'):
+                    self._predict_debug_count += 1
+                else:
+                    self._predict_debug_count = 1
+                
+                if self._predict_debug_count <= 5:
+                    logger.debug(f"[ml_strategy] predict: long_prob={long_prob:.3f}, short_prob={short_prob:.3f}, hold_prob={hold_prob:.3f}, prob_diff={prob_diff:.3f}, ensemble_min={ensemble_min}, min_diff={self.min_confidence_difference}")
+                
                 if ensemble_min is not None and long_prob >= ensemble_min and long_prob > short_prob and prob_diff >= self.min_confidence_difference:
                     prediction = 1  # LONG
                     # Confidence = базовая вероятность (без искусственного увеличения)
                     confidence = long_prob
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = long_prob
+                    if self._predict_debug_count <= 5:
+                        logger.debug(f"[ml_strategy] predict: LONG selected (conf={confidence:.3f})")
                 elif ensemble_min is not None and short_prob >= ensemble_min and short_prob > long_prob and prob_diff >= self.min_confidence_difference:
                     prediction = -1  # SHORT
                     # Confidence = базовая вероятность (без искусственного увеличения)
                     confidence = short_prob
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = short_prob
+                    if self._predict_debug_count <= 5:
+                        logger.debug(f"[ml_strategy] predict: SHORT selected (conf={confidence:.3f})")
                 else:
                     prediction = 0
                     confidence = hold_prob
+                    if self._predict_debug_count <= 5:
+                        reason = []
+                        if long_prob < ensemble_min:
+                            reason.append(f"long_prob {long_prob:.3f} < threshold {ensemble_min}")
+                        if short_prob < ensemble_min:
+                            reason.append(f"short_prob {short_prob:.3f} < threshold {ensemble_min}")
+                        if prob_diff < self.min_confidence_difference:
+                            reason.append(f"prob_diff {prob_diff:.3f} < min_diff {self.min_confidence_difference}")
+                        logger.debug(f"[ml_strategy] predict: HOLD selected (conf={confidence:.3f}), reason: {', '.join(reason) if reason else 'no clear direction'}")
                 
                 # Fallback
                 if prediction == 0:
@@ -612,6 +634,8 @@ class MLStrategy:
                     confidence = proba[prediction_idx]
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = hold_prob if np.isfinite(hold_prob) else 0.0
+                    if self._predict_debug_count <= 5:
+                        logger.debug(f"[ml_strategy] predict: Fallback to argmax: pred={prediction}, conf={confidence:.3f}")
                 
                 # Обновляем историю уверенности
                 if len(self.confidence_history) >= self.max_history_size:
