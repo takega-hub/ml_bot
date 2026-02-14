@@ -59,12 +59,12 @@ class TelegramBot:
 
         logger.info("Starting Telegram bot...")
         try:
-        await self.app.initialize()
-        await self.app.start()
+            await self.app.initialize()
+            await self.app.start()
             
             # Try to start polling with conflict error handling
             try:
-        await self.app.updater.start_polling()
+                await self.app.updater.start_polling()
             except Conflict as e:
                 logger.error(
                     f"Telegram bot conflict error: {e}\n"
