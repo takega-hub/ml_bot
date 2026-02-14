@@ -1406,7 +1406,18 @@ class TradingLoop:
             
             # Преобразуем timestamp в datetime
             if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                # Парсим timestamp с явным указанием формата для надежности
+                df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+                # Удаляем строки с некорректными датами
+                invalid_dates = df["timestamp"].isna()
+                if invalid_dates.any():
+                    logger.warning(f"[{symbol}] Found {invalid_dates.sum()} rows with invalid timestamps in cache, removing them")
+                    df = df[~invalid_dates].copy()
+                
+                if len(df) == 0:
+                    logger.warning(f"[{symbol}] No valid data after timestamp parsing")
+                    return None
+                
                 # Сортируем по времени и удаляем дубликаты
                 df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
             
@@ -1417,8 +1428,22 @@ class TradingLoop:
             # Устанавливаем timestamp как индекс для совместимости с MTF стратегией
             if "timestamp" in df.columns:
                 df = df.set_index("timestamp")
+                # Проверяем, что индекс корректный
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    logger.warning(f"[{symbol}] Failed to create DatetimeIndex from timestamp column")
+                    return None
+                
+                # Проверяем, что даты разумные (не 1970 год)
+                if len(df) > 0:
+                    first_date = df.index[0]
+                    last_date = df.index[-1]
+                    if first_date.year < 2020 or last_date.year < 2020:
+                        logger.warning(f"[{symbol}] Invalid dates in cache: first={first_date}, last={last_date}")
+                        return None
             
             logger.debug(f"[{symbol}] Loaded {len(df)} cached 1h candles from {cache_file}")
+            if len(df) > 0:
+                logger.debug(f"[{symbol}] Cache date range: {df.index[0]} to {df.index[-1]}")
             return df
             
         except Exception as e:
@@ -1469,9 +1494,32 @@ class TradingLoop:
             
             # Преобразуем timestamp в datetime
             if "timestamp" in df_new.columns:
-                df_new["timestamp"] = pd.to_datetime(df_new["timestamp"])
+                df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors='coerce')
+                # Удаляем строки с некорректными датами
+                invalid_dates = df_new["timestamp"].isna()
+                if invalid_dates.any():
+                    logger.warning(f"[{symbol}] Found {invalid_dates.sum()} rows with invalid timestamps from exchange, removing them")
+                    df_new = df_new[~invalid_dates].copy()
+                
+                if len(df_new) == 0:
+                    logger.warning(f"[{symbol}] No valid data after timestamp parsing from exchange")
+                    return existing_cache
+                
                 df_new = df_new.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
                 df_new = df_new.set_index("timestamp")
+                
+                # Проверяем, что индекс корректный и даты разумные
+                if not isinstance(df_new.index, pd.DatetimeIndex):
+                    logger.warning(f"[{symbol}] Failed to create DatetimeIndex from exchange data")
+                    return existing_cache
+                
+                if len(df_new) > 0:
+                    first_date = df_new.index[0]
+                    last_date = df_new.index[-1]
+                    if first_date.year < 2020 or last_date.year < 2020:
+                        logger.warning(f"[{symbol}] Invalid dates from exchange: first={first_date}, last={last_date}")
+                        return existing_cache
+                    logger.debug(f"[{symbol}] Exchange data date range: {first_date} to {last_date}")
             elif not isinstance(df_new.index, pd.DatetimeIndex):
                 logger.warning(f"[{symbol}] Could not set timestamp index for new 1h data")
                 return existing_cache
@@ -1496,10 +1544,28 @@ class TradingLoop:
             # Сохраняем в кэш
             try:
                 df_to_save = df_final.reset_index() if isinstance(df_final.index, pd.DatetimeIndex) else df_final.copy()
+                
+                # Убеждаемся, что timestamp в правильном формате для сохранения
+                if "timestamp" in df_to_save.columns:
+                    # Проверяем, что timestamp - это datetime, а не что-то другое
+                    if not pd.api.types.is_datetime64_any_dtype(df_to_save["timestamp"]):
+                        # Если это не datetime, пытаемся преобразовать
+                        df_to_save["timestamp"] = pd.to_datetime(df_to_save["timestamp"], errors='coerce')
+                        # Удаляем некорректные даты
+                        invalid = df_to_save["timestamp"].isna()
+                        if invalid.any():
+                            logger.warning(f"[{symbol}] Removing {invalid.sum()} rows with invalid timestamps before saving")
+                            df_to_save = df_to_save[~invalid].copy()
+                    
+                    # Сохраняем timestamp в формате строки для читаемости
+                    df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                
                 df_to_save.to_csv(cache_file, index=False)
                 logger.info(f"[{symbol}] ✅ Saved {len(df_final)} 1h candles to cache: {cache_file}")
+                if len(df_to_save) > 0:
+                    logger.debug(f"[{symbol}] Saved cache date range: {df_to_save['timestamp'].iloc[0]} to {df_to_save['timestamp'].iloc[-1]}")
             except Exception as e:
-                logger.warning(f"[{symbol}] Failed to save 1h cache: {e}")
+                logger.warning(f"[{symbol}] Failed to save 1h cache: {e}", exc_info=True)
             
             return df_final
             
