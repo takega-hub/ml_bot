@@ -696,12 +696,12 @@ class TradingLoop:
                     
                     logger.debug(f"[{symbol}] MTF: 15m data: {len(df_for_strategy)} candles")
                     
-                signal = await asyncio.to_thread(
-                    strategy.generate_signal,
-                    row=row,
+                    signal = await asyncio.to_thread(
+                        strategy.generate_signal,
+                        row=row,
                         df_15m=df_for_strategy,  # 15m данные
                         df_1h=df_1h_cached,  # 1h данные из кэша (если есть) или None (будет агрегировано)
-                    has_position=has_pos,
+                        has_position=has_pos,
                         current_price=current_price,
                         leverage=self.settings.leverage,
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
@@ -715,8 +715,8 @@ class TradingLoop:
                         df=df_for_strategy,
                         has_position=has_pos,
                         current_price=current_price,
-                    leverage=self.settings.leverage
-                )
+                        leverage=self.settings.leverage
+                    )
                 logger.info(f"[{symbol}] ✅ strategy.generate_signal() completed")
             except Exception as e:
                 logger.error(f"Error generating signal for {symbol}: {e}")
