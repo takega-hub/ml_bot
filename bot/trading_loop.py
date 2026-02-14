@@ -368,18 +368,32 @@ class TradingLoop:
                 logger.info(f"[{symbol}] ⚠️ No cached 15m data found, fetching from exchange...")
                 needs_update = True
             else:
-                # Проверяем, актуальны ли данные (последняя свеча не старше 30 минут для 15m данных)
+                # Проверяем, актуальны ли данные
                 if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
                     last_candle_time = df.index[-1]
                     current_time = pd.Timestamp.now()
+                    
+                    # Для 15m свечей вычисляем, когда должна была закрыться следующая свеча после последней в кэше
+                    # 15-минутные свечи закрываются в :00, :15, :30, :45
+                    last_minute = last_candle_time.minute
+                    next_close_minute = ((last_minute // 15) + 1) * 15
+                    if next_close_minute >= 60:
+                        next_close_time = last_candle_time.replace(minute=0, second=0, microsecond=0) + pd.Timedelta(hours=1)
+                    else:
+                        next_close_time = last_candle_time.replace(minute=next_close_minute, second=0, microsecond=0)
+                    
+                    # Если время закрытия следующей свечи уже прошло, значит должна быть новая свеча
+                    should_have_new_candle = current_time >= next_close_time
                     minutes_since_last = (current_time - last_candle_time).total_seconds() / 60
                     
-                    # Если последняя свеча старше 30 минут или недостаточно данных, обновляем кэш
-                    if minutes_since_last > 30 or len(df) < required_limit:
-                        logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated or insufficient (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, have {len(df)} candles, need {required_limit}), updating...")
+                    if should_have_new_candle or minutes_since_last > 20 or len(df) < required_limit:
+                        if should_have_new_candle:
+                            logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated: next candle should have closed at {next_close_time}, but it's {current_time} (last candle: {last_candle_time}), updating...")
+                        else:
+                            logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated or insufficient (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, have {len(df)} candles, need {required_limit}), updating...")
                         needs_update = True
                     else:
-                        logger.debug(f"[{symbol}] ✅ Cached 15m data is fresh (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, {len(df)} candles)")
+                        logger.debug(f"[{symbol}] ✅ Cached 15m data is fresh (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, next close: {next_close_time}, {len(df)} candles)")
                 else:
                     logger.warning(f"[{symbol}] ⚠️ Could not check cache freshness, updating...")
                     needs_update = True
@@ -530,26 +544,26 @@ class TradingLoop:
                 
                 if not use_mtf:
                     # Используем обычную стратегию (15m или 1h)
-                    model_path = self.state.symbol_models.get(symbol)
-                    # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
-                    if not model_path:
-                        # Пытаемся найти модель в папке ml_models
-                        models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                        if models:
-                            model_path = str(models[0])
-                            self.state.symbol_models[symbol] = model_path
-                    
-                    if model_path:
-                        logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
-                        self.strategies[symbol] = MLStrategy(
-                            model_path=model_path,
-                            confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                            min_signal_strength=self.settings.ml_strategy.min_signal_strength
-                        )
-                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
-                    else:
-                        logger.warning(f"No model found for {symbol}, skipping...")
-                        return
+                model_path = self.state.symbol_models.get(symbol)
+                # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
+                if not model_path:
+                    # Пытаемся найти модель в папке ml_models
+                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
+                    if models:
+                        model_path = str(models[0])
+                        self.state.symbol_models[symbol] = model_path
+                
+                if model_path:
+                    logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
+                    self.strategies[symbol] = MLStrategy(
+                        model_path=model_path,
+                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
+                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                    )
+                    logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
+                else:
+                    logger.warning(f"No model found for {symbol}, skipping...")
+                    return
 
             # 3. Генерируем сигнал
             strategy = self.strategies[symbol]
@@ -682,12 +696,12 @@ class TradingLoop:
                     
                     logger.debug(f"[{symbol}] MTF: 15m data: {len(df_for_strategy)} candles")
                     
-                    signal = await asyncio.to_thread(
-                        strategy.generate_signal,
-                        row=row,
+                signal = await asyncio.to_thread(
+                    strategy.generate_signal,
+                    row=row,
                         df_15m=df_for_strategy,  # 15m данные
                         df_1h=df_1h_cached,  # 1h данные из кэша (если есть) или None (будет агрегировано)
-                        has_position=has_pos,
+                    has_position=has_pos,
                         current_price=current_price,
                         leverage=self.settings.leverage,
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
@@ -741,7 +755,7 @@ class TradingLoop:
                     f"Candle: {candle_timestamp}"
                 )
             else:
-                logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
+            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
             # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
@@ -1723,10 +1737,12 @@ class TradingLoop:
             # Определяем, сколько свечей нужно запросить
             if existing_cache is not None and not existing_cache.empty:
                 if isinstance(existing_cache.index, pd.DatetimeIndex) and len(existing_cache) > 0:
-                    # Если есть кэш, запрашиваем только последние свечи для обновления
-                    # Запрашиваем достаточно, чтобы покрыть последние 2 часа (8 свечей) + небольшой запас
-                    limit = min(50, required_limit)  # Подгружаем максимум 50 свечей для обновления
-                    logger.debug(f"[{symbol}] Updating cache: have {len(existing_cache)} candles, fetching {limit} new ones")
+                    # Если есть кэш, запрашиваем последние свечи для обновления
+                    # Запрашиваем достаточно, чтобы гарантированно получить самую новую свечу
+                    # Для 15m свечей запрашиваем последние 20 свечей (5 часов данных) - этого достаточно
+                    # чтобы покрыть возможные пропуски и получить самую новую свечу
+                    limit = 20  # Запрашиваем последние 20 свечей для обновления
+                    logger.debug(f"[{symbol}] Updating cache: have {len(existing_cache)} candles, fetching last {limit} candles from exchange")
                 else:
                     limit = required_limit
             else:
