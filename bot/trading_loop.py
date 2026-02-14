@@ -755,7 +755,7 @@ class TradingLoop:
                     f"Candle: {candle_timestamp}"
                 )
             else:
-            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
+                logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
             # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
