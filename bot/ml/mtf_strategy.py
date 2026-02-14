@@ -223,7 +223,8 @@ class MultiTimeframeMLStrategy:
                     if hasattr(self, '_debug_count') and self._debug_count <= 5:
                         if conf_1h >= self.confidence_threshold_1h:
                             logger.info(f"[MTF Strategy] Отклонено: 1h модель уверена в HOLD (conf_1h={conf_1h:.3f} >= порог={self.confidence_threshold_1h}, но pred=0)")
-                            logger.info(f"[MTF Strategy] 1h вероятности: LONG={info.get('pred_1h')==1 and conf_1h or 0:.3f}, SHORT={info.get('pred_1h')==-1 and conf_1h or 0:.3f}, HOLD={conf_1h:.3f}")
+                            # Логируем информацию о предсказании (pred_1h=0 означает HOLD)
+                            logger.info(f"[MTF Strategy] 1h предсказание: pred={pred_1h}, conf={conf_1h:.3f} (pred=0 означает HOLD с уверенностью {conf_1h:.3f})")
                         else:
                             logger.info(f"[MTF Strategy] Отклонено: 1h не дает сигнал (conf_1h={conf_1h:.3f} < порог={self.confidence_threshold_1h})")
                     return 0, 0.0, {**info, "reason": "1h_no_signal"}
@@ -377,7 +378,8 @@ class MultiTimeframeMLStrategy:
             # Обновляем информацию о комбинированной стратегии
             if signal_15m.indicators_info:
                 signal_15m.indicators_info["strategy"] = "MTF_ML"
-                signal_15m.indicators_info["mtf_confidence"] = round(confidence, 4)
+                signal_15m.indicators_info["confidence"] = round(confidence, 4)  # Комбинированная уверенность для проверки min_confidence_for_trade
+                signal_15m.indicators_info["mtf_confidence"] = round(confidence, 4)  # Дублируем для совместимости
                 signal_15m.indicators_info["1h_pred"] = info.get("pred_1h")
                 signal_15m.indicators_info["1h_conf"] = round(info.get("conf_1h", 0), 4)
                 signal_15m.indicators_info["15m_pred"] = info.get("pred_15m")
@@ -387,7 +389,8 @@ class MultiTimeframeMLStrategy:
             else:
                 signal_15m.indicators_info = {
                     "strategy": "MTF_ML",
-                    "mtf_confidence": round(confidence, 4),
+                    "confidence": round(confidence, 4),  # Комбинированная уверенность для проверки min_confidence_for_trade
+                    "mtf_confidence": round(confidence, 4),  # Дублируем для совместимости
                     "1h_pred": info.get("pred_1h"),
                     "1h_conf": round(info.get("conf_1h", 0), 4),
                     "15m_pred": info.get("pred_15m"),
