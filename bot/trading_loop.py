@@ -1406,8 +1406,13 @@ class TradingLoop:
             
             # Преобразуем timestamp в datetime
             if "timestamp" in df.columns:
-                # Парсим timestamp с явным указанием формата для надежности
-                df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+                # Парсим timestamp: может быть строка, datetime или число (миллисекунды)
+                if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                    # Если это число, интерпретируем как миллисекунды
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms', errors='coerce')
+                else:
+                    # Если это строка или datetime, парсим как обычно
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
                 # Удаляем строки с некорректными датами
                 invalid_dates = df["timestamp"].isna()
                 if invalid_dates.any():
@@ -1494,7 +1499,13 @@ class TradingLoop:
             
             # Преобразуем timestamp в datetime
             if "timestamp" in df_new.columns:
-                df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors='coerce')
+                # Парсим timestamp: может быть строка, datetime или число (миллисекунды)
+                if pd.api.types.is_numeric_dtype(df_new["timestamp"]):
+                    # Если это число, интерпретируем как миллисекунды
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], unit='ms', errors='coerce')
+                else:
+                    # Если это строка или datetime, парсим как обычно
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors='coerce')
                 # Удаляем строки с некорректными датами
                 invalid_dates = df_new["timestamp"].isna()
                 if invalid_dates.any():
