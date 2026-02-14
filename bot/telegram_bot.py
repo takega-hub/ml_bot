@@ -1701,6 +1701,12 @@ class TelegramBot:
                 else:
                     await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
                     return
+            elif setting_name == "min_confidence_for_trade":
+                if 1.0 <= value <= 100.0:  # 1% - 100%
+                    ml_settings.min_confidence_for_trade = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 1 до 100%")
+                    return
             
             # Сохраняем настройки
             self.save_ml_settings()
@@ -2092,6 +2098,7 @@ class TelegramBot:
             # Создаем полный словарь настроек
             ml_dict = {
                 "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+                "min_confidence_for_trade": self.settings.ml_strategy.min_confidence_for_trade,
                 "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
                 "mtf_confidence_threshold_1h": self.settings.ml_strategy.mtf_confidence_threshold_1h,
                 "mtf_confidence_threshold_15m": self.settings.ml_strategy.mtf_confidence_threshold_15m,
@@ -2134,6 +2141,7 @@ class TelegramBot:
             # Список обязательных полей
             required_fields = {
                 "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+                "min_confidence_for_trade": self.settings.ml_strategy.min_confidence_for_trade,
                 "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
                 "mtf_confidence_threshold_1h": self.settings.ml_strategy.mtf_confidence_threshold_1h,
                 "mtf_confidence_threshold_15m": self.settings.ml_strategy.mtf_confidence_threshold_15m,
@@ -2270,12 +2278,14 @@ class TelegramBot:
             }
             day_name = day_names.get(ml_settings.auto_optimize_day, ml_settings.auto_optimize_day)
             text += f"   • Расписание: {day_name}, {ml_settings.auto_optimize_hour:02d}:00\n\n"
-        text += f"🎯 Минимальная уверенность: {ml_settings.confidence_threshold*100:.0f}%\n"
+        text += f"🎯 Минимальная уверенность модели: {ml_settings.confidence_threshold*100:.0f}%\n"
+        text += f"💰 Минимальная уверенность для сделки: {ml_settings.min_confidence_for_trade*100:.0f}%\n"
         text += f"💪 Минимальная сила сигнала:\n"
         text += f"   • Ансамбли: 0.3% (фиксировано)\n"
         text += f"   • Одиночные модели: 60% (фиксировано)\n\n"
         
         text += f"ℹ️ Уверенность модели — это вероятность правильного предсказания.\n"
+        text += f"Минимальная уверенность для сделки — порог для открытия позиции.\n"
         text += f"Чем выше порог, тем меньше сигналов, но качественнее.\n\n"
         text += f"🔹 Рекомендуемые значения:\n"
         text += f"   • Консервативно: 70-80%\n"
@@ -2291,7 +2301,8 @@ class TelegramBot:
                 f"🤖 Автообновление: {'✅ Вкл' if ml_settings.auto_optimize_strategies else '❌ Выкл'}", 
                 callback_data="toggle_ml_auto_optimize_strategies"
             )],
-            [InlineKeyboardButton(f"🎯 Уверенность: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
+            [InlineKeyboardButton(f"🎯 Уверенность модели: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
+            [InlineKeyboardButton(f"💰 Уверенность для сделки: {ml_settings.min_confidence_for_trade*100:.0f}%", callback_data="edit_ml_min_confidence_for_trade")],
             [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]
@@ -2308,6 +2319,19 @@ class TelegramBot:
             
             await query.edit_message_text(
                 f"✏️ РЕДАКТИРОВАНИЕ: Минимальная уверенность модели\n\n"
+                f"Текущее значение: {current_value:.0f}%\n\n"
+                f"Введите новое значение от 1 до 100 (в процентах):\n"
+                f"Пример: 50 означает 50%",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Отмена", callback_data="settings_ml")]
+                ])
+            )
+        elif setting_name == "min_confidence_for_trade":
+            current_value = self.settings.ml_strategy.min_confidence_for_trade * 100
+            self.waiting_for_ml_setting[user_id] = setting_name
+            
+            await query.edit_message_text(
+                f"✏️ РЕДАКТИРОВАНИЕ: Минимальная уверенность для сделки\n\n"
                 f"Текущее значение: {current_value:.0f}%\n\n"
                 f"Введите новое значение от 1 до 100 (в процентах):\n"
                 f"Пример: 50 означает 50%",

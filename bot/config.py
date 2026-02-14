@@ -57,6 +57,9 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     use_mtf_strategy: bool = False  # Использовать комбинированную стратегию (1h фильтр + 15m вход)
     mtf_confidence_threshold_1h: float = 0.50  # Порог уверенности для 1h модели (фильтр)
     mtf_confidence_threshold_15m: float = 0.35  # Порог уверенности для 15m модели (вход)
+    
+    # Минимальная уверенность для открытия сделки
+    min_confidence_for_trade: float = 0.50  # Минимальная уверенность для открытия сделки (50% по умолчанию)
     mtf_alignment_mode: str = "strict"  # Режим выравнивания: "strict" или "weighted"
     mtf_require_alignment: bool = True  # Требовать совпадение направлений обеих моделей
     
@@ -95,6 +98,10 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.mtf_confidence_threshold_15m = 0.35
         if self.mtf_alignment_mode not in ["strict", "weighted"]:
             self.mtf_alignment_mode = "strict"
+        
+        # Валидация min_confidence_for_trade
+        if not 0 <= self.min_confidence_for_trade <= 1:
+            self.min_confidence_for_trade = 0.50
         
         # Валидация параметров автообновления
         valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -405,6 +412,8 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.mtf_alignment_mode = str(ml_dict["mtf_alignment_mode"])
                 if "mtf_require_alignment" in ml_dict:
                     settings.ml_strategy.mtf_require_alignment = bool(ml_dict["mtf_require_alignment"])
+                if "min_confidence_for_trade" in ml_dict:
+                    settings.ml_strategy.min_confidence_for_trade = float(ml_dict["min_confidence_for_trade"])
                 if "auto_optimize_strategies" in ml_dict:
                     settings.ml_strategy.auto_optimize_strategies = bool(ml_dict["auto_optimize_strategies"])
                 if "auto_optimize_day" in ml_dict:

@@ -747,16 +747,17 @@ class TradingLoop:
             is_mtf_strategy = strategy and hasattr(strategy, 'predict_combined')
             
             if is_mtf_strategy:
-                # Для MTF стратегии используем среднее между порогами 1h и 15m
-                # или минимальный из них, так как MTF уже проверила уверенность внутри
+                # Для MTF стратегии используем настройку min_confidence_for_trade
+                # MTF уже проверила уверенность внутри, но для открытия сделки используем настройку
                 mtf_threshold_1h = getattr(strategy, 'confidence_threshold_1h', 0.50)
                 mtf_threshold_15m = getattr(strategy, 'confidence_threshold_15m', 0.35)
-                # Используем минимальный порог, так как MTF уже проверила оба порога
-                min_confidence_for_trade = min(mtf_threshold_1h, mtf_threshold_15m) * 0.9  # Небольшой запас
+                # Используем настройку из конфигурации
+                min_confidence_for_trade = self.settings.ml_strategy.min_confidence_for_trade
                 logger.debug(f"[{symbol}] MTF strategy: using threshold {min_confidence_for_trade:.2%} (1h: {mtf_threshold_1h:.2%}, 15m: {mtf_threshold_15m:.2%})")
             else:
-                # Для обычной стратегии используем общий порог
-                min_confidence_for_trade = self.settings.ml_strategy.confidence_threshold
+                # Для обычной стратегии используем настройку min_confidence_for_trade
+                min_confidence_for_trade = self.settings.ml_strategy.min_confidence_for_trade
+                logger.debug(f"[{symbol}] Single strategy: using threshold {min_confidence_for_trade:.2%}")
             
             if signal.action in (Action.LONG, Action.SHORT):
                 # Проверяем уверенность перед открытием позиции
@@ -841,6 +842,8 @@ class TradingLoop:
                                 is_add=True,
                                 position_horizon=local_pos.horizon,
                             )
+                        else:
+                            logger.info(f"[{symbol}] ⏭️ Skipping trade: position already exists in same direction (DCA conditions not met)")
                         return
 
                 # Проверка сигнала BTCUSDT для других пар (альткоины следуют за BTC)

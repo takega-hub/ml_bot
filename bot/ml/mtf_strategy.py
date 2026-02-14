@@ -219,9 +219,11 @@ class MultiTimeframeMLStrategy:
                     # 1h не дает сигнал - не входим
                     # ВАЖНО: pred=0 может означать либо низкую уверенность, либо высокую уверенность HOLD
                     # Если уверенность высокая, но pred=0, это означает, что модель уверена в HOLD
+                    # В строгом режиме с require_alignment=True это блокирует сигнал от 15m модели
                     if hasattr(self, '_debug_count') and self._debug_count <= 5:
                         if conf_1h >= self.confidence_threshold_1h:
                             logger.info(f"[MTF Strategy] Отклонено: 1h модель уверена в HOLD (conf_1h={conf_1h:.3f} >= порог={self.confidence_threshold_1h}, но pred=0)")
+                            logger.info(f"[MTF Strategy] 1h вероятности: LONG={info.get('pred_1h')==1 and conf_1h or 0:.3f}, SHORT={info.get('pred_1h')==-1 and conf_1h or 0:.3f}, HOLD={conf_1h:.3f}")
                         else:
                             logger.info(f"[MTF Strategy] Отклонено: 1h не дает сигнал (conf_1h={conf_1h:.3f} < порог={self.confidence_threshold_1h})")
                     return 0, 0.0, {**info, "reason": "1h_no_signal"}
