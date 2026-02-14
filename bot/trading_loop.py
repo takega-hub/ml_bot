@@ -547,11 +547,11 @@ class TradingLoop:
                     model_path = self.state.symbol_models.get(symbol)
                     # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
                     if not model_path:
-                    # Пытаемся найти модель в папке ml_models
-                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                    if models:
-                        model_path = str(models[0])
-                        self.state.symbol_models[symbol] = model_path
+                        # Пытаемся найти модель в папке ml_models
+                        models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
+                        if models:
+                            model_path = str(models[0])
+                            self.state.symbol_models[symbol] = model_path
                     
                     if model_path:
                         logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
