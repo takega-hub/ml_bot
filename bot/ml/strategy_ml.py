@@ -625,7 +625,8 @@ class MLStrategy:
                             reason.append(f"short_prob {short_prob:.3f} < threshold {ensemble_min}")
                         if prob_diff < self.min_confidence_difference:
                             reason.append(f"prob_diff {prob_diff:.3f} < min_diff {self.min_confidence_difference}")
-                        logger.debug(f"[ml_strategy] predict: HOLD selected (conf={confidence:.3f}), reason: {', '.join(reason) if reason else 'no clear direction'}")
+                        logger.info(f"[ml_strategy] predict: HOLD selected (conf={confidence:.3f}), reason: {', '.join(reason) if reason else 'no clear direction'}")
+                        logger.info(f"[ml_strategy] predict: Probabilities - LONG: {long_prob:.3f}, SHORT: {short_prob:.3f}, HOLD: {hold_prob:.3f}, diff: {prob_diff:.3f}")
                 
                 # Fallback
                 if prediction == 0:
@@ -635,7 +636,7 @@ class MLStrategy:
                     if np.isnan(confidence) or not np.isfinite(confidence):
                         confidence = hold_prob if np.isfinite(hold_prob) else 0.0
                     if self._predict_debug_count <= 5:
-                        logger.debug(f"[ml_strategy] predict: Fallback to argmax: pred={prediction}, conf={confidence:.3f}")
+                        logger.info(f"[ml_strategy] predict: Fallback to argmax: pred={prediction}, conf={confidence:.3f}, max_prob_idx={prediction_idx}")
                 
                 # Обновляем историю уверенности
                 if len(self.confidence_history) >= self.max_history_size:
