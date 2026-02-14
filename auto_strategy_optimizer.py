@@ -110,6 +110,8 @@ class StrategyOptimizer:
         skip_training: bool = False,
         skip_comparison: bool = False,
         skip_mtf_testing: bool = False,
+        mtf_top_n: int = 5,
+        full_mtf_testing: bool = False,
     ):
         self.symbols = [s.upper() for s in symbols]
         self.days = days
@@ -119,6 +121,8 @@ class StrategyOptimizer:
         self.skip_training = skip_training
         self.skip_comparison = skip_comparison
         self.skip_mtf_testing = skip_mtf_testing
+        self.mtf_top_n = mtf_top_n
+        self.full_mtf_testing = full_mtf_testing
         
         self.python_exe = sys.executable
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -201,54 +205,37 @@ class StrategyOptimizer:
             return False
     
     def compare_models(self) -> bool:
-        """Сравнивает модели (15m и 1h отдельно)"""
+        """Сравнивает все модели (15m и 1h вместе)"""
         logger.info("[COMPARISON] Начало сравнения моделей")
+        logger.info("[COMPARISON] Тестирование всех моделей (15m и 1h) для всех символов...")
         
         try:
-            # Сравниваем 15m модели
-            logger.info("[COMPARISON] Сравнение 15m моделей...")
-            cmd_15m = [
+            # Тестируем все модели сразу (15m и 1h вместе)
+            # compare_ml_models.py автоматически определит интервал из имени модели
+            cmd = [
                 self.python_exe,
                 "compare_ml_models.py",
                 "--symbols", ",".join(self.symbols),
                 "--days", str(self.days),
                 "--output", "csv",
-                "--interval", "15m"
+                "--interval", "15m",  # Базовый интервал, но скрипт определит правильный из имени модели
+                "--detailed-analysis"
             ]
             
-            result_15m = subprocess.run(
-                cmd_15m,
+            logger.info(f"[COMPARISON] Команда: {' '.join(cmd)}")
+            
+            result = subprocess.run(
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=7200  # 2 часа таймаут
             )
             
-            if result_15m.returncode != 0:
-                logger.error("[COMPARISON] Ошибка сравнения 15m моделей")
-                logger.error(f"STDERR: {result_15m.stderr[-500:]}")
-            
-            # Сравниваем 1h модели
-            logger.info("[COMPARISON] Сравнение 1h моделей...")
-            cmd_1h = [
-                self.python_exe,
-                "compare_ml_models.py",
-                "--symbols", ",".join(self.symbols),
-                "--days", str(self.days),
-                "--output", "csv",
-                "--interval", "15m",  # Используем 15m данные для агрегации
-                "--only-1h"  # Только 1h модели
-            ]
-            
-            result_1h = subprocess.run(
-                cmd_1h,
-                capture_output=True,
-                text=True,
-                timeout=7200
-            )
-            
-            if result_1h.returncode != 0:
-                logger.error("[COMPARISON] Ошибка сравнения 1h моделей")
-                logger.error(f"STDERR: {result_1h.stderr[-500:]}")
+            if result.returncode != 0:
+                logger.error("[COMPARISON] Ошибка сравнения моделей")
+                logger.error(f"STDERR: {result.stderr[-500:]}")
+                logger.error(f"STDOUT: {result.stdout[-500:]}")
+                return False
             
             # Находим последний файл сравнения
             comparison_files = sorted(
@@ -260,6 +247,22 @@ class StrategyOptimizer:
             if comparison_files:
                 latest_file = comparison_files[0]
                 logger.info(f"[COMPARISON] Последний файл сравнения: {latest_file}")
+                
+                # Проверяем, что файл содержит и 15m, и 1h модели
+                try:
+                    df_check = pd.read_csv(latest_file)
+                    has_15m = df_check['model_filename'].str.contains('_15_|_15m', na=False).any()
+                    has_1h = df_check['model_filename'].str.contains('_60_|_1h', na=False).any()
+                    
+                    if has_15m and has_1h:
+                        logger.info("[COMPARISON] ✅ Файл содержит и 15m, и 1h модели")
+                    elif has_15m:
+                        logger.warning("[COMPARISON] ⚠️  Файл содержит только 15m модели")
+                    elif has_1h:
+                        logger.warning("[COMPARISON] ⚠️  Файл содержит только 1h модели")
+                except Exception as e:
+                    logger.warning(f"[COMPARISON] Не удалось проверить содержимое файла: {e}")
+                
                 return True
             else:
                 logger.warning("[COMPARISON] Файлы сравнения не найдены")
@@ -272,9 +275,203 @@ class StrategyOptimizer:
             self.log_error("COMPARISON", "ALL", e)
             return False
     
+    def select_top_models(self, symbol: str, timeframe: str, top_n: int = 5) -> List[str]:
+        """
+        Выбирает топ-N моделей для символа и таймфрейма на основе composite score.
+        
+        Args:
+            symbol: Символ
+            timeframe: '1h' или '15m'
+            top_n: Количество топ-моделей
+            
+        Returns:
+            Список имен моделей (без .pkl)
+        """
+        # Загружаем результаты сравнения моделей
+        comparison_files = sorted(
+            Path(".").glob("ml_models_comparison_*.csv"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True
+        )
+        
+        if not comparison_files:
+            logger.warning(f"[SELECTION] Не найдено файлов сравнения для {symbol}")
+            return []
+        
+        try:
+            df_comparison = pd.read_csv(comparison_files[0])
+            symbol_data = df_comparison[df_comparison['symbol'] == symbol].copy()
+            
+            # Фильтруем по таймфрейму
+            if timeframe == '1h':
+                filtered = symbol_data[
+                    (symbol_data['mode_suffix'] == '1h') |
+                    (symbol_data['model_filename'].str.contains('_60_|_1h', na=False))
+                ].copy()
+            else:  # 15m
+                filtered = symbol_data[
+                    (symbol_data['mode_suffix'] == '15m') |
+                    (symbol_data['model_filename'].str.contains('_15_|_15m', na=False))
+                ].copy()
+            
+            if filtered.empty:
+                logger.warning(f"[SELECTION] Не найдено {timeframe} моделей для {symbol}")
+                return []
+            
+            # Вычисляем composite score
+            filtered['composite_score'] = filtered.apply(
+                lambda row: self.calculate_composite_score({
+                    'total_pnl_pct': row.get('total_pnl_pct', 0),
+                    'win_rate': row.get('win_rate_pct', 0),
+                    'profit_factor': row.get('profit_factor', 0),
+                    'sharpe_ratio': row.get('sharpe_ratio', 0),
+                    'max_drawdown_pct': row.get('max_drawdown_pct', 100),
+                }),
+                axis=1
+            )
+            
+            # Сортируем по score
+            filtered = filtered.sort_values('composite_score', ascending=False)
+            
+            # Берем топ-N
+            top_models = filtered.head(top_n)
+            
+            # Извлекаем имена моделей (без .pkl)
+            model_names = [name.replace('.pkl', '') for name in top_models['model_filename'].tolist()]
+            
+            logger.info(f"[SELECTION] {symbol} {timeframe}: Выбрано {len(model_names)} топ-моделей")
+            for i, model in enumerate(model_names, 1):
+                score = top_models.iloc[i-1]['composite_score']
+                pnl = top_models.iloc[i-1]['total_pnl_pct']
+                logger.info(f"   {i}. {model} (score: {score:.2f}, PnL: {pnl:.2f}%)")
+            
+            return model_names
+            
+        except Exception as e:
+            self.log_error("SELECTION", symbol, e)
+            return []
+    
+    def test_optimized_mtf_combinations(self, symbol: str, top_n: int = 5) -> Optional[pd.DataFrame]:
+        """
+        Тестирует только топ-N комбинаций MTF стратегий для символа.
+        Выбирает топ-модели каждого таймфрейма на основе результатов одиночных тестов.
+        """
+        logger.info(f"[MTF TESTING] Начало оптимизированного тестирования MTF для {symbol}")
+        
+        try:
+            # Выбираем топ-модели
+            top_1h = self.select_top_models(symbol, '1h', top_n)
+            top_15m = self.select_top_models(symbol, '15m', top_n)
+            
+            if not top_1h or not top_15m:
+                logger.warning(f"[MTF TESTING] {symbol}: Не удалось выбрать топ-модели")
+                logger.info(f"[MTF TESTING] {symbol}: Запускаем полное тестирование всех комбинаций")
+                # Fallback: тестируем все комбинации
+                return self.test_mtf_combinations(symbol)
+            
+            logger.info(f"[MTF TESTING] {symbol}: Будет протестировано {len(top_1h)} × {len(top_15m)} = {len(top_1h) * len(top_15m)} комбинаций")
+            logger.info(f"[MTF TESTING] {symbol}: Вместо всех комбинаций (ускорение в ~{max(1, (5*5)/(len(top_1h)*len(top_15m))):.1f}x)")
+            
+            # Находим все модели для символа
+            from backtest_mtf_strategy import find_all_models_for_symbol
+            all_models_1h, all_models_15m = find_all_models_for_symbol(symbol)
+            
+            # Фильтруем только выбранные модели
+            selected_1h = []
+            selected_15m = []
+            
+            for model_path in all_models_1h:
+                model_name = Path(model_path).stem
+                for top_model in top_1h:
+                    if top_model in model_name or model_name in top_model:
+                        selected_1h.append(model_path)
+                        break
+            
+            for model_path in all_models_15m:
+                model_name = Path(model_path).stem
+                for top_model in top_15m:
+                    if top_model in model_name or model_name in top_model:
+                        selected_15m.append(model_path)
+                        break
+            
+            if not selected_1h or not selected_15m:
+                logger.warning(f"[MTF TESTING] {symbol}: Не удалось найти файлы выбранных моделей")
+                logger.info(f"[MTF TESTING] {symbol}: Запускаем полное тестирование")
+                return self.test_mtf_combinations(symbol)
+            
+            # Тестируем только выбранные комбинации
+            from backtest_mtf_strategy import run_mtf_backtest
+            results = []
+            
+            for model_1h_path in selected_1h:
+                for model_15m_path in selected_15m:
+                    model_1h_name = Path(model_1h_path).name
+                    model_15m_name = Path(model_15m_path).name
+                    
+                    logger.info(f"[MTF TESTING] {symbol}: Тестирование {model_1h_name} + {model_15m_name}")
+                    
+                    try:
+                        metrics = run_mtf_backtest(
+                            symbol=symbol,
+                            days_back=self.days,
+                            initial_balance=100.0,
+                            risk_per_trade=0.02,
+                            leverage=10,
+                            model_1h_path=str(model_1h_path),
+                            model_15m_path=str(model_15m_path),
+                            confidence_threshold_1h=0.50,
+                            confidence_threshold_15m=0.35,
+                            alignment_mode="strict",
+                            require_alignment=True,
+                        )
+                        
+                        if metrics:
+                            results.append({
+                                'model_1h': model_1h_name,
+                                'model_15m': model_15m_name,
+                                'symbol': symbol,
+                                'total_trades': metrics.total_trades,
+                                'winning_trades': metrics.winning_trades,
+                                'losing_trades': metrics.losing_trades,
+                                'win_rate': metrics.win_rate,
+                                'total_pnl': metrics.total_pnl,
+                                'total_pnl_pct': metrics.total_pnl_pct,
+                                'avg_win': metrics.avg_win,
+                                'avg_loss': metrics.avg_loss,
+                                'profit_factor': metrics.profit_factor,
+                                'max_drawdown_pct': metrics.max_drawdown_pct,
+                                'sharpe_ratio': metrics.sharpe_ratio,
+                            })
+                            logger.info(f"[MTF TESTING] {symbol}: {model_1h_name} + {model_15m_name} - "
+                                      f"PnL: {metrics.total_pnl_pct:.2f}%, WR: {metrics.win_rate:.1f}%")
+                    except Exception as e:
+                        logger.error(f"[MTF TESTING] {symbol}: Ошибка тестирования {model_1h_name} + {model_15m_name}: {e}")
+            
+            if not results:
+                logger.warning(f"[MTF TESTING] {symbol}: Нет результатов")
+                return None
+            
+            df_results = pd.DataFrame(results)
+            df_results = df_results.sort_values('total_pnl_pct', ascending=False)
+            
+            logger.info(f"[MTF TESTING] {symbol}: Протестировано {len(results)} комбинаций")
+            logger.info(f"[MTF TESTING] {symbol}: Лучшая комбинация: {df_results.iloc[0]['model_1h']} + {df_results.iloc[0]['model_15m']} "
+                      f"(PnL: {df_results.iloc[0]['total_pnl_pct']:.2f}%)")
+            
+            # Сохраняем результаты
+            filename = self.output_dir / f"mtf_combinations_{symbol}_{self.timestamp}.csv"
+            df_results.to_csv(filename, index=False)
+            logger.info(f"[MTF TESTING] {symbol}: Результаты сохранены в {filename}")
+            
+            return df_results
+                
+        except Exception as e:
+            self.log_error("MTF_TESTING", symbol, e)
+            return None
+    
     def test_mtf_combinations(self, symbol: str) -> Optional[pd.DataFrame]:
-        """Тестирует все комбинации MTF стратегий для символа"""
-        logger.info(f"[MTF TESTING] Начало тестирования MTF комбинаций для {symbol}")
+        """Тестирует все комбинации MTF стратегий для символа (fallback метод)"""
+        logger.info(f"[MTF TESTING] Начало полного тестирования MTF комбинаций для {symbol}")
         
         try:
             df_results = run_mtf_backtest_all_combinations(
@@ -486,12 +683,23 @@ class StrategyOptimizer:
         else:
             logger.info("\n[ЭТАП 2] СРАВНЕНИЕ МОДЕЛЕЙ - ПРОПУЩЕНО")
         
-        # Этап 3: Тестирование MTF комбинаций
+        # Этап 3: Тестирование MTF комбинаций (оптимизированное)
         if not self.skip_mtf_testing:
-            logger.info("\n[ЭТАП 3] ТЕСТИРОВАНИЕ MTF КОМБИНАЦИЙ")
+            logger.info("\n[ЭТАП 3] ТЕСТИРОВАНИЕ MTF КОМБИНАЦИЙ (ОПТИМИЗИРОВАННОЕ)")
+            logger.info("-" * 80)
+            if self.full_mtf_testing:
+                logger.info("[INFO] Используется полное тестирование всех MTF комбинаций")
+            else:
+                logger.info("[INFO] Используется оптимизированный подход:")
+                logger.info(f"  1. Выбираются топ-{self.mtf_top_n} моделей каждого таймфрейма на основе composite score")
+                logger.info(f"  2. Тестируются только {self.mtf_top_n * self.mtf_top_n} комбинаций вместо всех")
+                logger.info("  3. Ускорение процесса в 4-5 раз")
             logger.info("-" * 80)
             for symbol in self.symbols:
-                df_results = self.test_mtf_combinations(symbol)
+                if self.full_mtf_testing:
+                    df_results = self.test_mtf_combinations(symbol)
+                else:
+                    df_results = self.test_optimized_mtf_combinations(symbol, top_n=self.mtf_top_n)
                 self.mtf_results[symbol] = df_results
         else:
             logger.info("\n[ЭТАП 3] ТЕСТИРОВАНИЕ MTF КОМБИНАЦИЙ - ПРОПУЩЕНО")
@@ -574,6 +782,10 @@ def main():
                        help="Пропустить сравнение моделей")
     parser.add_argument("--skip-mtf-testing", action="store_true",
                        help="Пропустить тестирование MTF комбинаций")
+    parser.add_argument("--mtf-top-n", type=int, default=5,
+                       help="Количество топ-моделей каждого таймфрейма для MTF тестирования (по умолчанию 5)")
+    parser.add_argument("--full-mtf-testing", action="store_true",
+                       help="Тестировать все MTF комбинации вместо оптимизированного подхода")
     
     args = parser.parse_args()
     
@@ -595,6 +807,8 @@ def main():
         skip_training=args.skip_training,
         skip_comparison=args.skip_comparison,
         skip_mtf_testing=args.skip_mtf_testing,
+        mtf_top_n=args.mtf_top_n,
+        full_mtf_testing=args.full_mtf_testing,
     )
     
     # Запускаем оптимизацию

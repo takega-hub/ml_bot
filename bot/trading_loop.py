@@ -531,6 +531,8 @@ class TradingLoop:
                         # Эта свеча уже была обработана, пропускаем
                         logger.info(f"[{symbol}] ⏭️ Candle already processed: {candle_timestamp}, skipping signal generation")
                         logger.debug(f"[{symbol}] Last processed: {last_timestamp}, Current: {candle_timestamp}")
+                        # Логируем, была ли свеча обработана с сигналом или без
+                        logger.debug(f"[{symbol}] This candle was already processed in a previous iteration")
                         return
                 
                 # ВАЖНО: НЕ сохраняем timestamp здесь, а только после успешной обработки сигнала
@@ -657,8 +659,21 @@ class TradingLoop:
 
             # 5. Исполнение сделок
             # ВАЖНО: Проверяем уверенность перед открытием позиции
-            # Используем строго confidence_threshold из настроек (без динамического снижения)
-            min_confidence_for_trade = self.settings.ml_strategy.confidence_threshold
+            # Для MTF стратегии используем специфичные пороги, для обычной - общий порог
+            strategy = self.strategies.get(symbol)
+            is_mtf_strategy = strategy and hasattr(strategy, 'predict_combined')
+            
+            if is_mtf_strategy:
+                # Для MTF стратегии используем среднее между порогами 1h и 15m
+                # или минимальный из них, так как MTF уже проверила уверенность внутри
+                mtf_threshold_1h = getattr(strategy, 'confidence_threshold_1h', 0.50)
+                mtf_threshold_15m = getattr(strategy, 'confidence_threshold_15m', 0.35)
+                # Используем минимальный порог, так как MTF уже проверила оба порога
+                min_confidence_for_trade = min(mtf_threshold_1h, mtf_threshold_15m) * 0.9  # Небольшой запас
+                logger.debug(f"[{symbol}] MTF strategy: using threshold {min_confidence_for_trade:.2%} (1h: {mtf_threshold_1h:.2%}, 15m: {mtf_threshold_15m:.2%})")
+            else:
+                # Для обычной стратегии используем общий порог
+                min_confidence_for_trade = self.settings.ml_strategy.confidence_threshold
             
             if signal.action in (Action.LONG, Action.SHORT):
                 # Проверяем уверенность перед открытием позиции
@@ -667,6 +682,10 @@ class TradingLoop:
                         f"[{symbol}] ⏭️ Signal rejected for trade: confidence {confidence:.2%} < "
                         f"threshold {min_confidence_for_trade:.2%}"
                     )
+                    # Сохраняем timestamp даже при отклонении сигнала, чтобы не обрабатывать эту свечу повторно
+                    if candle_timestamp is not None:
+                        self.last_processed_candle[symbol] = candle_timestamp
+                        logger.debug(f"[{symbol}] ✅ Candle timestamp saved after signal rejection: {candle_timestamp}")
                     return  # Не открываем позицию, если уверенность ниже порога
                 
                 # КРИТИЧНО: Проверяем "свежесть" сигнала - открываем сделки только по свежим сигналам (не старше 15 минут)

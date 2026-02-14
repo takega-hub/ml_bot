@@ -1,0 +1,195 @@
+{
+  "timestamp": "2026-02-14T18:04:57.638645",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "recommendations": {
+    "BTCUSDT": {
+      "status": "success",
+      "best_single_1h": {
+        "model": "rf_BTCUSDT_60_1h",
+        "pnl": 62.630234648175474,
+        "wr": 62.96296296296296
+      },
+      "best_single_15m": {
+        "model": "rf_BTCUSDT_15_15m",
+        "pnl": 64.00141881618822,
+        "wr": 56.81818181818182
+      },
+      "best_mtf_actual": {
+        "model_1h": "quad_ensemble_BTCUSDT_60_1h.pkl",
+        "model_15m": "ensemble_BTCUSDT_15_15m.pkl",
+        "pnl": 99.89981624539293,
+        "wr": 71.21212121212122
+      },
+      "correlations": {
+        "score_correlation": -0.0049145603285450715,
+        "pnl_sum_correlation": 0.024282881262724144,
+        "pnl_avg_correlation": 0.024282881262724144,
+        "wr_avg_correlation": 0.15087426423851177
+      },
+      "top_predictions": [
+        {
+          "model_1h": "rf_BTCUSDT_60_1h",
+          "model_15m": "rf_BTCUSDT_15_15m",
+          "single_1h_pnl": 62.630234648175474,
+          "single_15m_pnl": 64.00141881618822,
+          "single_1h_wr": 62.96296296296296,
+          "single_15m_wr": 56.81818181818182,
+          "predicted_score": 59.40066830448292,
+          "actual_mtf_pnl": 86.61176228219986,
+          "actual_mtf_wr": 66.66666666666666,
+          "actual_mtf_score": 73.4253099777743,
+          "prediction_error": 14.024641673291384
+        },
+        {
+          "model_1h": "rf_BTCUSDT_60_1h",
+          "model_15m": "ensemble_BTCUSDT_15_15m",
+          "single_1h_pnl": 62.630234648175474,
+          "single_15m_pnl": 52.41487568896136,
+          "single_1h_wr": 62.96296296296296,
+          "single_15m_wr": 50.588235294117645,
+          "predicted_score": 55.608576596717384,
+          "actual_mtf_pnl": 94.17624841997495,
+          "actual_mtf_wr": 69.6969696969697,
+          "actual_mtf_score": 83.24511614200097,
+          "prediction_error": 27.636539545283583
+        },
+        {
+          "model_1h": "quad_ensemble_BTCUSDT_60_1h",
+          "model_15m": "rf_BTCUSDT_15_15m",
+          "single_1h_pnl": 56.43813213991379,
+          "single_15m_pnl": 64.00141881618822,
+          "single_1h_wr": 52.85714285714286,
+          "single_15m_wr": 56.81818181818182,
+          "predicted_score": 54.52365753402415,
+          "actual_mtf_pnl": 80.36540819182622,
+          "actual_mtf_wr": 65.71428571428571,
+          "actual_mtf_score": 70.47916512300182,
+          "prediction_error": 15.955507588977667
+        },
+        {
+          "model_1h": "rf_BTCUSDT_60_1h",
+          "model_15m": "quad_ensemble_BTCUSDT_15_15m",
+          "single_1h_pnl": 62.630234648175474,
+          "single_15m_pnl": 49.23885002920392,
+          "single_1h_wr": 62.96296296296296,
+          "single_15m_wr": 45.05494505494506,
+          "predicted_score": 54.303789382104355,
+          "actual_mtf_pnl": 80.03548932991072,
+          "actual_mtf_wr": 64.7887323943662,
+          "actual_mtf_score": 69.44258954054368,
+          "prediction_error": 15.138800158439324
+        },
+        {
+          "model_1h": "rf_BTCUSDT_60_1h",
+          "model_15m": "triple_ensemble_BTCUSDT_15_15m",
+          "single_1h_pnl": 62.630234648175474,
+          "single_15m_pnl": 43.46211294782418,
+          "single_1h_wr": 62.96296296296296,
+          "single_15m_wr": 47.5,
+          "predicted_score": 53.13288186148091,
+          "actual_mtf_pnl": 86.39893832116053,
+          "actual_mtf_wr": 67.6923076923077,
+          "actual_mtf_score": 77.5222491274541,
+          "prediction_error": 24.389367265973192
+        }
+      ],
+      "best_predicted_match_rank": 9
+    },
+    "ETHUSDT": {
+      "status": "success",
+      "best_single_1h": {
+        "model": "rf_ETHUSDT_60_1h",
+        "pnl": 79.71441213586718,
+        "wr": 62.85714285714285
+      },
+      "best_single_15m": {
+        "model": "triple_ensemble_ETHUSDT_15_15m",
+        "pnl": 100.22763573677624,
+        "wr": 53.03030303030303
+      },
+      "best_mtf_actual": {
+        "model_1h": "ensemble_ETHUSDT_60_1h.pkl",
+        "model_15m": "ensemble_ETHUSDT_15_15m.pkl",
+        "pnl": 156.62647635522558,
+        "wr": 69.49152542372882
+      },
+      "correlations": {
+        "score_correlation": 0.05010171837245228,
+        "pnl_sum_correlation": 0.013617702157665168,
+        "pnl_avg_correlation": 0.013617702157665168,
+        "wr_avg_correlation": 0.29804188779912294
+      },
+      "top_predictions": [
+        {
+          "model_1h": "rf_ETHUSDT_60_1h",
+          "model_15m": "triple_ensemble_ETHUSDT_15_15m",
+          "single_1h_pnl": 79.71441213586718,
+          "single_15m_pnl": 100.22763573677624,
+          "single_1h_wr": 62.85714285714285,
+          "single_15m_wr": 53.03030303030303,
+          "predicted_score": 69.64305440589548,
+          "actual_mtf_pnl": 142.2670316213363,
+          "actual_mtf_wr": 64.70588235294117,
+          "actual_mtf_score": 95.80567605762613,
+          "prediction_error": 26.162621651730646
+        },
+        {
+          "model_1h": "rf_ETHUSDT_60_1h",
+          "model_15m": "quad_ensemble_ETHUSDT_15_15m",
+          "single_1h_pnl": 79.71441213586718,
+          "single_15m_pnl": 94.96878380533911,
+          "single_1h_wr": 62.85714285714285,
+          "single_15m_wr": 51.49253731343284,
+          "predicted_score": 68.17403161592783,
+          "actual_mtf_pnl": 148.83289810393842,
+          "actual_mtf_wr": 65.9090909090909,
+          "actual_mtf_score": 98.51565252292006,
+          "prediction_error": 30.341620906992233
+        },
+        {
+          "model_1h": "rf_ETHUSDT_60_1h",
+          "model_15m": "rf_ETHUSDT_15_15m",
+          "single_1h_pnl": 79.71441213586718,
+          "single_15m_pnl": 94.72414797273518,
+          "single_1h_wr": 62.85714285714285,
+          "single_15m_wr": 52.980132450331126,
+          "predicted_score": 67.93531925532503,
+          "actual_mtf_pnl": 142.72479355993383,
+          "actual_mtf_wr": 64.8854961832061,
+          "actual_mtf_score": 95.26315075077099,
+          "prediction_error": 27.327831495445963
+        },
+        {
+          "model_1h": "rf_ETHUSDT_60_1h",
+          "model_15m": "xgb_ETHUSDT_15_15m",
+          "single_1h_pnl": 79.71441213586718,
+          "single_15m_pnl": 86.44450849629911,
+          "single_1h_wr": 62.85714285714285,
+          "single_15m_wr": 49.6,
+          "predicted_score": 65.99685381652915,
+          "actual_mtf_pnl": 138.88434431911384,
+          "actual_mtf_wr": 62.28070175438597,
+          "actual_mtf_score": 93.5457389397683,
+          "prediction_error": 27.548885123239145
+        },
+        {
+          "model_1h": "rf_ETHUSDT_60_1h",
+          "model_15m": "ensemble_ETHUSDT_15_15m",
+          "single_1h_pnl": 79.71441213586718,
+          "single_15m_pnl": 82.10033340318802,
+          "single_1h_wr": 62.85714285714285,
+          "single_15m_wr": 49.275362318840585,
+          "predicted_score": 64.65549785832025,
+          "actual_mtf_pnl": 148.83289810393842,
+          "actual_mtf_wr": 65.9090909090909,
+          "actual_mtf_score": 98.51565252292006,
+          "prediction_error": 33.86015466459982
+        }
+      ],
+      "best_predicted_match_rank": 6
+    }
+  }
+}
