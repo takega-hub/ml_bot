@@ -355,17 +355,59 @@ class TradingLoop:
             logger.info(f"[{symbol}] No cooldown, continuing...")
             
             # 1. Получаем данные (асинхронно, чтобы не блокировать event loop)
-            logger.info(f"[{symbol}] 📊 Fetching kline data...")
+            use_mtf = self.settings.ml_strategy.use_mtf_strategy
+            limit = 500 if use_mtf else 200  # Для MTF запрашиваем больше данных
+            
+            logger.info(f"[{symbol}] 📊 Fetching kline data (limit={limit})...")
             df = await asyncio.to_thread(
                 self.bybit.get_kline_df,
                 symbol,
                 self.settings.timeframe,
-                200
+                limit
             )
             logger.info(f"[{symbol}] ✅ Kline data received: {len(df) if not df.empty else 0} candles")
             if df.empty:
                 logger.warning(f"[{symbol}] ⚠️ No data received from exchange")
                 return
+            
+            # Для MTF стратегии загружаем кэшированные 1h данные из ml_data
+            # Проверяем актуальность и обновляем при необходимости
+            df_1h_cached = None
+            if use_mtf:
+                df_1h_cached = await asyncio.to_thread(self._load_cached_1h_data, symbol)
+                
+                # Проверяем актуальность данных
+                needs_update = False
+                if df_1h_cached is None or df_1h_cached.empty:
+                    logger.info(f"[{symbol}] ⚠️ No cached 1h data found, fetching from exchange...")
+                    needs_update = True
+                else:
+                    # Проверяем, актуальны ли данные (последняя свеча не старше 2 часов для 1h данных)
+                    if isinstance(df_1h_cached.index, pd.DatetimeIndex) and len(df_1h_cached) > 0:
+                        last_candle_time = df_1h_cached.index[-1]
+                        current_time = pd.Timestamp.now()
+                        hours_since_last = (current_time - last_candle_time).total_seconds() / 3600
+                        
+                        # Если последняя свеча старше 2 часов, обновляем кэш
+                        if hours_since_last > 2:
+                            logger.info(f"[{symbol}] ⚠️ Cached 1h data is outdated (last candle: {last_candle_time}, {hours_since_last:.1f}h ago), updating...")
+                            needs_update = True
+                        else:
+                            logger.debug(f"[{symbol}] ✅ Cached 1h data is fresh (last candle: {last_candle_time}, {hours_since_last:.1f}h ago)")
+                    else:
+                        logger.warning(f"[{symbol}] ⚠️ Could not check cache freshness, updating...")
+                        needs_update = True
+                
+                # Обновляем кэш если нужно
+                if needs_update:
+                    # Передаем существующий кэш для подгрузки только новых данных
+                    df_1h_cached = await asyncio.to_thread(self._fetch_and_cache_1h_data, symbol, df_1h_cached)
+                    if df_1h_cached is not None and not df_1h_cached.empty:
+                        logger.info(f"[{symbol}] ✅ Updated cache with {len(df_1h_cached)} 1h candles from exchange")
+                    else:
+                        logger.warning(f"[{symbol}] Failed to fetch 1h data, will aggregate from 15m")
+                else:
+                    logger.info(f"[{symbol}] ✅ Using cached 1h data ({len(df_1h_cached)} candles)")
 
             # 2. Инициализируем стратегию если нужно
             # Проверяем, нужно ли переинициализировать стратегию из-за изменения настроек MTF
@@ -587,7 +629,7 @@ class TradingLoop:
                         strategy.generate_signal,
                         row=row,
                         df_15m=df_for_strategy,  # 15m данные
-                        df_1h=None,  # Будет агрегировано внутри стратегии
+                        df_1h=df_1h_cached,  # 1h данные из кэша (если есть) или None (будет агрегировано)
                         has_position=has_pos,
                         current_price=current_price,
                         leverage=self.settings.leverage,
@@ -1276,6 +1318,132 @@ class TradingLoop:
                 # неизвестная сила — не блокируем, но логируем
                 logger.warning(f"Unknown signal strength '{strength}', allowing reverse by confidence only.")
         return True
+    
+    def _load_cached_1h_data(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Загружает кэшированные 1h данные из ml_data/{symbol}_60_cache.csv
+        
+        Returns:
+            DataFrame с 1h данными или None если файл не найден
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            cache_file = ml_data_dir / f"{symbol}_60_cache.csv"
+            
+            if not cache_file.exists():
+                return None
+            
+            df = pd.read_csv(cache_file)
+            
+            # Проверяем наличие необходимых колонок
+            required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            if not all(col in df.columns for col in required_cols):
+                logger.warning(f"[{symbol}] Cached 1h data missing required columns")
+                return None
+            
+            # Преобразуем timestamp в datetime
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                # Сортируем по времени и удаляем дубликаты
+                df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+            
+            # Берем последние 500 свечей (достаточно для 1h модели)
+            if len(df) > 500:
+                df = df.tail(500).reset_index(drop=True)
+            
+            # Устанавливаем timestamp как индекс для совместимости с MTF стратегией
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+            
+            logger.debug(f"[{symbol}] Loaded {len(df)} cached 1h candles from {cache_file}")
+            return df
+            
+        except Exception as e:
+            logger.warning(f"[{symbol}] Failed to load cached 1h data: {e}")
+            return None
+    
+    def _fetch_and_cache_1h_data(self, symbol: str, existing_cache: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
+        """
+        Запрашивает 1h данные с биржи и сохраняет в кэш.
+        Если есть существующий кэш, подгружает только новые данные.
+        
+        Args:
+            symbol: Торговая пара
+            existing_cache: Существующий кэш (если есть) для подгрузки только новых данных
+        
+        Returns:
+            DataFrame с 1h данными или None при ошибке
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            ml_data_dir.mkdir(exist_ok=True)
+            cache_file = ml_data_dir / f"{symbol}_60_cache.csv"
+            
+            # Определяем, с какого времени нужно подгружать данные
+            start_from = None
+            if existing_cache is not None and not existing_cache.empty:
+                if isinstance(existing_cache.index, pd.DatetimeIndex) and len(existing_cache) > 0:
+                    # Берем последнюю свечу из кэша и запрашиваем данные начиная с неё
+                    last_candle_time = existing_cache.index[-1]
+                    # Запрашиваем немного больше, чтобы перекрыть последнюю свечу (она может быть незакрыта)
+                    start_from = last_candle_time - pd.Timedelta(hours=1)
+                    logger.debug(f"[{symbol}] Updating cache from {last_candle_time} (will fetch from {start_from})")
+            
+            # Запрашиваем 500 свечей 1h с биржи
+            logger.info(f"[{symbol}] Fetching 1h data from exchange (limit=500)...")
+            df_new = self.bybit.get_kline_df(symbol, "60", 500)
+            
+            if df_new.empty:
+                logger.warning(f"[{symbol}] No 1h data received from exchange")
+                return existing_cache  # Возвращаем существующий кэш, если новый запрос пуст
+            
+            # Проверяем наличие необходимых колонок
+            required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            if not all(col in df_new.columns for col in required_cols):
+                logger.warning(f"[{symbol}] 1h data from exchange missing required columns")
+                return existing_cache
+            
+            # Преобразуем timestamp в datetime
+            if "timestamp" in df_new.columns:
+                df_new["timestamp"] = pd.to_datetime(df_new["timestamp"])
+                df_new = df_new.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+                df_new = df_new.set_index("timestamp")
+            elif not isinstance(df_new.index, pd.DatetimeIndex):
+                logger.warning(f"[{symbol}] Could not set timestamp index for new 1h data")
+                return existing_cache
+            
+            # Объединяем с существующим кэшем, если есть
+            if existing_cache is not None and not existing_cache.empty:
+                # Объединяем данные, удаляя дубликаты
+                df_combined = pd.concat([existing_cache, df_new])
+                df_combined = df_combined[~df_combined.index.duplicated(keep='last')]  # Оставляем последние значения для дубликатов
+                df_combined = df_combined.sort_index()
+                
+                # Берем последние 500 свечей
+                if len(df_combined) > 500:
+                    df_combined = df_combined.tail(500)
+                
+                df_final = df_combined
+                logger.info(f"[{symbol}] Merged cache: {len(existing_cache)} old + {len(df_new)} new = {len(df_final)} total candles")
+            else:
+                df_final = df_new
+                logger.info(f"[{symbol}] Created new cache with {len(df_final)} candles")
+            
+            # Сохраняем в кэш
+            try:
+                df_to_save = df_final.reset_index() if isinstance(df_final.index, pd.DatetimeIndex) else df_final.copy()
+                df_to_save.to_csv(cache_file, index=False)
+                logger.info(f"[{symbol}] ✅ Saved {len(df_final)} 1h candles to cache: {cache_file}")
+            except Exception as e:
+                logger.warning(f"[{symbol}] Failed to save 1h cache: {e}")
+            
+            return df_final
+            
+        except Exception as e:
+            logger.error(f"[{symbol}] Failed to fetch and cache 1h data: {e}", exc_info=True)
+            return existing_cache  # Возвращаем существующий кэш при ошибке
 
     async def _get_btc_signal(self) -> Optional[Dict]:
         """
