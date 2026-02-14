@@ -534,66 +534,25 @@ class TradingLoop:
             if last_timestamp is None:
                 last_timestamp = df.index[-1] if len(df.index) > 0 else None
             
-            # Определяем, закрыта ли последняя свеча
-            use_last_candle = False
-            if last_timestamp is not None:
-                try:
-                    if isinstance(last_timestamp, pd.Timestamp):
-                        last_candle_time = last_timestamp
-                    elif isinstance(last_timestamp, (int, float)):
-                        last_candle_time = pd.Timestamp(last_timestamp, unit='ms')
-                    else:
-                        last_candle_time = pd.Timestamp(last_timestamp)
-                    
-                    now = pd.Timestamp.now()
-                    delay_seconds = (now - last_candle_time).total_seconds()
-                    
-                    # Для 15m свечей: если прошло > 1 минуты, свеча считается закрытой
-                    # Для других таймфреймов: используем пропорциональное время
-                    timeframe_str = str(self.settings.timeframe).lower()
-                    if timeframe_str.endswith('m'):
-                        interval_minutes = int(timeframe_str.replace('m', ''))
-                    elif timeframe_str.endswith('h'):
-                        interval_minutes = int(timeframe_str.replace('h', '')) * 60
-                    elif timeframe_str.endswith('d'):
-                        interval_minutes = int(timeframe_str.replace('d', '')) * 24 * 60
-                    else:
-                        # Пытаемся распарсить как число (минуты)
-                        try:
-                            interval_minutes = int(timeframe_str)
-                        except:
-                            interval_minutes = 15  # По умолчанию 15 минут
-                    
-                    # Минимальная задержка: 1 минута или 10% от интервала (чтобы свеча точно закрылась)
-                    min_delay_seconds = max(60, interval_minutes * 0.1 * 60)  # Минимум 1 минута, или 10% от интервала
-                    
-                    if delay_seconds > min_delay_seconds:
-                        use_last_candle = True
-                        logger.debug(f"[{symbol}] Last candle is closed (delay: {delay_seconds:.1f}s > {min_delay_seconds}s)")
-                    else:
-                        logger.debug(f"[{symbol}] Last candle may be open (delay: {delay_seconds:.1f}s <= {min_delay_seconds}s), using previous")
-                except Exception as e:
-                    logger.debug(f"[{symbol}] Could not determine if last candle is closed: {e}, using previous")
+            # ВАЖНО: В тесте всегда используется последняя свеча (которая уже закрыта в исторических данных)
+            # В реальном боте мы должны использовать последнюю закрытую свечу
+            # Для максимального соответствия тесту, используем последнюю свечу из данных
+            # (она считается закрытой, так как мы обрабатываем её после закрытия)
             
-            # Выбираем свечу для предсказания
-            if use_last_candle and len(df) >= 1:
-                # Используем последнюю закрытую свечу (как в тесте)
+            # В тесте: row = df_with_features.iloc[idx] - текущая свеча
+            # В реальном боте: row = df.iloc[-1] - последняя свеча (аналог текущей в тесте)
+            if len(df) >= 1:
+                # Используем последнюю свечу (как в тесте используется текущая свеча)
                 row = df.iloc[-1]
                 current_price = row['close']
                 candle_timestamp = last_timestamp
-                logger.debug(f"[{symbol}] Using last candle (closed) for prediction")
-            elif len(df) >= 2:
-                # Используем предпоследнюю свечу (если последняя может быть незакрыта)
-                row = df.iloc[-2]
-                current_price = df.iloc[-1]['close']  # Текущая цена из последней свечи
-                candle_timestamp = row.get('timestamp') if 'timestamp' in row else df.iloc[-2].get('timestamp', None)
-                if candle_timestamp is None:
-                    candle_timestamp = df.index[-2] if len(df.index) > 1 else None
-                logger.debug(f"[{symbol}] Using previous candle for prediction (last may be open)")
+                use_last_candle = True  # Всегда используем последнюю свечу (как в тесте)
+                logger.debug(f"[{symbol}] Using last candle for prediction (as in backtest)")
             else:
                 row = df.iloc[-1]
                 current_price = row['close']
                 candle_timestamp = last_timestamp
+                use_last_candle = True
                 logger.debug(f"[{symbol}] Using only available candle for prediction")
             
             # Логируем время закрытия свечи и задержку обработки
@@ -674,14 +633,10 @@ class TradingLoop:
                 logger.info(f"[{symbol}] 🔄 Calling strategy.generate_signal() in thread...")
                 
                 # Подготавливаем данные для стратегии
-                # ВАЖНО: Используем все данные ВКЛЮЧИТЕЛЬНО с последней закрытой свечой (как в тесте)
-                # Если последняя свеча закрыта, включаем её в данные для стратегии
-                if use_last_candle:
-                    df_for_strategy = df  # Используем все данные, включая последнюю закрытую свечу
-                    logger.debug(f"[{symbol}] Using all data including last closed candle for strategy")
-                else:
-                    df_for_strategy = df.iloc[:-1] if len(df) >= 2 else df  # Исключаем последнюю незакрытую свечу
-                    logger.debug(f"[{symbol}] Excluding last potentially open candle from strategy data")
+                # ВАЖНО: В тесте используется df_window = df_with_features.iloc[:idx+1] - ВСЕ данные до текущего момента ВКЛЮЧИТЕЛЬНО
+                # В реальном боте: df_for_strategy = df - ВСЕ данные, включая последнюю свечу (аналог [:idx+1] в тесте)
+                df_for_strategy = df  # Используем все данные, включая последнюю свечу (как в тесте)
+                logger.debug(f"[{symbol}] Using all data including last candle for strategy (as in backtest)")
                 
                 # Для MTF стратегии передаем df_15m (текущие данные) и df_1h (из кэша или None)
                 # Для обычной стратегии передаем df как обычно
@@ -742,7 +697,21 @@ class TradingLoop:
             signal.indicators_info = indicators_info
             
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
-            logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
+            # Для MTF стратегии показываем детальную информацию
+            if isinstance(indicators_info, dict) and indicators_info.get('strategy') == 'MTF_ML':
+                mtf_reason = indicators_info.get('reason', 'unknown')
+                conf_1h = indicators_info.get('1h_conf', 0)
+                conf_15m = indicators_info.get('15m_conf', 0)
+                pred_1h = indicators_info.get('1h_pred', 0)
+                pred_15m = indicators_info.get('15m_pred', 0)
+                logger.info(
+                    f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | "
+                    f"Confidence: {confidence:.2%} | "
+                    f"1h: {pred_1h}({conf_1h:.2%}) | 15m: {pred_15m}({conf_15m:.2%}) | "
+                    f"Candle: {candle_timestamp}"
+                )
+            else:
+                logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
             # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)

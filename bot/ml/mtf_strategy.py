@@ -335,6 +335,8 @@ class MultiTimeframeMLStrategy:
             
             # Если нет сигнала, возвращаем HOLD
             if prediction == 0:
+                # Вычисляем максимальную уверенность для отображения
+                max_confidence = max(info.get("conf_1h", 0), info.get("conf_15m", 0))
                 return Signal(
                     timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
                     action=Action.HOLD,
@@ -343,7 +345,7 @@ class MultiTimeframeMLStrategy:
                     indicators_info={
                         "strategy": "MTF_ML",
                         "prediction": "HOLD",
-                        "confidence": round(confidence, 4),
+                        "confidence": round(max_confidence, 4),  # Показываем максимальную уверенность
                         "1h_pred": info.get("pred_1h"),
                         "1h_conf": round(info.get("conf_1h", 0), 4),
                         "15m_pred": info.get("pred_15m"),
