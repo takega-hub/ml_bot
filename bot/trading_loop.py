@@ -1436,6 +1436,12 @@ class TradingLoop:
                 # Проверяем, что индекс корректный
                 if not isinstance(df.index, pd.DatetimeIndex):
                     logger.warning(f"[{symbol}] Failed to create DatetimeIndex from timestamp column")
+                    # Удаляем некорректный кэш
+                    try:
+                        cache_file.unlink()
+                        logger.info(f"[{symbol}] Removed invalid cache file (no DatetimeIndex)")
+                    except Exception as e:
+                        logger.debug(f"[{symbol}] Could not remove invalid cache: {e}")
                     return None
                 
                 # Проверяем, что даты разумные (не 1970 год)
@@ -1444,6 +1450,12 @@ class TradingLoop:
                     last_date = df.index[-1]
                     if first_date.year < 2020 or last_date.year < 2020:
                         logger.warning(f"[{symbol}] Invalid dates in cache: first={first_date}, last={last_date}")
+                        # Удаляем некорректный кэш и возвращаем None для пересоздания
+                        try:
+                            cache_file.unlink()
+                            logger.info(f"[{symbol}] Removed invalid cache file (invalid dates), will recreate")
+                        except Exception as e:
+                            logger.warning(f"[{symbol}] Failed to remove invalid cache: {e}")
                         return None
             
             logger.debug(f"[{symbol}] Loaded {len(df)} cached 1h candles from {cache_file}")
@@ -1569,7 +1581,18 @@ class TradingLoop:
                             df_to_save = df_to_save[~invalid].copy()
                     
                     # Сохраняем timestamp в формате строки для читаемости
-                    df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    # Проверяем, что timestamp - это datetime перед форматированием
+                    if pd.api.types.is_datetime64_any_dtype(df_to_save["timestamp"]):
+                        df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        # Если это не datetime, пытаемся преобразовать сначала
+                        df_to_save["timestamp"] = pd.to_datetime(df_to_save["timestamp"], errors='coerce')
+                        invalid = df_to_save["timestamp"].isna()
+                        if invalid.any():
+                            logger.warning(f"[{symbol}] Removing {invalid.sum()} rows with invalid timestamps before saving")
+                            df_to_save = df_to_save[~invalid].copy()
+                        if len(df_to_save) > 0:
+                            df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
                 
                 df_to_save.to_csv(cache_file, index=False)
                 logger.info(f"[{symbol}] ✅ Saved {len(df_final)} 1h candles to cache: {cache_file}")
