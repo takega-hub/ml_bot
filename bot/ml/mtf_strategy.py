@@ -166,12 +166,20 @@ class MultiTimeframeMLStrategy:
         # Если агрегировали из 15m, то skip_feature_creation=False (нужно создать фичи)
         
         try:
-            pred_1h, conf_1h = self.strategy_1h.predict(df_1h, skip_feature_creation=skip_feature_creation_1h)
-            # ОТЛАДКА: Логируем первые несколько предсказаний
+            # Логируем информацию о данных перед предсказанием
             if not hasattr(self, '_debug_count'):
                 self._debug_count = 0
             if self._debug_count < 5:
-                logger.debug(f"[MTF Strategy] 1h предсказание #{self._debug_count}: pred={pred_1h}, conf={conf_1h:.3f}, порог={self.confidence_threshold_1h}")
+                logger.info(f"[MTF Strategy] 1h данные: {len(df_1h)} свечей, колонки: {df_1h.columns.tolist()[:10]}")
+                if isinstance(df_1h.index, pd.DatetimeIndex) and len(df_1h) > 0:
+                    logger.info(f"[MTF Strategy] 1h диапазон: {df_1h.index[0]} to {df_1h.index[-1]}")
+            
+            pred_1h, conf_1h = self.strategy_1h.predict(df_1h, skip_feature_creation=skip_feature_creation_1h)
+            # ОТЛАДКА: Логируем первые несколько предсказаний
+            if self._debug_count < 5:
+                logger.info(f"[MTF Strategy] 1h предсказание #{self._debug_count}: pred={pred_1h}, conf={conf_1h:.3f}, порог={self.confidence_threshold_1h}")
+                if conf_1h < self.confidence_threshold_1h:
+                    logger.info(f"[MTF Strategy] 1h сигнал отклонен: уверенность {conf_1h:.3f} < порог {self.confidence_threshold_1h}")
                 self._debug_count += 1
         except Exception as e:
             logger.error(f"[MTF Strategy] Ошибка предсказания 1h модели: {e}")

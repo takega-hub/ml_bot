@@ -683,10 +683,20 @@ class TradingLoop:
                     df_for_strategy = df.iloc[:-1] if len(df) >= 2 else df  # Исключаем последнюю незакрытую свечу
                     logger.debug(f"[{symbol}] Excluding last potentially open candle from strategy data")
                 
-                # Для MTF стратегии передаем df_15m (текущие данные) и df_1h=None (будет агрегировано внутри)
+                # Для MTF стратегии передаем df_15m (текущие данные) и df_1h (из кэша или None)
                 # Для обычной стратегии передаем df как обычно
                 if hasattr(strategy, 'predict_combined'):
-                    # Это MTF стратегия - передаем df_15m
+                    # Это MTF стратегия - передаем df_15m и df_1h
+                    # Логируем информацию о данных для диагностики
+                    if df_1h_cached is not None and not df_1h_cached.empty:
+                        logger.debug(f"[{symbol}] MTF: Using cached 1h data ({len(df_1h_cached)} candles)")
+                        if isinstance(df_1h_cached.index, pd.DatetimeIndex) and len(df_1h_cached) > 0:
+                            logger.debug(f"[{symbol}] MTF: 1h data range: {df_1h_cached.index[0]} to {df_1h_cached.index[-1]}")
+                    else:
+                        logger.debug(f"[{symbol}] MTF: No cached 1h data, will aggregate from 15m")
+                    
+                    logger.debug(f"[{symbol}] MTF: 15m data: {len(df_for_strategy)} candles")
+                    
                     signal = await asyncio.to_thread(
                         strategy.generate_signal,
                         row=row,
