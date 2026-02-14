@@ -544,26 +544,26 @@ class TradingLoop:
                 
                 if not use_mtf:
                     # Используем обычную стратегию (15m или 1h)
-                model_path = self.state.symbol_models.get(symbol)
-                # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
-                if not model_path:
+                    model_path = self.state.symbol_models.get(symbol)
+                    # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
+                    if not model_path:
                     # Пытаемся найти модель в папке ml_models
                     models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
                     if models:
                         model_path = str(models[0])
                         self.state.symbol_models[symbol] = model_path
-                
-                if model_path:
-                    logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
-                    self.strategies[symbol] = MLStrategy(
-                        model_path=model_path,
-                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
-                    )
-                    logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
-                else:
-                    logger.warning(f"No model found for {symbol}, skipping...")
-                    return
+                    
+                    if model_path:
+                        logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
+                        self.strategies[symbol] = MLStrategy(
+                            model_path=model_path,
+                            confidence_threshold=self.settings.ml_strategy.confidence_threshold,
+                            min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                        )
+                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
+                    else:
+                        logger.warning(f"No model found for {symbol}, skipping...")
+                        return
 
             # 3. Генерируем сигнал
             strategy = self.strategies[symbol]
