@@ -355,19 +355,49 @@ class TradingLoop:
             logger.info(f"[{symbol}] No cooldown, continuing...")
             
             # 1. Получаем данные (асинхронно, чтобы не блокировать event loop)
+            # Используем кэширование для 15m данных, чтобы не загружать все 500 свечей каждый раз
             use_mtf = self.settings.ml_strategy.use_mtf_strategy
-            limit = 500 if use_mtf else 200  # Для MTF запрашиваем больше данных
+            required_limit = 500 if use_mtf else 200  # Для MTF запрашиваем больше данных
             
-            logger.info(f"[{symbol}] 📊 Fetching kline data (limit={limit})...")
-            df = await asyncio.to_thread(
-                self.bybit.get_kline_df,
-                symbol,
-                self.settings.timeframe,
-                limit
-            )
-            logger.info(f"[{symbol}] ✅ Kline data received: {len(df) if not df.empty else 0} candles")
+            # Загружаем кэшированные 15m данные
+            df = await asyncio.to_thread(self._load_cached_15m_data, symbol)
+            
+            # Проверяем актуальность данных
+            needs_update = False
+            if df is None or df.empty:
+                logger.info(f"[{symbol}] ⚠️ No cached 15m data found, fetching from exchange...")
+                needs_update = True
+            else:
+                # Проверяем, актуальны ли данные (последняя свеча не старше 30 минут для 15m данных)
+                if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
+                    last_candle_time = df.index[-1]
+                    current_time = pd.Timestamp.now()
+                    minutes_since_last = (current_time - last_candle_time).total_seconds() / 60
+                    
+                    # Если последняя свеча старше 30 минут или недостаточно данных, обновляем кэш
+                    if minutes_since_last > 30 or len(df) < required_limit:
+                        logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated or insufficient (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, have {len(df)} candles, need {required_limit}), updating...")
+                        needs_update = True
+                    else:
+                        logger.debug(f"[{symbol}] ✅ Cached 15m data is fresh (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, {len(df)} candles)")
+                else:
+                    logger.warning(f"[{symbol}] ⚠️ Could not check cache freshness, updating...")
+                    needs_update = True
+            
+            # Обновляем кэш если нужно
+            if needs_update:
+                # Подгружаем только новые данные
+                df = await asyncio.to_thread(self._fetch_and_cache_15m_data, symbol, df, required_limit)
+                if df is not None and not df.empty:
+                    logger.info(f"[{symbol}] ✅ Updated cache with {len(df)} 15m candles from exchange")
+                else:
+                    logger.warning(f"[{symbol}] ⚠️ Failed to fetch 15m data from exchange")
+                    return
+            else:
+                logger.info(f"[{symbol}] ✅ Using cached 15m data ({len(df)} candles)")
+            
             if df.empty:
-                logger.warning(f"[{symbol}] ⚠️ No data received from exchange")
+                logger.warning(f"[{symbol}] ⚠️ No data available")
                 return
             
             # Для MTF стратегии загружаем кэшированные 1h данные из ml_data
@@ -1587,6 +1617,233 @@ class TradingLoop:
             
         except Exception as e:
             logger.error(f"[{symbol}] Failed to fetch and cache 1h data: {e}", exc_info=True)
+            return existing_cache
+    
+    def _load_cached_15m_data(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Загружает кэшированные 15m данные из ml_data/{symbol}_15_cache.csv
+        
+        Returns:
+            DataFrame с 15m данными или None если файл не найден
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            cache_file = ml_data_dir / f"{symbol}_15_cache.csv"
+            
+            if not cache_file.exists():
+                return None
+            
+            df = pd.read_csv(cache_file)
+            
+            # Проверяем наличие необходимых колонок
+            required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            if not all(col in df.columns for col in required_cols):
+                logger.warning(f"[{symbol}] Cached 15m data missing required columns")
+                return None
+            
+            # Преобразуем timestamp в datetime
+            if "timestamp" in df.columns:
+                # Парсим timestamp: может быть строка, datetime или число (миллисекунды)
+                if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                    # Если это число, интерпретируем как миллисекунды
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms', errors='coerce')
+                else:
+                    # Если это строка или datetime, парсим как обычно
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+                # Удаляем строки с некорректными датами
+                invalid_dates = df["timestamp"].isna()
+                if invalid_dates.any():
+                    logger.warning(f"[{symbol}] Found {invalid_dates.sum()} rows with invalid timestamps in cache, removing them")
+                    df = df[~invalid_dates].copy()
+                
+                if len(df) == 0:
+                    logger.warning(f"[{symbol}] No valid data after timestamp parsing")
+                    return None
+                
+                # Сортируем по времени и удаляем дубликаты
+                df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+            
+            # Устанавливаем timestamp как индекс
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+                # Проверяем, что индекс корректный
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    logger.warning(f"[{symbol}] Failed to create DatetimeIndex from timestamp column")
+                    # Удаляем некорректный кэш
+                    try:
+                        cache_file.unlink()
+                        logger.info(f"[{symbol}] Removed invalid cache file (no DatetimeIndex)")
+                    except Exception as e:
+                        logger.debug(f"[{symbol}] Could not remove invalid cache: {e}")
+                    return None
+                
+                # Проверяем, что даты разумные (не 1970 год)
+                if len(df) > 0:
+                    first_date = df.index[0]
+                    last_date = df.index[-1]
+                    if first_date.year < 2020 or last_date.year < 2020:
+                        logger.warning(f"[{symbol}] Invalid dates in cache: first={first_date}, last={last_date}")
+                        # Удаляем некорректный кэш и возвращаем None для пересоздания
+                        try:
+                            cache_file.unlink()
+                            logger.info(f"[{symbol}] Removed invalid cache file (invalid dates), will recreate")
+                        except Exception as e:
+                            logger.warning(f"[{symbol}] Failed to remove invalid cache: {e}")
+                        return None
+            
+            logger.debug(f"[{symbol}] Loaded {len(df)} cached 15m candles from {cache_file}")
+            if len(df) > 0:
+                logger.debug(f"[{symbol}] Cache date range: {df.index[0]} to {df.index[-1]}")
+            return df
+            
+        except Exception as e:
+            logger.warning(f"[{symbol}] Failed to load cached 15m data: {e}")
+            return None
+    
+    def _fetch_and_cache_15m_data(self, symbol: str, existing_cache: Optional[pd.DataFrame] = None, required_limit: int = 500) -> Optional[pd.DataFrame]:
+        """
+        Запрашивает 15m данные с биржи и сохраняет в кэш.
+        Если есть существующий кэш, подгружает только новые данные.
+        
+        Args:
+            symbol: Торговая пара
+            existing_cache: Существующий кэш (если есть) для подгрузки только новых данных
+            required_limit: Минимальное количество свечей, которое нужно иметь
+        
+        Returns:
+            DataFrame с 15m данными или None при ошибке
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            ml_data_dir.mkdir(exist_ok=True)
+            cache_file = ml_data_dir / f"{symbol}_15_cache.csv"
+            
+            # Определяем, сколько свечей нужно запросить
+            if existing_cache is not None and not existing_cache.empty:
+                if isinstance(existing_cache.index, pd.DatetimeIndex) and len(existing_cache) > 0:
+                    # Если есть кэш, запрашиваем только последние свечи для обновления
+                    # Запрашиваем достаточно, чтобы покрыть последние 2 часа (8 свечей) + небольшой запас
+                    limit = min(50, required_limit)  # Подгружаем максимум 50 свечей для обновления
+                    logger.debug(f"[{symbol}] Updating cache: have {len(existing_cache)} candles, fetching {limit} new ones")
+                else:
+                    limit = required_limit
+            else:
+                # Если кэша нет, запрашиваем полное количество
+                limit = required_limit
+            
+            # Запрашиваем 15m данные с биржи
+            # Используем "15" для 15-минутных свечей (независимо от основного timeframe)
+            logger.info(f"[{symbol}] Fetching 15m data from exchange (limit={limit})...")
+            df_new = self.bybit.get_kline_df(symbol, "15", limit)
+            
+            if df_new.empty:
+                logger.warning(f"[{symbol}] No 15m data received from exchange")
+                return existing_cache  # Возвращаем существующий кэш, если новый запрос пуст
+            
+            # Проверяем наличие необходимых колонок
+            required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+            if not all(col in df_new.columns for col in required_cols):
+                logger.warning(f"[{symbol}] 15m data from exchange missing required columns")
+                return existing_cache
+            
+            # Преобразуем timestamp в datetime
+            if "timestamp" in df_new.columns:
+                # Парсим timestamp: может быть строка, datetime или число (миллисекунды)
+                if pd.api.types.is_numeric_dtype(df_new["timestamp"]):
+                    # Если это число, интерпретируем как миллисекунды
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], unit='ms', errors='coerce')
+                else:
+                    # Если это строка или datetime, парсим как обычно
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors='coerce')
+                # Удаляем строки с некорректными датами
+                invalid_dates = df_new["timestamp"].isna()
+                if invalid_dates.any():
+                    logger.warning(f"[{symbol}] Found {invalid_dates.sum()} rows with invalid timestamps from exchange, removing them")
+                    df_new = df_new[~invalid_dates].copy()
+                
+                if len(df_new) == 0:
+                    logger.warning(f"[{symbol}] No valid data after timestamp parsing from exchange")
+                    return existing_cache
+                
+                df_new = df_new.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+                df_new = df_new.set_index("timestamp")
+                
+                # Проверяем, что индекс корректный и даты разумные
+                if not isinstance(df_new.index, pd.DatetimeIndex):
+                    logger.warning(f"[{symbol}] Failed to create DatetimeIndex from exchange data")
+                    return existing_cache
+                
+                if len(df_new) > 0:
+                    first_date = df_new.index[0]
+                    last_date = df_new.index[-1]
+                    if first_date.year < 2020 or last_date.year < 2020:
+                        logger.warning(f"[{symbol}] Invalid dates from exchange: first={first_date}, last={last_date}")
+                        return existing_cache
+                    logger.debug(f"[{symbol}] Exchange data date range: {first_date} to {last_date}")
+            elif not isinstance(df_new.index, pd.DatetimeIndex):
+                logger.warning(f"[{symbol}] Could not set timestamp index for new 15m data")
+                return existing_cache
+            
+            # Объединяем с существующим кэшем, если есть
+            if existing_cache is not None and not existing_cache.empty:
+                # Объединяем данные, удаляя дубликаты
+                df_combined = pd.concat([existing_cache, df_new])
+                df_combined = df_combined[~df_combined.index.duplicated(keep='last')]  # Оставляем последние значения для дубликатов
+                df_combined = df_combined.sort_index()
+                
+                # Берем последние required_limit свечей (или больше, если нужно)
+                if len(df_combined) > required_limit:
+                    df_combined = df_combined.tail(required_limit)
+                
+                df_final = df_combined
+                logger.info(f"[{symbol}] Merged cache: {len(existing_cache)} old + {len(df_new)} new = {len(df_final)} total candles")
+            else:
+                df_final = df_new
+                logger.info(f"[{symbol}] Created new cache with {len(df_final)} candles")
+            
+            # Сохраняем в кэш
+            try:
+                df_to_save = df_final.reset_index() if isinstance(df_final.index, pd.DatetimeIndex) else df_final.copy()
+                
+                # Убеждаемся, что timestamp в правильном формате для сохранения
+                if "timestamp" in df_to_save.columns:
+                    # Проверяем, что timestamp - это datetime, а не что-то другое
+                    if not pd.api.types.is_datetime64_any_dtype(df_to_save["timestamp"]):
+                        # Если это не datetime, пытаемся преобразовать
+                        df_to_save["timestamp"] = pd.to_datetime(df_to_save["timestamp"], errors='coerce')
+                        # Удаляем некорректные даты
+                        invalid = df_to_save["timestamp"].isna()
+                        if invalid.any():
+                            logger.warning(f"[{symbol}] Removing {invalid.sum()} rows with invalid timestamps before saving")
+                            df_to_save = df_to_save[~invalid].copy()
+                    
+                    # Сохраняем timestamp в формате строки для читаемости
+                    # Проверяем, что timestamp - это datetime перед форматированием
+                    if pd.api.types.is_datetime64_any_dtype(df_to_save["timestamp"]):
+                        df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        # Если это не datetime, пытаемся преобразовать сначала
+                        df_to_save["timestamp"] = pd.to_datetime(df_to_save["timestamp"], errors='coerce')
+                        invalid = df_to_save["timestamp"].isna()
+                        if invalid.any():
+                            logger.warning(f"[{symbol}] Removing {invalid.sum()} rows with invalid timestamps before saving")
+                            df_to_save = df_to_save[~invalid].copy()
+                        if len(df_to_save) > 0:
+                            df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                
+                df_to_save.to_csv(cache_file, index=False)
+                logger.info(f"[{symbol}] ✅ Saved {len(df_final)} 15m candles to cache: {cache_file}")
+                if len(df_to_save) > 0:
+                    logger.debug(f"[{symbol}] Saved cache date range: {df_to_save['timestamp'].iloc[0]} to {df_to_save['timestamp'].iloc[-1]}")
+            except Exception as e:
+                logger.warning(f"[{symbol}] Failed to save 15m cache: {e}", exc_info=True)
+            
+            return df_final
+            
+        except Exception as e:
+            logger.error(f"[{symbol}] Failed to fetch and cache 15m data: {e}", exc_info=True)
             return existing_cache  # Возвращаем существующий кэш при ошибке
 
     async def _get_btc_signal(self) -> Optional[Dict]:

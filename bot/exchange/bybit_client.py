@@ -1,4 +1,5 @@
 import time
+import logging
 from typing import Any, Dict, Optional, List
 
 import pandas as pd
@@ -6,6 +7,8 @@ from pybit.unified_trading import HTTP
 from pybit.exceptions import FailedRequestError
 
 from bot.config import ApiSettings
+
+logger = logging.getLogger(__name__)
 
 
 class BybitClient:
@@ -313,7 +316,7 @@ class BybitClient:
             is_first_batch = True  # Флаг для первого батча
             batch_count = 0  # Счетчик батчей для диагностики
             
-            print(f"[bybit_client] Загрузка данных батчами: требуется {limit} свечей, интервал {bybit_interval}, interval_ms={interval_ms}ms")
+            logger.debug(f"[bybit_client] Загрузка данных батчами: требуется {limit} свечей, интервал {bybit_interval}, interval_ms={interval_ms}ms")
             
             while remaining > 0:
                 batch_count += 1
@@ -426,7 +429,7 @@ class BybitClient:
                 current_end = oldest_ts - 1  # Минус 1 мс чтобы не дублировать последнюю свечу
                 
                 remaining -= len(batch_rows)
-                print(f"[bybit_client] Батч {batch_count}: получено {len(batch_rows)} свечей, осталось {remaining}, всего загружено {len(all_rows)}")
+                logger.debug(f"[bybit_client] Батч {batch_count}: получено {len(batch_rows)} свечей, осталось {remaining}, всего загружено {len(all_rows)}")
                 
                 # Если получили меньше данных, чем запрашивали, значит данных больше нет
                 if len(raw_list) < batch_limit:
