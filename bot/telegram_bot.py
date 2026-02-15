@@ -1768,7 +1768,10 @@ class TelegramBot:
             "reverse_min_strength": ("Мин. сила для реверса", "сильное", "Пример: сильное или очень_сильное"),
             "trailing_stop_activation_pct": ("Активация трейлинг стопа (в %)", "0.3", "Пример: 0.3 означает 0.3%"),
             "trailing_stop_distance_pct": ("Расстояние трейлинг стопа (в %)", "0.2", "Пример: 0.2 означает 0.2%"),
-            "breakeven_activation_pct": ("Активация безубытка (в %)", "0.5", "Пример: 0.5 означает 0.5%"),
+            "breakeven_level1_activation_pct": ("Активация 1-й ступени безубытка (в %)", "0.5", "Пример: 0.5 означает 0.5%"),
+            "breakeven_level1_sl_pct": ("SL для 1-й ступени безубытка (в %)", "0.2", "Пример: 0.2 означает 0.2%"),
+            "breakeven_level2_activation_pct": ("Активация 2-й ступени безубытка (в %)", "1.0", "Пример: 1.0 означает 1.0%"),
+            "breakeven_level2_sl_pct": ("SL для 2-й ступени безубытка (в %)", "0.5", "Пример: 0.5 означает 0.5%"),
         }
         
         if setting_name not in descriptions:
@@ -1977,11 +1980,29 @@ class TelegramBot:
                     await update.message.reply_text("❌ Значение должно быть от 0.05 до 2%")
                     return
             
-            elif setting_name == "breakeven_activation_pct":
+            elif setting_name == "breakeven_level1_activation_pct":
                 if 0.1 <= value <= 5.0:
-                    risk.breakeven_activation_pct = value / 100.0
+                    risk.breakeven_level1_activation_pct = value / 100.0
                 else:
                     await update.message.reply_text("❌ Значение должно быть от 0.1 до 5%")
+                    return
+            elif setting_name == "breakeven_level1_sl_pct":
+                if 0.05 <= value <= 2.0:
+                    risk.breakeven_level1_sl_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.05 до 2%")
+                    return
+            elif setting_name == "breakeven_level2_activation_pct":
+                if 0.1 <= value <= 5.0:
+                    risk.breakeven_level2_activation_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.1 до 5%")
+                    return
+            elif setting_name == "breakeven_level2_sl_pct":
+                if 0.05 <= value <= 2.0:
+                    risk.breakeven_level2_sl_pct = value / 100.0
+                else:
+                    await update.message.reply_text("❌ Значение должно быть от 0.05 до 2%")
                     return
             
             elif setting_name == "base_order_usd":
@@ -2041,7 +2062,8 @@ class TelegramBot:
             text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
             text += f"💎 Частичное закрытие: {'✅ Включено' if risk.enable_partial_close else '❌ Выключено'}\n"
             text += f"🛡️ Безубыток: {'✅ Включен' if risk.enable_breakeven else '❌ Выключен'}\n"
-            text += f"   Активация при: {risk.breakeven_activation_pct*100:.2f}%\n\n"
+            text += f"   1-я ступень: при {risk.breakeven_level1_activation_pct*100:.2f}% → SL {risk.breakeven_level1_sl_pct*100:.2f}%\n"
+            text += f"   2-я ступень: при {risk.breakeven_level2_activation_pct*100:.2f}% → SL {risk.breakeven_level2_sl_pct*100:.2f}%\n\n"
             text += f"❄️ Cooldown после убытков: {'✅ Включен' if risk.enable_loss_cooldown else '❌ Выключен'}\n"
             
             keyboard = [
@@ -2069,7 +2091,10 @@ class TelegramBot:
                 [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],
                 [InlineKeyboardButton(f"💎 Частичное закрытие: {'✅' if risk.enable_partial_close else '❌'}", callback_data="toggle_risk_enable_partial_close")],
                 [InlineKeyboardButton(f"🛡️ Безубыток: {'✅' if risk.enable_breakeven else '❌'}", callback_data="toggle_risk_enable_breakeven")],
-                [InlineKeyboardButton(f"   Активация: {risk.breakeven_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_activation_pct")],
+                [InlineKeyboardButton(f"   1-я активация: {risk.breakeven_level1_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_level1_activation_pct")],
+                [InlineKeyboardButton(f"   1-я SL: {risk.breakeven_level1_sl_pct*100:.2f}%", callback_data="edit_risk_breakeven_level1_sl_pct")],
+                [InlineKeyboardButton(f"   2-я активация: {risk.breakeven_level2_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_level2_activation_pct")],
+                [InlineKeyboardButton(f"   2-я SL: {risk.breakeven_level2_sl_pct*100:.2f}%", callback_data="edit_risk_breakeven_level2_sl_pct")],
                 [InlineKeyboardButton(f"❄️ Cooldown: {'✅' if risk.enable_loss_cooldown else '❌'}", callback_data="toggle_risk_enable_loss_cooldown")],
                 [InlineKeyboardButton("🔄 Сбросить на стандартные", callback_data="reset_risk_defaults")],
                 [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
@@ -2301,7 +2326,10 @@ class TelegramBot:
                 "trailing_stop_distance_pct": self.settings.risk.trailing_stop_distance_pct,
                 "enable_partial_close": self.settings.risk.enable_partial_close,
                 "enable_breakeven": self.settings.risk.enable_breakeven,
-                "breakeven_activation_pct": self.settings.risk.breakeven_activation_pct,
+                "breakeven_level1_activation_pct": self.settings.risk.breakeven_level1_activation_pct,
+                "breakeven_level1_sl_pct": self.settings.risk.breakeven_level1_sl_pct,
+                "breakeven_level2_activation_pct": self.settings.risk.breakeven_level2_activation_pct,
+                "breakeven_level2_sl_pct": self.settings.risk.breakeven_level2_sl_pct,
                 "enable_loss_cooldown": self.settings.risk.enable_loss_cooldown,
                 "fee_rate": self.settings.risk.fee_rate,
                 "mid_term_tp_pct": self.settings.risk.mid_term_tp_pct,
@@ -2497,7 +2525,8 @@ class TelegramBot:
         text += f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%\n\n"
         text += f"💎 Частичное закрытие: {'✅ Включено' if risk.enable_partial_close else '❌ Выключено'}\n"
         text += f"🛡️ Безубыток: {'✅ Включен' if risk.enable_breakeven else '❌ Выключен'}\n"
-        text += f"   Активация при: {risk.breakeven_activation_pct*100:.2f}%\n\n"
+        text += f"   1-я ступень: при {risk.breakeven_level1_activation_pct*100:.2f}% → SL {risk.breakeven_level1_sl_pct*100:.2f}%\n"
+        text += f"   2-я ступень: при {risk.breakeven_level2_activation_pct*100:.2f}% → SL {risk.breakeven_level2_sl_pct*100:.2f}%\n\n"
         text += f"❄️ Cooldown после убытков: {'✅ Включен' if risk.enable_loss_cooldown else '❌ Выключен'}\n"
         
         keyboard = [
@@ -2524,7 +2553,10 @@ class TelegramBot:
             [InlineKeyboardButton(f"   Расстояние: {risk.trailing_stop_distance_pct*100:.2f}%", callback_data="edit_risk_trailing_stop_distance_pct")],
             [InlineKeyboardButton(f"💎 Частичное закрытие: {'✅' if risk.enable_partial_close else '❌'}", callback_data="toggle_risk_enable_partial_close")],
             [InlineKeyboardButton(f"🛡️ Безубыток: {'✅' if risk.enable_breakeven else '❌'}", callback_data="toggle_risk_enable_breakeven")],
-            [InlineKeyboardButton(f"   Активация: {risk.breakeven_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_activation_pct")],
+            [InlineKeyboardButton(f"   1-я активация: {risk.breakeven_level1_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_level1_activation_pct")],
+            [InlineKeyboardButton(f"   1-я SL: {risk.breakeven_level1_sl_pct*100:.2f}%", callback_data="edit_risk_breakeven_level1_sl_pct")],
+            [InlineKeyboardButton(f"   2-я активация: {risk.breakeven_level2_activation_pct*100:.2f}%", callback_data="edit_risk_breakeven_level2_activation_pct")],
+            [InlineKeyboardButton(f"   2-я SL: {risk.breakeven_level2_sl_pct*100:.2f}%", callback_data="edit_risk_breakeven_level2_sl_pct")],
             [InlineKeyboardButton(f"❄️ Cooldown: {'✅' if risk.enable_loss_cooldown else '❌'}", callback_data="toggle_risk_enable_loss_cooldown")],
             [InlineKeyboardButton("🔄 Сбросить на стандартные", callback_data="reset_risk_defaults")],
             [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],

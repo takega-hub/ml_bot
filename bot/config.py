@@ -148,9 +148,12 @@ class RiskParams:
     profit_protection_activation_pct: float = 0.01  # Активировать при прибыли 1%
     profit_protection_retreat_pct: float = 0.003  # Закрыть при откате 0.3%
     
-    # Безубыток
+    # Безубыток (многоуровневый)
     enable_breakeven: bool = True
-    breakeven_activation_pct: float = 0.005  # Активировать при прибыли 0.5%
+    breakeven_level1_activation_pct: float = 0.005  # Активировать 1-ю ступень при прибыли 0.5%
+    breakeven_level1_sl_pct: float = 0.002  # SL для 1-й ступени: 0.2% от входа
+    breakeven_level2_activation_pct: float = 0.01  # Активировать 2-ю ступень при прибыли 1.0%
+    breakeven_level2_sl_pct: float = 0.005  # SL для 2-й ступени: 0.5% от входа
 
     # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
     fee_rate: float = 0.0006
@@ -192,8 +195,14 @@ class RiskParams:
             self.profit_protection_activation_pct /= 100.0
         if self.profit_protection_retreat_pct >= 1:
             self.profit_protection_retreat_pct /= 100.0
-        if self.breakeven_activation_pct >= 1:
-            self.breakeven_activation_pct /= 100.0
+        if self.breakeven_level1_activation_pct >= 1:
+            self.breakeven_level1_activation_pct /= 100.0
+        if self.breakeven_level1_sl_pct >= 1:
+            self.breakeven_level1_sl_pct /= 100.0
+        if self.breakeven_level2_activation_pct >= 1:
+            self.breakeven_level2_activation_pct /= 100.0
+        if self.breakeven_level2_sl_pct >= 1:
+            self.breakeven_level2_sl_pct /= 100.0
         if self.fee_rate >= 1:
             self.fee_rate /= 100.0
         if self.mid_term_tp_pct >= 1:
@@ -717,8 +726,19 @@ def _load_risk_settings(settings: AppSettings) -> None:
             risk.enable_partial_close = bool(data["enable_partial_close"])
         if "enable_breakeven" in data:
             risk.enable_breakeven = bool(data["enable_breakeven"])
+        # Обратная совместимость: старый параметр breakeven_activation_pct
         if "breakeven_activation_pct" in data:
-            risk.breakeven_activation_pct = float(data["breakeven_activation_pct"])
+            old_activation = float(data["breakeven_activation_pct"])
+            risk.breakeven_level1_activation_pct = old_activation
+        # Новые параметры многоуровневого безубытка
+        if "breakeven_level1_activation_pct" in data:
+            risk.breakeven_level1_activation_pct = float(data["breakeven_level1_activation_pct"])
+        if "breakeven_level1_sl_pct" in data:
+            risk.breakeven_level1_sl_pct = float(data["breakeven_level1_sl_pct"])
+        if "breakeven_level2_activation_pct" in data:
+            risk.breakeven_level2_activation_pct = float(data["breakeven_level2_activation_pct"])
+        if "breakeven_level2_sl_pct" in data:
+            risk.breakeven_level2_sl_pct = float(data["breakeven_level2_sl_pct"])
         if "enable_loss_cooldown" in data:
             risk.enable_loss_cooldown = bool(data["enable_loss_cooldown"])
         if "fee_rate" in data:

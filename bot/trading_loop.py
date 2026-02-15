@@ -1289,23 +1289,28 @@ class TradingLoop:
             else:  # Sell
                 pnl_pct = ((entry_price - mark_price) / entry_price) * 100
             
-            # Проверяем, нужно ли активировать безубыток
-            breakeven_activation = self.settings.risk.breakeven_activation_pct * 100  # Конвертируем в %
+            # Проверяем, нужно ли активировать безубыток (многоуровневый)
+            level1_activation = self.settings.risk.breakeven_level1_activation_pct * 100  # Конвертируем в %
+            level2_activation = self.settings.risk.breakeven_level2_activation_pct * 100  # Конвертируем в %
+            level1_sl_pct = self.settings.risk.breakeven_level1_sl_pct
+            level2_sl_pct = self.settings.risk.breakeven_level2_sl_pct
             
-            if pnl_pct >= breakeven_activation:
-                # Рассчитываем новый SL
-                if pnl_pct >= 1.0:
-                    # При прибыли >= 1% ставим SL на entry + 0.5%
-                    if side == "Buy":
-                        new_sl = entry_price * 1.005
-                    else:
-                        new_sl = entry_price * 0.995
+            # Определяем, какой уровень активировать
+            if pnl_pct >= level2_activation:
+                # 2-я ступень: при прибыли >= level2_activation ставим SL на level2_sl_pct от входа
+                if side == "Buy":
+                    new_sl = entry_price * (1 + level2_sl_pct)
                 else:
-                    # При прибыли >= 0.5% ставим SL на 0.2% от точки входа (точка безубытка)
-                    if side == "Buy":
-                        new_sl = entry_price * 1.002
-                    else:
-                        new_sl = entry_price * 0.998
+                    new_sl = entry_price * (1 - level2_sl_pct)
+            elif pnl_pct >= level1_activation:
+                # 1-я ступень: при прибыли >= level1_activation ставим SL на level1_sl_pct от входа
+                if side == "Buy":
+                    new_sl = entry_price * (1 + level1_sl_pct)
+                else:
+                    new_sl = entry_price * (1 - level1_sl_pct)
+            else:
+                # Прибыль недостаточна для активации безубытка
+                return
                 
                 # Округляем до tick size
                 new_sl = self.bybit.round_price(new_sl, symbol)
@@ -1326,7 +1331,12 @@ class TradingLoop:
                     should_update = True
                 
                 if should_update:
-                    logger.info(f"Moving {symbol} SL to breakeven: {new_sl} (PnL: {pnl_pct:.2f}%)")
+                    # Определяем, какой уровень активирован
+                    if pnl_pct >= level2_activation:
+                        level = "2-я ступень"
+                    else:
+                        level = "1-я ступень"
+                    logger.info(f"Moving {symbol} SL to breakeven ({level}): {new_sl} (PnL: {pnl_pct:.2f}%)")
                     resp = await asyncio.to_thread(
                         self.bybit.set_trading_stop,
                         symbol=symbol,
@@ -1335,7 +1345,7 @@ class TradingLoop:
                     
                     if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                         await self.notifier.medium(
-                            f"🛡️ БЕЗУБЫТОК АКТИВИРОВАН\n{symbol} SL → ${new_sl:.2f}\nТекущий PnL: +{pnl_pct:.2f}%"
+                            f"🛡️ БЕЗУБЫТОК АКТИВИРОВАН ({level})\n{symbol} SL → ${new_sl:.2f}\nТекущий PnL: +{pnl_pct:.2f}%"
                         )
         
         except Exception as e:
