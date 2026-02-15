@@ -546,6 +546,19 @@ class TelegramBot:
         elif query.data.startswith("edit_ml_"):
             setting_name = query.data.replace("edit_ml_", "")
             await self.start_edit_ml_setting(query, setting_name)
+        elif query.data == "optimize_mtf_strategies":
+            await query.edit_message_text(
+                "🚀 ЗАПУСК ОПТИМИЗАЦИИ MTF СТРАТЕГИЙ\n\n"
+                "Процесс включает:\n"
+                "1. 📚 Обучение моделей (1h и 15m)\n"
+                "2. 🔮 Предсказание лучших комбинаций\n"
+                "3. 🧪 Реальное тестирование топ-15\n"
+                "4. ✅ Выбор и применение лучших\n\n"
+                "Это может занять 1-3 часа в зависимости от количества символов.\n"
+                "Вы получите уведомления о прогрессе.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Ожидание...", callback_data="waiting")]])
+            )
+            asyncio.create_task(self.optimize_mtf_strategies_async(query.from_user.id))
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
@@ -1509,6 +1522,106 @@ class TelegramBot:
             logger.error(f"Error retraining all models: {e}")
             await self.send_notification(f"❌ Ошибка при переобучении: {str(e)}")
     
+    async def optimize_mtf_strategies_async(self, user_id: int):
+        """Запускает оптимизацию MTF стратегий в фоне"""
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        try:
+            await self.send_notification("🚀 Начало оптимизации MTF стратегий...")
+            
+            # Получаем активные символы
+            active_symbols = self.state.get_active_symbols()
+            if not active_symbols:
+                await self.send_notification("❌ Нет активных символов для оптимизации")
+                return
+            
+            symbols_str = ",".join(active_symbols)
+            
+            # Запускаем скрипт оптимизации
+            cmd = [
+                sys.executable,
+                "optimize_mtf_strategies.py",
+                "--symbols", symbols_str,
+                "--days", "30",
+                "--top-n", "15"
+            ]
+            
+            logger.info(f"Запуск оптимизации MTF: {' '.join(cmd)}")
+            
+            # Запускаем процесс
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=Path.cwd()
+            )
+            
+            # Отправляем уведомление о начале
+            await self.send_notification(
+                f"📚 Этап 1/4: Обучение моделей для {len(active_symbols)} символов...\n"
+                f"Символы: {symbols_str}"
+            )
+            
+            # Читаем вывод процесса
+            stdout_lines = []
+            stderr_lines = []
+            
+            async def read_stdout():
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str:
+                        stdout_lines.append(line_str)
+                        logger.info(f"[OPTIMIZE] {line_str}")
+            
+            async def read_stderr():
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str:
+                        stderr_lines.append(line_str)
+                        logger.error(f"[OPTIMIZE ERROR] {line_str}")
+            
+            # Запускаем чтение вывода
+            await asyncio.gather(read_stdout(), read_stderr())
+            
+            # Ждем завершения процесса
+            return_code = await process.wait()
+            
+            if return_code == 0:
+                # Ищем результаты в выводе
+                results_text = "\n".join(stdout_lines[-20:])  # Последние 20 строк
+                
+                await self.send_notification(
+                    f"✅ Оптимизация завершена успешно!\n\n"
+                    f"Результаты:\n{results_text[-500:]}"  # Последние 500 символов
+                )
+                
+                # Перезагружаем настройки, если они были обновлены
+                if self.trading_loop:
+                    try:
+                        # Перезагружаем стратегии в trading_loop
+                        await self.send_notification("🔄 Обновление стратегий в боте...")
+                        # Trading loop автоматически перезагрузит стратегии при следующей итерации
+                    except Exception as e:
+                        logger.error(f"Ошибка обновления стратегий: {e}")
+            else:
+                error_text = "\n".join(stderr_lines[-10:])
+                await self.send_notification(
+                    f"❌ Ошибка оптимизации (код: {return_code})\n\n"
+                    f"Ошибки:\n{error_text[-500:]}"
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при оптимизации MTF стратегий: {e}", exc_info=True)
+            await self.send_notification(f"❌ Критическая ошибка оптимизации: {str(e)}")
+    
     async def retrain_symbol_models_async(self, symbol: str, user_id: int):
         """Обучает все модели для конкретной торговой пары"""
         import subprocess
@@ -2303,6 +2416,7 @@ class TelegramBot:
             )],
             [InlineKeyboardButton(f"🎯 Уверенность модели: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
             [InlineKeyboardButton(f"💰 Уверенность для сделки: {ml_settings.min_confidence_for_trade*100:.0f}%", callback_data="edit_ml_min_confidence_for_trade")],
+            [InlineKeyboardButton("🚀 Оптимизировать MTF стратегии", callback_data="optimize_mtf_strategies")],
             [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
             [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
         ]

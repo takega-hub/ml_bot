@@ -1260,6 +1260,11 @@ class TradingLoop:
     async def update_breakeven_stop(self, symbol: str, position_info: dict):
         """Перемещает SL в безубыток при достижении порога прибыли"""
         try:
+            # Проверяем, включен ли безубыток
+            if not self.settings.risk.enable_breakeven:
+                logger.debug(f"[{symbol}] Безубыток выключен, пропускаем обновление SL")
+                return
+            
             if not position_info or not isinstance(position_info, dict):
                 return
             

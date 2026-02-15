@@ -48,6 +48,54 @@ import traceback
 import json
 
 import pandas as pd
+
+# Безопасная функция для вывода эмодзи в Windows
+def safe_print(msg: str, *args, **kwargs):
+    """Безопасный print, который обрабатывает эмодзи для Windows"""
+    if args:
+        msg = msg.format(*args)
+    if kwargs:
+        msg = msg.format(**kwargs)
+    
+    if sys.platform == 'win32':
+        # Заменяем основные эмодзи на текстовые метки для Windows
+        replacements = {
+            '🚀': '[START]',
+            '📊': '[INFO]',
+            '✅': '[OK]',
+            '❌': '[ERROR]',
+            '⚠️': '[WARN]',
+            '🔄': '[RETRAIN]',
+            '📦': '[DATA]',
+            '🤖': '[MODEL]',
+            '🎯': '[TARGET]',
+            '📈': '[CHART]',
+            '🧠': '[ML]',
+            '💡': '[TIP]',
+            '🔍': '[SEARCH]',
+            '🏆': '[BEST]',
+            '📥': '[DOWNLOAD]',
+            '🔧': '[ENGINEERING]',
+            '⏳': '[WAIT]',
+            '🔥': '[HOT]',
+            '🌲': '[RF]',
+            '⚡': '[XGB]',
+            '🎉': '[SUCCESS]',
+            '📋': '[LIST]',
+            '📝': '[NOTE]',
+            '💪': '[STRONG]',
+            '🔹': '[INFO]',
+            'ℹ️': '[INFO]',
+        }
+        for emoji, replacement in replacements.items():
+            msg = msg.replace(emoji, replacement)
+    
+    try:
+        print(msg, *args, **kwargs)
+    except UnicodeEncodeError:
+        # Если все еще ошибка, удаляем все не-ASCII символы
+        msg_clean = ''.join(c if ord(c) < 128 else '?' for c in msg)
+        print(msg_clean, **kwargs)
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -65,8 +113,8 @@ matplotlib.use('Agg')  # Используем non-interactive backend
 try:
     from backtest_ml_strategy import run_exact_backtest as run_ml_backtest, BacktestMetrics
 except ImportError as e:
-    print(f"❌ Ошибка импорта: {e}")
-    print("Убедитесь, что модуль backtest_ml_strategy доступен для импорта")
+    safe_print(f"[ERROR] Ошибка импорта: {e}")
+    safe_print("Убедитесь, что модуль backtest_ml_strategy доступен для импорта")
     sys.exit(1)
 
 
@@ -123,7 +171,7 @@ def find_models_for_symbol(models_dir: Path, symbol: str, only_1h: bool = False)
         rf_BTCUSDT_60_1h.pkl
     """
     if not models_dir.exists():
-        print(f"⚠️  Директория {models_dir} не существует")
+        safe_print(f"[WARN] Директория {models_dir} не существует")
         return []
     
     patterns = [
@@ -382,7 +430,7 @@ def test_single_model(args_tuple: Tuple) -> Optional[Dict[str, Any]]:
         return metrics_to_dict_local(metrics, model_path)
         
     except Exception as e:
-        print(f"❌ Ошибка при тестировании {model_path.name}: {str(e)[:100]}")
+        safe_print(f"[ERROR] Ошибка при тестировании {model_path.name}: {str(e)[:100]}")
         # Возвращаем специальный маркер ошибки
         return {"error": True, "model": model_path.name, "message": str(e)[:100]}
 
@@ -405,18 +453,18 @@ def compare_models(
     """
     all_results: List[Dict[str, Any]] = []
     
-    print("=" * 80)
-    print("🚀 ML MODELS COMPARISON BACKTEST (PARALLEL)")
-    print("=" * 80)
-    print(f"📊 Symbols: {', '.join(symbols)}")
-    print(f"📁 Models dir: {models_dir}")
-    print(f"⚙️  Days: {days}, Interval: {interval}")
+    safe_print("=" * 80)
+    safe_print("[START] ML MODELS COMPARISON BACKTEST (PARALLEL)")
+    safe_print("=" * 80)
+    safe_print(f"[INFO] Symbols: {', '.join(symbols)}")
+    safe_print(f"[DATA] Models dir: {models_dir}")
+    safe_print(f"[INFO] Days: {days}, Interval: {interval}")
     if only_1h:
-        print(f"⏰ Filter: ONLY 1-HOUR TIMEFRAME MODELS")
-    print(f"💰 Initial balance: ${initial_balance:.2f}")
-    print(f"🎯 Risk per trade: {risk_per_trade*100:.1f}%, Leverage: {leverage}x")
-    print(f"⚡ Workers: {workers}")
-    print("=" * 80)
+        safe_print(f"[INFO] Filter: ONLY 1-HOUR TIMEFRAME MODELS")
+    safe_print(f"[INFO] Initial balance: ${initial_balance:.2f}")
+    safe_print(f"[TARGET] Risk per trade: {risk_per_trade*100:.1f}%, Leverage: {leverage}x")
+    safe_print(f"[INFO] Workers: {workers}")
+    safe_print("=" * 80)
     
     # Подготовка аргументов для всех моделей
     test_args = []
@@ -425,11 +473,11 @@ def compare_models(
     for symbol in symbols:
         models = find_models_for_symbol(models_dir, symbol, only_1h=only_1h)
         if not models:
-            print(f"⚠️  No models found for {symbol}" + (" (1h only)" if only_1h else ""))
+            safe_print(f"[WARN] No models found for {symbol}" + (" (1h only)" if only_1h else ""))
             continue
         
         total_models += len(models)
-        print(f"📦 Found {len(models)} models for {symbol}")
+        safe_print(f"[DATA] Found {len(models)} models for {symbol}")
         
         for model_path in models:
             test_args.append((
@@ -438,13 +486,13 @@ def compare_models(
             ))
     
     if not test_args:
-        print("❌ No models to test")
+        safe_print("[ERROR] No models to test")
         return pd.DataFrame()
     
-    print(f"\n🎯 Total models to test: {total_models}")
+    safe_print(f"\n[TARGET] Total models to test: {total_models}")
     
     # Параллельное выполнение тестов
-    print("\n⚡ Running parallel backtests...")
+    safe_print("\n[INFO] Running parallel backtests...")
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
             # Используем tqdm для отображения прогресса
@@ -456,8 +504,8 @@ def compare_models(
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
             ))
     except concurrent.futures.process.BrokenProcessPool as e:
-        print(f"❌ Multiprocessing error: {e}")
-        print("🔄 Retrying with sequential execution...")
+        safe_print(f"[ERROR] Multiprocessing error: {e}")
+        safe_print("[RETRAIN] Retrying with sequential execution...")
         # Аварийный переход на последовательное выполнение
         results = []
         for args in tqdm(test_args, desc="Testing models (sequential)", unit="model"):
@@ -470,7 +518,7 @@ def compare_models(
         if result is not None and len(result) > 0:
             # Проверяем, является ли результат ошибкой
             if isinstance(result, dict) and result.get("error"):
-                print(f"⚠️  Model test failed: {result.get('model', 'Unknown')} - {result.get('message', 'Unknown error')}")
+                safe_print(f"[WARN] Model test failed: {result.get('model', 'Unknown')} - {result.get('message', 'Unknown error')}")
                 errors += 1
             else:
                 all_results.append(result)
@@ -479,12 +527,12 @@ def compare_models(
             # Пустой результат
             errors += 1
     
-    print(f"\n✅ Successfully tested: {successful}/{total_models} models")
+    safe_print(f"\n[OK] Successfully tested: {successful}/{total_models} models")
     if errors > 0:
-        print(f"⚠️  Errors: {errors}/{total_models} models")
+        safe_print(f"[WARN] Errors: {errors}/{total_models} models")
     
     if not all_results:
-        print("❌ No results collected.")
+        safe_print("[ERROR] No results collected.")
         return pd.DataFrame()
     
     # Создаем DataFrame
@@ -619,7 +667,7 @@ def compare_with_previous_results(df_results: pd.DataFrame, previous_csv: str = 
             (df_merged['dd_change_pct'] <= 2)  # Допускаем небольшое увеличение DD
         )
         
-        print(f"\n📊 Сравнение с предыдущими результатами:")
+        safe_print(f"\n[INFO] Сравнение с предыдущими результатами:")
         print(f"   Улучшено: {df_merged['is_improved'].sum()}/{len(df_merged)} моделей")
         print(f"   Среднее изменение PnL%: {df_merged['pnl_change_pct'].mean():.2f}%")
         print(f"   Среднее изменение Win Rate: {df_merged['winrate_change_pct'].mean():.2f}%")
@@ -627,7 +675,7 @@ def compare_with_previous_results(df_results: pd.DataFrame, previous_csv: str = 
         return df_merged
         
     except Exception as e:
-        print(f"⚠️  Ошибка при сравнении с предыдущими результатами: {e}")
+        safe_print(f"[WARN] Ошибка при сравнении с предыдущими результатами: {e}")
         return df_results
 
 
@@ -730,7 +778,7 @@ def add_overfitting_check(df_results: pd.DataFrame, models_dir: Path, days: int,
                 })
                 
         except Exception as e:
-            print(f"⚠️  Overfitting check failed for {row['model_name']}: {str(e)[:50]}...")
+            safe_print(f"[WARN] Overfitting check failed for {row['model_name']}: {str(e)[:50]}...")
             continue
     
     if overfitting_results:
@@ -752,13 +800,13 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
     if df_results.empty:
         return
     
-    print("\n" + "=" * 80)
-    print("📊 ДЕТАЛЬНЫЙ АНАЛИЗ РЕЗУЛЬТАТОВ")
-    print("=" * 80)
+    safe_print("\n" + "=" * 80)
+    safe_print("[INFO] ДЕТАЛЬНЫЙ АНАЛИЗ РЕЗУЛЬТАТОВ")
+    safe_print("=" * 80)
     
     # 1. Анализ распределения сигналов
     if 'long_signal_pct' in df_results.columns:
-        print("\n📈 Анализ распределения сигналов:")
+        safe_print("\n[CHART] Анализ распределения сигналов:")
         print("-" * 80)
         for symbol in df_results['symbol'].unique():
             symbol_df = df_results[df_results['symbol'] == symbol]
@@ -771,7 +819,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
     
     # 2. Анализ качества сигналов
     if 'signals_with_tp_sl_pct' in df_results.columns:
-        print("\n🎯 Анализ качества сигналов:")
+        safe_print("\n[TARGET] Анализ качества сигналов:")
         print("-" * 80)
         print(f"   Средний % сигналов с TP/SL: {df_results['signals_with_tp_sl_pct'].mean():.1f}%")
         if 'signals_with_correct_sl_pct' in df_results.columns:
@@ -784,7 +832,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
     
     # 3. Анализ эффективности TP/SL
     if 'avg_tp_distance_pct' in df_results.columns and 'avg_sl_distance_pct' in df_results.columns:
-        print("\n💰 Анализ эффективности TP/SL:")
+        safe_print("\n[INFO] Анализ эффективности TP/SL:")
         print("-" * 80)
         print(f"   Среднее расстояние до TP: {df_results['avg_tp_distance_pct'].mean():.2f}%")
         print(f"   Среднее расстояние до SL: {df_results['avg_sl_distance_pct'].mean():.2f}%")
@@ -795,7 +843,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
     
     # 4. Анализ конверсии сигналов
     if 'signal_to_trade_ratio' in df_results.columns:
-        print("\n🔄 Анализ конверсии сигналов в сделки:")
+        safe_print("\n[RETRAIN] Анализ конверсии сигналов в сделки:")
         print("-" * 80)
         print(f"   Средняя конверсия сигнал→сделка: {df_results['signal_to_trade_ratio'].mean():.2%}")
         for symbol in df_results['symbol'].unique():
@@ -804,7 +852,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
     
     # 5. Анализ контроля сделок (MFE/MAE)
     if 'trade_control' in df_results.columns:
-        print("\n📊 Анализ контроля сделок (MFE/MAE):")
+        safe_print("\n[INFO] Анализ контроля сделок (MFE/MAE):")
         print("-" * 80)
         print(f"   Средний MFE/MAE ratio: {df_results['trade_control'].mean():.2f}")
         if 'trade_control_category' in df_results.columns:
@@ -814,7 +862,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
                 print(f"      {category}: {count} моделей ({count/len(df_results)*100:.1f}%)")
     
     # 6. Топ-5 моделей по различным метрикам
-    print("\n🏆 ТОП-5 МОДЕЛЕЙ ПО РАЗЛИЧНЫМ МЕТРИКАМ:")
+    safe_print("\n[BEST] ТОП-5 МОДЕЛЕЙ ПО РАЗЛИЧНЫМ МЕТРИКАМ:")
     print("-" * 80)
     
     metrics_to_show = [
@@ -832,7 +880,7 @@ def print_detailed_analysis(df_results: pd.DataFrame) -> None:
             for idx, (_, row) in enumerate(top5.iterrows(), 1):
                 print(f"   {idx}. {row['model_name']} ({row['symbol']}): {row[metric_col]:.2f}")
     
-    print("\n" + "=" * 80)
+    safe_print("\n" + "=" * 80)
     
     # 7. Анализ проблем и рекомендации
     print_problems_and_recommendations(df_results)
@@ -846,83 +894,83 @@ def print_problems_and_recommendations(df_results: pd.DataFrame) -> None:
     if df_results.empty:
         return
     
-    print("\n" + "=" * 80)
-    print("🔍 АНАЛИЗ ПРОБЛЕМ И РЕКОМЕНДАЦИИ ПО УЛУЧШЕНИЮ")
-    print("=" * 80)
+    safe_print("\n" + "=" * 80)
+    safe_print("[SEARCH] АНАЛИЗ ПРОБЛЕМ И РЕКОМЕНДАЦИИ ПО УЛУЧШЕНИЮ")
+    safe_print("=" * 80)
     
     # 1. Анализ использования сигналов
     if 'signal_utilization_pct' in df_results.columns:
         avg_utilization = df_results['signal_utilization_pct'].mean()
-        print(f"\n📊 ПРОБЛЕМА 1: Использование сигналов")
-        print("-" * 80)
-        print(f"   Текущее использование: {avg_utilization:.1f}% (цель: 30-40%)")
+        safe_print(f"\n[INFO] ПРОБЛЕМА 1: Использование сигналов")
+        safe_print("-" * 80)
+        safe_print(f"   Текущее использование: {avg_utilization:.1f}% (цель: 30-40%)")
         
         if avg_utilization < 25:
-            print(f"   ⚠️  КРИТИЧНО: Использование сигналов слишком низкое!")
-            print(f"   📉 Средний % HOLD: {df_results['hold_signal_pct'].mean():.1f}%")
-            print(f"   📉 Средний % LONG: {df_results['long_signal_pct'].mean():.1f}%")
-            print(f"   📉 Средний % SHORT: {df_results['short_signal_pct'].mean():.1f}%")
+            safe_print(f"   [WARN] КРИТИЧНО: Использование сигналов слишком низкое!")
+            safe_print(f"   [CHART] Средний % HOLD: {df_results['hold_signal_pct'].mean():.1f}%")
+            safe_print(f"   [CHART] Средний % LONG: {df_results['long_signal_pct'].mean():.1f}%")
+            safe_print(f"   [CHART] Средний % SHORT: {df_results['short_signal_pct'].mean():.1f}%")
             
-            print(f"\n   💡 РЕКОМЕНДАЦИИ:")
-            print(f"      1. Уменьшить threshold_pct в target labeling с 0.5% до 0.3%")
-            print(f"      2. Уменьшить min_profit_pct с 0.5% до 0.3%")
-            print(f"      3. Снизить базовый confidence_threshold на 5-10%")
-            print(f"      4. Проверить фильтры в strategy_ml.py - возможно слишком строгие")
-            print(f"      5. Увеличить forward_periods с 5 до 6-7 для большего охвата")
+            safe_print(f"\n   [TIP] РЕКОМЕНДАЦИИ:")
+            safe_print(f"      1. Уменьшить threshold_pct в target labeling с 0.5% до 0.3%")
+            safe_print(f"      2. Уменьшить min_profit_pct с 0.5% до 0.3%")
+            safe_print(f"      3. Снизить базовый confidence_threshold на 5-10%")
+            safe_print(f"      4. Проверить фильтры в strategy_ml.py - возможно слишком строгие")
+            safe_print(f"      5. Увеличить forward_periods с 5 до 6-7 для большего охвата")
             
             # Анализ по символам
-            print(f"\n   📈 По символам:")
+            safe_print(f"\n   [CHART] По символам:")
             for symbol in df_results['symbol'].unique():
                 symbol_df = df_results[df_results['symbol'] == symbol]
                 util = symbol_df['signal_utilization_pct'].mean()
                 hold = symbol_df['hold_signal_pct'].mean()
-                print(f"      {symbol}: {util:.1f}% использование ({hold:.1f}% HOLD)")
+                safe_print(f"      {symbol}: {util:.1f}% использование ({hold:.1f}% HOLD)")
         else:
-            print(f"   ✅ Использование сигналов в норме")
+            safe_print(f"   [OK] Использование сигналов в норме")
     
     # 2. Анализ конверсии сигналов в сделки
     if 'signal_to_trade_ratio' in df_results.columns:
         avg_conversion = df_results['signal_to_trade_ratio'].mean() * 100
-        print(f"\n🔄 ПРОБЛЕМА 2: Конверсия сигналов в сделки")
-        print("-" * 80)
-        print(f"   Текущая конверсия: {avg_conversion:.2f}% (цель: 10-15%)")
+        safe_print(f"\n[RETRAIN] ПРОБЛЕМА 2: Конверсия сигналов в сделки")
+        safe_print("-" * 80)
+        safe_print(f"   Текущая конверсия: {avg_conversion:.2f}% (цель: 10-15%)")
         
         if avg_conversion < 5:
-            print(f"   ⚠️  КРИТИЧНО: Конверсия слишком низкая!")
+            safe_print(f"   [WARN] КРИТИЧНО: Конверсия слишком низкая!")
             
             # Анализ возможных причин
             if 'avg_confidence' in df_results.columns:
                 avg_conf = df_results['avg_confidence'].mean()
-                print(f"   📊 Средняя уверенность модели: {avg_conf:.1%}")
+                safe_print(f"   [INFO] Средняя уверенность модели: {avg_conf:.1%}")
                 if avg_conf < 0.5:
-                    print(f"      ⚠️  Низкая уверенность - возможно модель не уверена в сигналах")
+                    safe_print(f"      [WARN] Низкая уверенность - возможно модель не уверена в сигналах")
             
             if 'signals_with_tp_sl_pct' in df_results.columns:
                 tp_sl_pct = df_results['signals_with_tp_sl_pct'].mean()
                 if tp_sl_pct < 100:
-                    print(f"   ⚠️  Только {tp_sl_pct:.1f}% сигналов имеют TP/SL")
-                    print(f"      Это может блокировать открытие позиций")
+                    safe_print(f"   [WARN] Только {tp_sl_pct:.1f}% сигналов имеют TP/SL")
+                    safe_print(f"      Это может блокировать открытие позиций")
             
-            print(f"\n   💡 РЕКОМЕНДАЦИИ:")
-            print(f"      1. Проверить фильтры в strategy_ml.py:")
-            print(f"         - max_signals_per_day (сейчас 10) - возможно слишком низкий")
-            print(f"         - Фильтры по RSI (экстремальные зоны)")
-            print(f"         - Фильтры по объему (низкий объем)")
-            print(f"         - Фильтры стабильности (stability_filter)")
-            print(f"      2. Упростить условия открытия позиций")
-            print(f"      3. Проверить баланс - возможно недостаточно средств")
-            print(f"      4. Добавить логирование причин отклонения сигналов")
+            safe_print(f"\n   [TIP] РЕКОМЕНДАЦИИ:")
+            safe_print(f"      1. Проверить фильтры в strategy_ml.py:")
+            safe_print(f"         - max_signals_per_day (сейчас 10) - возможно слишком низкий")
+            safe_print(f"         - Фильтры по RSI (экстремальные зоны)")
+            safe_print(f"         - Фильтры по объему (низкий объем)")
+            safe_print(f"         - Фильтры стабильности (stability_filter)")
+            safe_print(f"      2. Упростить условия открытия позиций")
+            safe_print(f"      3. Проверить баланс - возможно недостаточно средств")
+            safe_print(f"      4. Добавить логирование причин отклонения сигналов")
             
             # Анализ по символам
-            print(f"\n   📈 По символам:")
+            safe_print(f"\n   [CHART] По символам:")
             for symbol in df_results['symbol'].unique():
                 symbol_df = df_results[df_results['symbol'] == symbol]
                 conv = symbol_df['signal_to_trade_ratio'].mean() * 100
                 trades = symbol_df['total_trades'].mean()
                 signals = symbol_df['total_signals'].mean()
-                print(f"      {symbol}: {conv:.2f}% ({trades:.0f} сделок из {signals:.0f} сигналов)")
+                safe_print(f"      {symbol}: {conv:.2f}% ({trades:.0f} сделок из {signals:.0f} сигналов)")
         else:
-            print(f"   ✅ Конверсия в норме")
+            safe_print(f"   [OK] Конверсия в норме")
     
     # 3. Сравнение MTF vs без MTF
     if 'mode_suffix' in df_results.columns:
@@ -930,95 +978,95 @@ def print_problems_and_recommendations(df_results: pd.DataFrame) -> None:
         no_mtf_models = df_results[df_results['mode_suffix'] == '15m']
         
         if len(mtf_models) > 0 and len(no_mtf_models) > 0:
-            print(f"\n📊 СРАВНЕНИЕ: MTF vs БЕЗ MTF")
-            print("-" * 80)
+            safe_print(f"\n[INFO] СРАВНЕНИЕ: MTF vs БЕЗ MTF")
+            safe_print("-" * 80)
             
             mtf_pnl = mtf_models['total_pnl_pct'].mean()
             no_mtf_pnl = no_mtf_models['total_pnl_pct'].mean()
             mtf_util = mtf_models['signal_utilization_pct'].mean() if 'signal_utilization_pct' in mtf_models.columns else 0
             no_mtf_util = no_mtf_models['signal_utilization_pct'].mean() if 'signal_utilization_pct' in no_mtf_models.columns else 0
             
-            print(f"   MTF модели:")
-            print(f"      Средний PnL%: {mtf_pnl:.2f}%")
-            print(f"      Использование сигналов: {mtf_util:.1f}%")
-            print(f"      Моделей: {len(mtf_models)}")
+            safe_print(f"   MTF модели:")
+            safe_print(f"      Средний PnL%: {mtf_pnl:.2f}%")
+            safe_print(f"      Использование сигналов: {mtf_util:.1f}%")
+            safe_print(f"      Моделей: {len(mtf_models)}")
             
-            print(f"\n   БЕЗ MTF модели:")
-            print(f"      Средний PnL%: {no_mtf_pnl:.2f}%")
-            print(f"      Использование сигналов: {no_mtf_util:.1f}%")
-            print(f"      Моделей: {len(no_mtf_models)}")
+            safe_print(f"\n   БЕЗ MTF модели:")
+            safe_print(f"      Средний PnL%: {no_mtf_pnl:.2f}%")
+            safe_print(f"      Использование сигналов: {no_mtf_util:.1f}%")
+            safe_print(f"      Моделей: {len(no_mtf_models)}")
             
             if no_mtf_pnl > mtf_pnl:
-                print(f"\n   ✅ Модели БЕЗ MTF показывают лучшие результаты!")
-                print(f"      Разница: {no_mtf_pnl - mtf_pnl:.2f}%")
+                safe_print(f"\n   [OK] Модели БЕЗ MTF показывают лучшие результаты!")
+                safe_print(f"      Разница: {no_mtf_pnl - mtf_pnl:.2f}%")
             elif mtf_pnl > no_mtf_pnl:
-                print(f"\n   ✅ MTF модели показывают лучшие результаты!")
-                print(f"      Разница: {mtf_pnl - no_mtf_pnl:.2f}%")
+                safe_print(f"\n   [OK] MTF модели показывают лучшие результаты!")
+                safe_print(f"      Разница: {mtf_pnl - no_mtf_pnl:.2f}%")
             else:
-                print(f"\n   ⚖️  Результаты сопоставимы")
+                safe_print(f"\n   [INFO] Результаты сопоставимы")
     
     # 4. Анализ качества сигналов
     if 'signals_with_tp_sl_pct' in df_results.columns:
         avg_tp_sl = df_results['signals_with_tp_sl_pct'].mean()
-        print(f"\n🎯 ПРОБЛЕМА 3: Качество сигналов")
-        print("-" * 80)
-        print(f"   Сигналов с TP/SL: {avg_tp_sl:.1f}% (цель: 100%)")
+        safe_print(f"\n[TARGET] ПРОБЛЕМА 3: Качество сигналов")
+        safe_print("-" * 80)
+        safe_print(f"   Сигналов с TP/SL: {avg_tp_sl:.1f}% (цель: 100%)")
         
         if avg_tp_sl < 100:
-            print(f"   ⚠️  Не все сигналы имеют TP/SL!")
-            print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить генерацию TP/SL в strategy_ml.py")
+            safe_print(f"   [WARN] Не все сигналы имеют TP/SL!")
+            safe_print(f"   [TIP] РЕКОМЕНДАЦИЯ: Проверить генерацию TP/SL в strategy_ml.py")
         else:
-            print(f"   ✅ Все сигналы имеют TP/SL")
+            safe_print(f"   [OK] Все сигналы имеют TP/SL")
         
         if 'signals_with_correct_sl_pct' in df_results.columns:
             correct_sl = df_results['signals_with_correct_sl_pct'].mean()
             print(f"   Сигналов с правильным SL (1%): {correct_sl:.1f}% (цель: 100%)")
             if correct_sl < 95:
-                print(f"   ⚠️  Много сигналов с неправильным SL!")
-                print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить расчет SL в strategy_ml.py")
+                safe_print(f"   [WARN] Много сигналов с неправильным SL!")
+                safe_print(f"   [TIP] РЕКОМЕНДАЦИЯ: Проверить расчет SL в strategy_ml.py")
     
     # 5. Анализ баланса LONG/SHORT
     if 'long_short_balance' in df_results.columns:
         avg_balance = df_results['long_short_balance'].mean()
-        print(f"\n⚖️  ПРОБЛЕМА 4: Баланс LONG/SHORT")
-        print("-" * 80)
-        print(f"   Соотношение LONG/SHORT: {avg_balance:.2f}:1 (цель: ~1:1)")
+        safe_print(f"\n[INFO] ПРОБЛЕМА 4: Баланс LONG/SHORT")
+        safe_print("-" * 80)
+        safe_print(f"   Соотношение LONG/SHORT: {avg_balance:.2f}:1 (цель: ~1:1)")
         
         if avg_balance > 2.0 or avg_balance < 0.5:
-            print(f"   ⚠️  Дисбаланс LONG/SHORT!")
-            print(f"   💡 РЕКОМЕНДАЦИЯ: Проверить class weights в обучении")
-            print(f"      Убедиться, что minority class получает достаточный вес")
+            safe_print(f"   [WARN] Дисбаланс LONG/SHORT!")
+            safe_print(f"   [TIP] РЕКОМЕНДАЦИЯ: Проверить class weights в обучении")
+            safe_print(f"      Убедиться, что minority class получает достаточный вес")
         else:
-            print(f"   ✅ Баланс в норме")
+            safe_print(f"   [OK] Баланс в норме")
     
     # 6. Анализ MFE/MAE (контроль сделок)
     if 'trade_control' in df_results.columns:
         avg_control = df_results['trade_control'].mean()
-        print(f"\n📊 ПРОБЛЕМА 5: Контроль сделок (MFE/MAE)")
-        print("-" * 80)
-        print(f"   Средний MFE/MAE ratio: {avg_control:.2f} (цель: > 1.0)")
+        safe_print(f"\n[INFO] ПРОБЛЕМА 5: Контроль сделок (MFE/MAE)")
+        safe_print("-" * 80)
+        safe_print(f"   Средний MFE/MAE ratio: {avg_control:.2f} (цель: > 1.0)")
         
         if avg_control == 0 or avg_control < 0.5:
-            print(f"   ⚠️  КРИТИЧНО: MFE/MAE не рассчитывается или очень низкий!")
-            print(f"   💡 РЕКОМЕНДАЦИЯ: Исправить расчет MFE/MAE в backtest_ml_strategy.py")
+            safe_print(f"   [WARN] КРИТИЧНО: MFE/MAE не рассчитывается или очень низкий!")
+            safe_print(f"   [TIP] РЕКОМЕНДАЦИЯ: Исправить расчет MFE/MAE в backtest_ml_strategy.py")
         elif avg_control < 1.0:
-            print(f"   ⚠️  Низкий контроль - сделки уходят в убыток быстрее, чем в прибыль")
-            print(f"   💡 РЕКОМЕНДАЦИЯ: Улучшить timing входа (возможно, слишком ранние входы)")
+            safe_print(f"   [WARN] Низкий контроль - сделки уходят в убыток быстрее, чем в прибыль")
+            safe_print(f"   [TIP] РЕКОМЕНДАЦИЯ: Улучшить timing входа (возможно, слишком ранние входы)")
         else:
-            print(f"   ✅ Контроль в норме")
+            safe_print(f"   [OK] Контроль в норме")
     
     # 7. Общие рекомендации
-    print(f"\n💡 ОБЩИЕ РЕКОМЕНДАЦИИ:")
-    print("-" * 80)
+    safe_print(f"\n[TIP] ОБЩИЕ РЕКОМЕНДАЦИИ:")
+    safe_print("-" * 80)
     
     profitable = df_results[df_results['total_pnl_pct'] > 0]
     if len(profitable) > 0:
         profitable_pct = len(profitable) / len(df_results) * 100
-        print(f"   ✅ Прибыльных моделей: {profitable_pct:.1f}% ({len(profitable)}/{len(df_results)})")
+        safe_print(f"   [OK] Прибыльных моделей: {profitable_pct:.1f}% ({len(profitable)}/{len(df_results)})")
         
         if profitable_pct < 50:
-            print(f"   ⚠️  Меньше половины моделей прибыльны!")
-            print(f"      Рекомендуется пересмотреть параметры обучения")
+            safe_print(f"   [WARN] Меньше половины моделей прибыльны!")
+            safe_print(f"      Рекомендуется пересмотреть параметры обучения")
         
         # Лучшие модели
         best = profitable.nlargest(3, 'total_pnl_pct')
@@ -1058,7 +1106,7 @@ def print_problems_and_recommendations(df_results: pd.DataFrame) -> None:
         for priority in priorities:
             print(f"   {priority}")
     else:
-        print(f"   ✅ Все основные метрики в норме!")
+        safe_print(f"   [OK] Все основные метрики в норме!")
         print(f"   Можно переходить к оптимизации гиперпараметров")
     
     print("\n" + "=" * 80)
@@ -1085,11 +1133,11 @@ def print_best_models_per_symbol(df_results: pd.DataFrame) -> None:
         # Берем лучшую модель
         best = symbol_df.iloc[0]
         
-        print(f"\n📈 {symbol}:")
-        print("-" * 80)
-        print(f"   Модель: {best['model_name']}")
-        print(f"   Тип: {best.get('model_type', 'N/A')} ({best.get('mode_suffix', 'N/A')})")
-        print(f"   📊 Статистика:")
+        safe_print(f"\n[CHART] {symbol}:")
+        safe_print("-" * 80)
+        safe_print(f"   Модель: {best['model_name']}")
+        safe_print(f"   Тип: {best.get('model_type', 'N/A')} ({best.get('mode_suffix', 'N/A')})")
+        safe_print(f"   [INFO] Статистика:")
         print(f"      • Сделок: {int(best['total_trades'])}")
         print(f"      • PnL%: {best['total_pnl_pct']:+.2f}%")
         print(f"      • PnL USD: ${best['total_pnl_usd']:+.2f}")
@@ -1123,7 +1171,7 @@ def print_best_models_per_symbol(df_results: pd.DataFrame) -> None:
         # Показываем топ-3 модели для этого символа
         top3 = symbol_df.head(3)
         if len(top3) > 1:
-            print(f"\n   📊 Топ-3 модели для {symbol}:")
+            safe_print(f"\n   [INFO] Топ-3 модели для {symbol}:")
             for idx, (_, row) in enumerate(top3.iterrows(), 1):
                 pnl_sign = "+" if row['total_pnl_pct'] >= 0 else ""
                 print(f"      {idx}. {row['model_name']}: {pnl_sign}{row['total_pnl_pct']:.2f}% PnL, "
@@ -1139,7 +1187,7 @@ def print_summary_table(df_results: pd.DataFrame) -> None:
         return
     
     print("\n" + "=" * 80)
-    print("📊 SUMMARY: BEST MODELS PER SYMBOL")
+    safe_print("[INFO] SUMMARY: BEST MODELS PER SYMBOL")
     print("=" * 80)
     
     for symbol, group in df_results.groupby("symbol"):
@@ -1180,7 +1228,7 @@ def print_summary_table(df_results: pd.DataFrame) -> None:
         print(display_df.to_string(index=False))
         
         # Показываем статистику по всем моделям символа
-        print(f"\n📊 Statistics for {symbol}:")
+        safe_print(f"\n[INFO] Statistics for {symbol}:")
         print(f"   Models tested: {len(group)}")
         print(f"   Avg PnL%: {group['total_pnl_pct'].mean():.1f}%")
         print(f"   Best PnL%: {group['total_pnl_pct'].max():.1f}% ({group.loc[group['total_pnl_pct'].idxmax(), 'model_name']})")
@@ -1191,7 +1239,7 @@ def print_summary_table(df_results: pd.DataFrame) -> None:
 def create_visualizations(df_results: pd.DataFrame, output_dir: str = "comparison_plots") -> None:
     """Создает визуализации для анализа результатов."""
     if df_results.empty:
-        print("⚠️  No data for visualizations")
+        safe_print("[WARN] No data for visualizations")
         return
     
     Path(output_dir).mkdir(exist_ok=True)
@@ -1230,9 +1278,9 @@ def create_visualizations(df_results: pd.DataFrame, output_dir: str = "compariso
         plt.tight_layout()
         plt.savefig(f"{output_dir}/heatmap_pnl.png", dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✅ Created: heatmap_pnl.png")
+        safe_print(f"[OK] Created: heatmap_pnl.png")
     except Exception as e:
-        print(f"⚠️  Could not create heatmap: {e}")
+        safe_print(f"[WARN] Could not create heatmap: {e}")
     
     # 2. Scatter plot: риск vs доходность
     try:
@@ -1276,9 +1324,9 @@ def create_visualizations(df_results: pd.DataFrame, output_dir: str = "compariso
         plt.tight_layout()
         plt.savefig(f"{output_dir}/risk_return.png", dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✅ Created: risk_return.png")
+        safe_print(f"[OK] Created: risk_return.png")
     except Exception as e:
-        print(f"⚠️  Could not create risk-return plot: {e}")
+        safe_print(f"[WARN] Could not create risk-return plot: {e}")
     
     # 3. Bar plot: лучшие модели по символу
     try:
@@ -1317,9 +1365,9 @@ def create_visualizations(df_results: pd.DataFrame, output_dir: str = "compariso
         plt.tight_layout()
         plt.savefig(f"{output_dir}/top_models.png", dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"✅ Created: top_models.png")
+        safe_print(f"[OK] Created: top_models.png")
     except Exception as e:
-        print(f"⚠️  Could not create top models plot: {e}")
+        safe_print(f"[WARN] Could not create top models plot: {e}")
     
     # 4. Корреляционная матрица метрик
     try:
@@ -1351,11 +1399,11 @@ def create_visualizations(df_results: pd.DataFrame, output_dir: str = "compariso
             plt.tight_layout()
             plt.savefig(f"{output_dir}/correlation_matrix.png", dpi=150, bbox_inches='tight')
             plt.close()
-            print(f"✅ Created: correlation_matrix.png")
+            safe_print(f"[OK] Created: correlation_matrix.png")
     except Exception as e:
-        print(f"⚠️  Could not create correlation matrix: {e}")
+        safe_print(f"[WARN] Could not create correlation matrix: {e}")
     
-    print(f"\n🎨 All visualizations saved to '{output_dir}/' directory")
+    safe_print(f"\n[INFO] All visualizations saved to '{output_dir}/' directory")
 
 
 def save_detailed_report(df_results: pd.DataFrame, args, output_dir: str = "reports") -> None:
@@ -1544,19 +1592,19 @@ Examples:
     # Определяем список символов
     if args.symbols.lower() == "auto" or args.symbols.strip() == "":
         # Автоматическое обнаружение символов из моделей
-        print(f"🔍 Автоматическое обнаружение символов из моделей...")
+        safe_print(f"[SEARCH] Автоматическое обнаружение символов из моделей...")
         symbols = find_all_symbols(models_dir)
         if not symbols:
-            print(f"⚠️  Не удалось найти символы в моделях. Используем дефолтные: BTCUSDT,ETHUSDT,SOLUSDT")
+            safe_print(f"[WARN] Не удалось найти символы в моделях. Используем дефолтные: BTCUSDT,ETHUSDT,SOLUSDT")
             symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
         else:
-            print(f"✅ Найдено символов: {', '.join(symbols)} ({len(symbols)} символов)")
+            safe_print(f"[OK] Найдено символов: {', '.join(symbols)} ({len(symbols)} символов)")
     else:
         # Используем указанные символы
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     
     if not symbols:
-        print(f"❌ Не указаны символы для тестирования")
+        safe_print(f"[ERROR] Не указаны символы для тестирования")
         return
     
     # Запускаем сравнение моделей
@@ -1574,13 +1622,13 @@ Examples:
             only_1h=args.only_1h,
         )
     except Exception as e:
-        print(f"❌ Fatal error during model comparison: {e}")
+        safe_print(f"[ERROR] Fatal error during model comparison: {e}")
         import traceback
         traceback.print_exc()
         return
     
     if df_results.empty:
-        print("❌ No results to analyze")
+        safe_print("[ERROR] No results to analyze")
         return
     
     # Печатаем сводку
@@ -1614,13 +1662,13 @@ Examples:
         save_detailed_report(df_results, args, "reports")
     
     # Выводим итоговую статистику
-    print("\n" + "=" * 80)
-    print("🎯 FINAL STATISTICS")
-    print("=" * 80)
-    print(f"📈 Total models tested: {len(df_results)}")
-    print(f"✅ Profitable models: {(df_results['total_pnl_pct'] > 0).sum()} ({df_results['total_pnl_pct'].gt(0).mean()*100:.1f}%)")
-    print(f"📊 Average PnL%: {df_results['total_pnl_pct'].mean():.2f}%")
-    print(f"🎯 Average Win Rate: {df_results['win_rate_pct'].mean():.2f}%")
+    safe_print("\n" + "=" * 80)
+    safe_print("[TARGET] FINAL STATISTICS")
+    safe_print("=" * 80)
+    safe_print(f"[CHART] Total models tested: {len(df_results)}")
+    safe_print(f"[OK] Profitable models: {(df_results['total_pnl_pct'] > 0).sum()} ({df_results['total_pnl_pct'].gt(0).mean()*100:.1f}%)")
+    safe_print(f"[INFO] Average PnL%: {df_results['total_pnl_pct'].mean():.2f}%")
+    safe_print(f"[TARGET] Average Win Rate: {df_results['win_rate_pct'].mean():.2f}%")
     
     # Лучшая модель
     best_model = df_results.iloc[0]
