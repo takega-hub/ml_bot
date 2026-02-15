@@ -575,24 +575,31 @@ class TelegramBot:
             await self.show_dashboard(query)
 
     async def show_pairs_settings(self, query):
-        # Получаем все известные символы (из state)
-        all_possible = [
-            s for s in self.state.known_symbols
-            if isinstance(s, str) and s.endswith("USDT")
-        ]
-        # Гарантируем присутствие активных пар
-        for s in self.state.active_symbols:
-            if s not in all_possible:
-                all_possible.append(s)
-        all_possible = sorted(set(all_possible))
+        # Получаем все известные символы (из state) - выполняем в отдельном потоке
+        def get_symbols_data():
+            all_possible = [
+                s for s in self.state.known_symbols
+                if isinstance(s, str) and s.endswith("USDT")
+            ]
+            # Гарантируем присутствие активных пар
+            for s in self.state.active_symbols:
+                if s not in all_possible:
+                    all_possible.append(s)
+            all_possible = sorted(set(all_possible))
+            return all_possible, self.state.active_symbols
+        
+        all_possible, active_symbols = await asyncio.to_thread(get_symbols_data)
         
         keyboard = []
-        for s in all_possible:
-            status = "✅" if s in self.state.active_symbols else "❌"
+        # Собираем информацию о cooldown для всех символов параллельно
+        cooldown_tasks = [asyncio.to_thread(self.state.get_cooldown_info, s) for s in all_possible]
+        cooldown_infos = await asyncio.gather(*cooldown_tasks)
+        
+        for s, cooldown_info in zip(all_possible, cooldown_infos):
+            status = "✅" if s in active_symbols else "❌"
             button_text = f"{status} {s}"
             
             # Проверяем, есть ли cooldown для этой пары
-            cooldown_info = self.state.get_cooldown_info(s)
             if cooldown_info and cooldown_info.get("active"):
                 # Добавляем индикатор cooldown
                 hours_left = cooldown_info.get("hours_left", 0)
