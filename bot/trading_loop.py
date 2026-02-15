@@ -2295,8 +2295,12 @@ class TradingLoop:
             exit_reason = "TP" if pnl_usd > 0 else "SL"
             # Можно добавить более детальную причину, если доступна информация о trailing stop и т.д.
             
-            # Обновляем статус сделки
+            # Обновляем статус сделки (может установить кулдаун от убытков)
             self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, exit_reason)
+            
+            # Устанавливаем кулдаун до закрытия следующей свечи (15 минут)
+            # Этот кулдаун не перезапишет более длительный кулдаун от убытков
+            self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
             
             # Отправляем уведомление
             pnl_emoji = "✅" if pnl_usd > 0 else "❌"
@@ -2336,14 +2340,20 @@ class TradingLoop:
                         if margin > 0:
                             pnl_pct = (pnl_usd / margin) * 100
                     self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, "MANUAL_CLOSE")
+                    # Устанавливаем кулдаун до закрытия следующей свечи
+                    self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
                 else:
                     # Если не удалось получить цену, используем entry_price с нулевым PnL
                     self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
+                    # Устанавливаем кулдаун до закрытия следующей свечи
+                    self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
             except Exception as e2:
                 logger.error(f"Error in fallback close handling for {symbol}: {e2}")
                 # Последняя попытка - закрываем с entry_price
                 try:
                     self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
+                    # Устанавливаем кулдаун до закрытия следующей свечи
+                    self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
                 except:
                     pass
     

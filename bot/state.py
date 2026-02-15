@@ -315,12 +315,76 @@ class BotState:
             )
         self.save()
     
+    def set_cooldown_until_next_candle(self, symbol: str, timeframe: str = "15m"):
+        """Устанавливает cooldown для символа до закрытия следующей свечи (15 минут для 15m)"""
+        from datetime import datetime, timedelta
+        
+        # Парсим timeframe
+        minutes = 15  # По умолчанию 15 минут
+        if timeframe.endswith("m"):
+            try:
+                minutes = int(timeframe[:-1])
+            except:
+                minutes = 15
+        elif timeframe.endswith("h"):
+            try:
+                minutes = int(timeframe[:-1]) * 60
+            except:
+                minutes = 15
+        
+        now = datetime.now()
+        
+        # Вычисляем время закрытия следующей свечи
+        if minutes < 60:
+            # Минутные свечи: округляем до ближайшего кратного minutes
+            current_minute = now.minute
+            next_close_minute = ((current_minute // minutes) + 1) * minutes
+            if next_close_minute >= 60:
+                next_close = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            else:
+                next_close = now.replace(minute=next_close_minute, second=0, microsecond=0)
+        elif minutes == 60:
+            # Часовые свечи: закрытие в :00 каждого часа
+            if now.minute == 0 and now.second < 5:
+                # Свеча только что закрылась, следующая через час
+                next_close = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            else:
+                next_close = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        else:
+            # Многочасовые свечи (4h, 1d и т.д.)
+            hours = minutes // 60
+            current_hour = now.hour
+            next_close_hour = ((current_hour // hours) + 1) * hours
+            if next_close_hour >= 24:
+                next_close = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                next_close = now.replace(hour=next_close_hour, minute=0, second=0, microsecond=0)
+        
+        with self.lock:
+            # Проверяем, есть ли уже кулдаун от убытков - если да, берем максимальный
+            existing_cooldown = self.cooldowns.get(symbol)
+            if existing_cooldown:
+                existing_until = datetime.fromisoformat(existing_cooldown.cooldown_until)
+                if existing_until > next_close:
+                    # Существующий кулдаун длиннее, оставляем его
+                    logger.info(f"Keeping existing cooldown for {symbol} until {existing_until.isoformat()} (longer than next candle)")
+                    return
+            
+            self.cooldowns[symbol] = SymbolCooldown(
+                symbol=symbol,
+                cooldown_until=next_close.isoformat(),
+                consecutive_losses=0,
+                reason="position_closed"
+            )
+        self.save()
+        logger.info(f"Set cooldown for {symbol} until next candle close: {next_close.isoformat()}")
+    
     def remove_cooldown(self, symbol: str):
         """Удаляет cooldown для символа (ручное снятие разморозки)"""
         with self.lock:
             if symbol in self.cooldowns:
                 del self.cooldowns[symbol]
-        self.save()
+                self.save()
     
     def get_consecutive_losses(self, symbol: str) -> int:
         """Получает количество последовательных убытков для символа"""
