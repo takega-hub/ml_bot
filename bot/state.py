@@ -303,33 +303,47 @@ class BotState:
     def get_cooldown_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Получает информацию о cooldown для символа (если есть)"""
         should_save = False
-        with self.lock:
-            if symbol not in self.cooldowns:
+        try:
+            # Используем timeout для lock, чтобы избежать зависания
+            if not self.lock.acquire(timeout=2.0):
+                logger.warning(f"[state] Failed to acquire lock for get_cooldown_info({symbol})")
                 return None
             
-            cooldown = self.cooldowns[symbol]
-            cooldown_until = datetime.fromisoformat(cooldown.cooldown_until)
-            now = datetime.now()
-            
-            if now < cooldown_until:
-                # Cooldown активен
-                time_left = cooldown_until - now
-                hours_left = time_left.total_seconds() / 3600
-                return {
-                    "active": True,
-                    "cooldown_until": cooldown_until,
-                    "hours_left": hours_left,
-                    "consecutive_losses": cooldown.consecutive_losses,
-                    "reason": cooldown.reason
-                }
-            else:
-                # Cooldown истек, удаляем
-                del self.cooldowns[symbol]
-                should_save = True
+            try:
+                if symbol not in self.cooldowns:
+                    return None
+                
+                cooldown = self.cooldowns[symbol]
+                cooldown_until = datetime.fromisoformat(cooldown.cooldown_until)
+                now = datetime.now()
+                
+                if now < cooldown_until:
+                    # Cooldown активен
+                    time_left = cooldown_until - now
+                    hours_left = time_left.total_seconds() / 3600
+                    return {
+                        "active": True,
+                        "cooldown_until": cooldown_until,
+                        "hours_left": hours_left,
+                        "consecutive_losses": cooldown.consecutive_losses,
+                        "reason": cooldown.reason
+                    }
+                else:
+                    # Cooldown истек, удаляем
+                    del self.cooldowns[symbol]
+                    should_save = True
+            finally:
+                self.lock.release()
+        except Exception as e:
+            logger.error(f"[state] Error in get_cooldown_info({symbol}): {e}")
+            return None
         
         if should_save:
             # Сохраняем вне lock, чтобы избежать дедлока
-            self.save()
+            try:
+                self.save()
+            except Exception as e:
+                logger.error(f"[state] Error saving after cooldown removal in get_cooldown_info: {e}")
         return None
     
     def set_cooldown(self, symbol: str, consecutive_losses: int, reason: str):
@@ -419,10 +433,26 @@ class BotState:
     
     def remove_cooldown(self, symbol: str):
         """Удаляет cooldown для символа (ручное снятие разморозки)"""
-        with self.lock:
-            if symbol in self.cooldowns:
-                del self.cooldowns[symbol]
-                self.save()
+        try:
+            # Используем timeout для lock, чтобы избежать зависания
+            if not self.lock.acquire(timeout=2.0):
+                logger.warning(f"[state] Failed to acquire lock for remove_cooldown({symbol})")
+                return
+            
+            try:
+                if symbol in self.cooldowns:
+                    del self.cooldowns[symbol]
+            finally:
+                self.lock.release()
+        except Exception as e:
+            logger.error(f"[state] Error in remove_cooldown({symbol}): {e}")
+            return
+        
+        # Сохраняем вне lock, чтобы избежать дедлока
+        try:
+            self.save()
+        except Exception as e:
+            logger.error(f"[state] Error saving after remove_cooldown({symbol}): {e}")
     
     def get_consecutive_losses(self, symbol: str) -> int:
         """Получает количество последовательных убытков для символа"""

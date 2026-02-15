@@ -413,10 +413,35 @@ class TelegramBot:
             if not symbol.endswith("USDT"):
                 await query.answer("⚠️ Некорректный символ", show_alert=True)
                 return
-            # Выполняем в отдельном потоке, чтобы не блокировать event loop
-            await asyncio.to_thread(self.state.remove_cooldown, symbol)
+            
+            logger.info(f"[telegram_bot] Removing cooldown for {symbol}")
+            try:
+                # Выполняем в отдельном потоке с таймаутом, чтобы не блокировать event loop
+                await asyncio.wait_for(
+                    asyncio.to_thread(self.state.remove_cooldown, symbol),
+                    timeout=3.0  # Таймаут 3 секунды
+                )
+                logger.info(f"[telegram_bot] Cooldown removed for {symbol}")
+            except asyncio.TimeoutError:
+                logger.warning(f"[telegram_bot] Timeout removing cooldown for {symbol}")
+                await query.answer("⚠️ Таймаут при снятии разморозки, попробуйте еще раз", show_alert=True)
+                return
+            except Exception as e:
+                logger.error(f"[telegram_bot] Error removing cooldown for {symbol}: {e}", exc_info=True)
+                await query.answer(f"❌ Ошибка при снятии разморозки: {str(e)}", show_alert=True)
+                return
+            
             await query.answer(f"✅ Разморозка снята для {symbol}", show_alert=True)
-            await self.show_pairs_settings(query)
+            
+            # Обновляем меню с таймаутом
+            try:
+                await asyncio.wait_for(
+                    self.show_pairs_settings(query),
+                    timeout=5.0  # Таймаут 5 секунд для обновления меню
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[telegram_bot] Timeout showing pairs settings after removing cooldown")
+                await query.answer("⚠️ Меню обновляется...", show_alert=False)
         elif query.data.startswith("toggle_ml_"):
             # Обрабатываем переключение ML настроек ПЕРЕД общим toggle_
             setting_name = query.data.replace("toggle_ml_", "")
@@ -591,8 +616,18 @@ class TelegramBot:
         all_possible, active_symbols = await asyncio.to_thread(get_symbols_data)
         
         keyboard = []
-        # Собираем информацию о cooldown для всех символов параллельно
-        cooldown_tasks = [asyncio.to_thread(self.state.get_cooldown_info, s) for s in all_possible]
+        # Собираем информацию о cooldown для всех символов параллельно с таймаутом
+        async def get_cooldown_with_timeout(symbol):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self.state.get_cooldown_info, symbol),
+                    timeout=2.0  # Таймаут 2 секунды на каждый символ
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[telegram_bot] Cooldown info timeout for {symbol}")
+                return None
+        
+        cooldown_tasks = [get_cooldown_with_timeout(s) for s in all_possible]
         cooldown_infos = await asyncio.gather(*cooldown_tasks)
         
         for s, cooldown_info in zip(all_possible, cooldown_infos):
