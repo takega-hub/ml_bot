@@ -243,23 +243,38 @@ class BotState:
     def is_symbol_in_cooldown(self, symbol: str) -> bool:
         """Проверяет, находится ли символ в cooldown"""
         should_save = False
-        with self.lock:
-            if symbol not in self.cooldowns:
+        try:
+            # Используем timeout для lock, чтобы избежать зависания
+            if not self.lock.acquire(timeout=2.0):
+                logger.warning(f"[state] Failed to acquire lock for is_symbol_in_cooldown({symbol}), assuming no cooldown")
                 return False
             
-            cooldown = self.cooldowns[symbol]
-            cooldown_until = datetime.fromisoformat(cooldown.cooldown_until)
-            
-            if datetime.now() < cooldown_until:
-                return True
-            else:
-                # Cooldown истек, удаляем
-                del self.cooldowns[symbol]
-                should_save = True
+            try:
+                if symbol not in self.cooldowns:
+                    return False
+                
+                cooldown = self.cooldowns[symbol]
+                cooldown_until = datetime.fromisoformat(cooldown.cooldown_until)
+                
+                if datetime.now() < cooldown_until:
+                    return True
+                else:
+                    # Cooldown истек, удаляем
+                    del self.cooldowns[symbol]
+                    should_save = True
+            finally:
+                self.lock.release()
+        except Exception as e:
+            logger.error(f"[state] Error in is_symbol_in_cooldown({symbol}): {e}")
+            return False
         
         if should_save:
             # Сохраняем вне lock, чтобы избежать дедлока
-            self.save()
+            # Используем try-except, чтобы не блокировать, если save() зависнет
+            try:
+                self.save()
+            except Exception as e:
+                logger.error(f"[state] Error saving after cooldown removal: {e}")
         return False
     
     def get_cooldown_info(self, symbol: str) -> Optional[Dict[str, Any]]:

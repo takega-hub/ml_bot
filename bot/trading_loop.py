@@ -347,8 +347,17 @@ class TradingLoop:
             # 0. Проверяем cooldown
             # КРИТИЧНО: is_symbol_in_cooldown() может вызывать save() (запись в файл)
             # Оборачиваем в to_thread() чтобы не блокировать event loop
+            # Добавляем таймаут, чтобы избежать зависания
             logger.info(f"[{symbol}] Checking cooldown...")
-            in_cooldown = await asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol)
+            try:
+                in_cooldown = await asyncio.wait_for(
+                    asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol),
+                    timeout=5.0  # Таймаут 5 секунд
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[{symbol}] Cooldown check timed out, assuming no cooldown")
+                in_cooldown = False
+            
             if in_cooldown:
                 logger.info(f"[{symbol}] In cooldown, returning")
                 return
