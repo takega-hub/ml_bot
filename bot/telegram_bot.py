@@ -413,7 +413,8 @@ class TelegramBot:
             if not symbol.endswith("USDT"):
                 await query.answer("⚠️ Некорректный символ", show_alert=True)
                 return
-            self.state.remove_cooldown(symbol)
+            # Выполняем в отдельном потоке, чтобы не блокировать event loop
+            await asyncio.to_thread(self.state.remove_cooldown, symbol)
             await query.answer(f"✅ Разморозка снята для {symbol}", show_alert=True)
             await self.show_pairs_settings(query)
         elif query.data.startswith("toggle_ml_"):
