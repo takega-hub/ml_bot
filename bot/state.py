@@ -57,6 +57,10 @@ class BotState:
     def __init__(self, state_file: str = "runtime_state.json"):
         self.state_file = Path(state_file)
         self.lock = threading.Lock()
+        self._save_lock = threading.Lock()  # Отдельный lock для сохранения, чтобы избежать блокировки
+        import time
+        self._last_save_time = time.time()  # Время последнего сохранения
+        self._save_cooldown = 0.1  # Минимальный интервал между сохранениями (100ms)
         
         # Default state
         self.is_running: bool = False
@@ -127,21 +131,40 @@ class BotState:
             print(f"[state] Error loading state: {e}")
 
     def save(self):
-        with self.lock:
+        # Защита от частых вызовов - пропускаем сохранение, если прошло меньше _save_cooldown секунд
+        import time
+        current_time = time.time()
+        if current_time - self._last_save_time < self._save_cooldown:
+            return  # Пропускаем сохранение, если оно было недавно
+        
+        # Используем отдельный lock для сохранения, чтобы не блокировать основной lock
+        if not self._save_lock.acquire(blocking=False):
+            return  # Если сохранение уже идет, пропускаем
+        
+        try:
+            # Минимизируем время удержания основного lock - готовим данные под lock, пишем без lock
             try:
-                data = {
-                    "is_running": self.is_running,
-                    "active_symbols": self.active_symbols,
-                    "known_symbols": self.known_symbols,
-                    "symbol_models": self.symbol_models,
-                    "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
-                    "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
-                    "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()}
-                }
+                # Быстро копируем данные под lock
+                with self.lock:
+                    data = {
+                        "is_running": self.is_running,
+                        "active_symbols": list(self.active_symbols),  # Копируем список
+                        "known_symbols": list(self.known_symbols),  # Копируем список
+                        "symbol_models": dict(self.symbol_models),  # Копируем словарь
+                        "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
+                        "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
+                        "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()}
+                    }
+                
+                # Записываем в файл БЕЗ основного lock, чтобы не блокировать другие операции
                 with open(self.state_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
+                
+                self._last_save_time = current_time
             except Exception as e:
-                print(f"[state] Error saving state: {e}")
+                logger.error(f"[state] Error saving state: {e}")
+        finally:
+            self._save_lock.release()
 
     def set_running(self, status: bool):
         self.is_running = status
