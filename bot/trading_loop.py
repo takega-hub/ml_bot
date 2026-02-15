@@ -1019,9 +1019,18 @@ class TradingLoop:
             # base_order_usd - это маржа в USD
             # Размер позиции в USD = маржа * leverage
             # Количество = (маржа * leverage) / цена
-            fixed_margin_usd = (
-                self.settings.risk.add_order_usd if is_add else self.settings.risk.base_order_usd
-            )
+            # При добавлении к позиции используем половину от размера позиции (notional)
+            if is_add:
+                # Сначала считаем размер позиции для новой позиции
+                base_position_size_usd = self.settings.risk.base_order_usd * self.settings.leverage
+                # При добавлении используем половину от размера позиции
+                position_size_usd = base_position_size_usd / 2.0
+                # Маржа = размер позиции / leverage
+                fixed_margin_usd = position_size_usd / self.settings.leverage
+            else:
+                fixed_margin_usd = self.settings.risk.base_order_usd
+                # Размер позиции в USD = маржа * leverage
+                position_size_usd = fixed_margin_usd * self.settings.leverage
             
             # Проверяем, что маржа не превышает баланс
             if fixed_margin_usd > balance:
@@ -1030,9 +1039,8 @@ class TradingLoop:
                     f"using available balance"
                 )
                 fixed_margin_usd = balance
-            
-            # Размер позиции в USD = маржа * leverage
-            position_size_usd = fixed_margin_usd * self.settings.leverage
+                # Пересчитываем размер позиции с учетом ограничения по балансу
+                position_size_usd = fixed_margin_usd * self.settings.leverage
             
             # Количество монет = размер позиции / цена
             total_qty = position_size_usd / signal.price
