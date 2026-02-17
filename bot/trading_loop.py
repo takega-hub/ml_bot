@@ -310,6 +310,7 @@ class TradingLoop:
                                             await self.check_partial_close(symbol, position)
                                             
                                             # Обновляем breakeven stop
+                                            logger.debug(f"[{symbol}] Calling update_breakeven_stop for position size={size}")
                                             await self.update_breakeven_stop(symbol, position)
                                             
                                             # Обновляем trailing stop
@@ -1283,13 +1284,16 @@ class TradingLoop:
                 return
             
             if not position_info or not isinstance(position_info, dict):
+                logger.debug(f"[{symbol}] update_breakeven_stop: position_info is None or not dict")
                 return
             
             if not position_info.get("size"):
+                logger.debug(f"[{symbol}] update_breakeven_stop: position size is empty")
                 return
             
             size = float(position_info.get("size", 0))
             if size == 0:
+                logger.debug(f"[{symbol}] update_breakeven_stop: position size is 0")
                 return
             
             side = position_info.get("side")
@@ -1298,6 +1302,7 @@ class TradingLoop:
             current_sl = position_info.get("stopLoss")
             
             if not entry_price or not mark_price:
+                logger.debug(f"[{symbol}] update_breakeven_stop: entry_price={entry_price}, mark_price={mark_price}")
                 return
             
             # Рассчитываем текущий PnL в процентах
@@ -1306,64 +1311,69 @@ class TradingLoop:
             else:  # Sell
                 pnl_pct = ((entry_price - mark_price) / entry_price) * 100
             
+            logger.debug(f"[{symbol}] update_breakeven_stop: side={side}, entry={entry_price:.6f}, mark={mark_price:.6f}, pnl_pct={pnl_pct:.2f}%, current_sl={current_sl}")
+            
             # Проверяем, нужно ли активировать безубыток (многоуровневый)
             level1_activation = self.settings.risk.breakeven_level1_activation_pct * 100  # Конвертируем в %
             level2_activation = self.settings.risk.breakeven_level2_activation_pct * 100  # Конвертируем в %
             level1_sl_pct = self.settings.risk.breakeven_level1_sl_pct
             level2_sl_pct = self.settings.risk.breakeven_level2_sl_pct
             
+            logger.debug(f"[{symbol}] Breakeven thresholds: level1_activation={level1_activation:.2f}%, level2_activation={level2_activation:.2f}%, level1_sl_pct={level1_sl_pct:.4f}, level2_sl_pct={level2_sl_pct:.4f}")
+            
             # Определяем, какой уровень активировать
+            new_sl = None
+            level = None
+            
             if pnl_pct >= level2_activation:
                 # 2-я ступень: при прибыли >= level2_activation ставим SL на level2_sl_pct от входа
+                level = "2-я ступень"
                 if side == "Buy":
                     new_sl = entry_price * (1 + level2_sl_pct)
                 else:
                     new_sl = entry_price * (1 - level2_sl_pct)
             elif pnl_pct >= level1_activation:
                 # 1-я ступень: при прибыли >= level1_activation ставим SL на level1_sl_pct от входа
+                level = "1-я ступень"
                 if side == "Buy":
                     new_sl = entry_price * (1 + level1_sl_pct)
                 else:
                     new_sl = entry_price * (1 - level1_sl_pct)
             else:
                 # Прибыль недостаточна для активации безубытка
+                logger.debug(f"[{symbol}] PnL {pnl_pct:.2f}% < level1_activation {level1_activation:.2f}%, безубыток не активируется")
                 return
-                
-                # Округляем до tick size
-                new_sl = self.bybit.round_price(new_sl, symbol)
-                tick_size = self.bybit.get_price_step(symbol)
-                
-                # Проверяем, нужно ли обновлять SL
-                should_update = False
-                if current_sl:
-                    current_sl_float = float(current_sl)
-                    # Если новый SL совпадает с текущим (с учетом шага цены), не обновляем
-                    if tick_size > 0 and abs(new_sl - current_sl_float) < (tick_size / 2):
-                        should_update = False
-                    elif side == "Buy" and new_sl > current_sl_float:
-                        should_update = True
-                    elif side == "Sell" and new_sl < current_sl_float:
-                        should_update = True
-                else:
+            
+            # Округляем до tick size
+            new_sl = self.bybit.round_price(new_sl, symbol)
+            tick_size = self.bybit.get_price_step(symbol)
+            
+            # Проверяем, нужно ли обновлять SL
+            should_update = False
+            if current_sl:
+                current_sl_float = float(current_sl)
+                # Если новый SL совпадает с текущим (с учетом шага цены), не обновляем
+                if tick_size > 0 and abs(new_sl - current_sl_float) < (tick_size / 2):
+                    should_update = False
+                elif side == "Buy" and new_sl > current_sl_float:
                     should_update = True
+                elif side == "Sell" and new_sl < current_sl_float:
+                    should_update = True
+            else:
+                should_update = True
+            
+            if should_update:
+                logger.info(f"Moving {symbol} SL to breakeven ({level}): {new_sl} (PnL: {pnl_pct:.2f}%)")
+                resp = await asyncio.to_thread(
+                    self.bybit.set_trading_stop,
+                    symbol=symbol,
+                    stop_loss=new_sl
+                )
                 
-                if should_update:
-                    # Определяем, какой уровень активирован
-                    if pnl_pct >= level2_activation:
-                        level = "2-я ступень"
-                    else:
-                        level = "1-я ступень"
-                    logger.info(f"Moving {symbol} SL to breakeven ({level}): {new_sl} (PnL: {pnl_pct:.2f}%)")
-                    resp = await asyncio.to_thread(
-                        self.bybit.set_trading_stop,
-                        symbol=symbol,
-                        stop_loss=new_sl
+                if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
+                    await self.notifier.medium(
+                        f"🛡️ БЕЗУБЫТОК АКТИВИРОВАН ({level})\n{symbol} SL → ${new_sl:.2f}\nТекущий PnL: +{pnl_pct:.2f}%"
                     )
-                    
-                    if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
-                        await self.notifier.medium(
-                            f"🛡️ БЕЗУБЫТОК АКТИВИРОВАН ({level})\n{symbol} SL → ${new_sl:.2f}\nТекущий PnL: +{pnl_pct:.2f}%"
-                        )
         
         except Exception as e:
             # Bybit возвращает "not modified" если стоп-лосс уже равен текущему

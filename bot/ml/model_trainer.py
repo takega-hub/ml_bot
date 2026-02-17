@@ -105,11 +105,54 @@ class PreTrainedVotingEnsemble:
         rf_proba = self.rf_model.predict_proba(X)
         # Для XGBoost нужно преобразовать классы обратно
         xgb_proba = self.xgb_model.predict_proba(X)
-        # XGBoost возвращает классы 0,1,2, нужно преобразовать в -1,0,1
-        xgb_proba_reordered = np.zeros_like(rf_proba)
-        xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
-        xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
-        xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        
+        # Проверяем количество классов в предсказаниях
+        n_xgb_classes = xgb_proba.shape[1]
+        n_rf_classes = rf_proba.shape[1]
+        n_samples = rf_proba.shape[0]
+        
+        # Всегда создаем массив для 3 классов [-1, 0, 1] (SHORT, HOLD, LONG)
+        # независимо от того, сколько классов в исходных данных
+        xgb_proba_reordered = np.zeros((n_samples, 3))
+        
+        if n_xgb_classes == 3:
+            # Полная классификация: [0,1,2] -> [-1,0,1]
+            xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
+            xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
+            xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        elif n_xgb_classes == 2:
+            # Бинарная классификация: нужно определить, какие классы
+            if hasattr(self.xgb_model, '_class_offset'):
+                offset = self.xgb_model._class_offset
+                if offset == 1:
+                    # Классы были [1,2] -> [0,1], т.е. LONG и SHORT (без HOLD)
+                    xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (1 -> -1)
+                    xgb_proba_reordered[:, 1] = 0.0  # HOLD = 0
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (2 -> 1)
+                else:
+                    # Классы были [0,1] -> [0,1], т.е. HOLD и LONG (без SHORT)
+                    xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                    xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD (0 -> 0)
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (1 -> 1)
+            else:
+                # Не знаем смещение, предполагаем что это [0,1] -> HOLD и LONG
+                xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD
+                xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG
+        else:
+            # Неожиданное количество классов, используем равномерное распределение
+            xgb_proba_reordered = np.ones((n_samples, 3)) / 3.0
+        
+        # Если RF тоже имеет меньше классов, расширяем до 3
+        if n_rf_classes < 3:
+            rf_proba_expanded = np.zeros((n_samples, 3))
+            # Определяем, какие классы есть в RF
+            rf_classes = self.rf_model.classes_
+            for i, cls in enumerate([-1, 0, 1]):  # SHORT, HOLD, LONG
+                if cls in rf_classes:
+                    rf_idx = np.where(rf_classes == cls)[0][0]
+                    rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
+            rf_proba = rf_proba_expanded
         
         # Взвешенное усреднение
         ensemble_proba = (self.rf_weight * rf_proba + 
@@ -137,12 +180,55 @@ class WeightedEnsemble:
         
         # Для XGBoost нужно преобразовать классы обратно
         xgb_proba = self.xgb_model.predict_proba(X)
-        # XGBoost возвращает классы 0,1,2, нужно преобразовать в -1,0,1
-        # Переупорядочиваем: [0,1,2] -> [-1,0,1]
-        xgb_proba_reordered = np.zeros_like(rf_proba)
-        xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
-        xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
-        xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        
+        # Проверяем количество классов в предсказаниях
+        n_xgb_classes = xgb_proba.shape[1]
+        n_rf_classes = rf_proba.shape[1]
+        n_samples = rf_proba.shape[0]
+        
+        # Всегда создаем массив для 3 классов [-1, 0, 1] (SHORT, HOLD, LONG)
+        # независимо от того, сколько классов в исходных данных
+        xgb_proba_reordered = np.zeros((n_samples, 3))
+        
+        if n_xgb_classes == 3:
+            # Полная классификация: [0,1,2] -> [-1,0,1]
+            xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
+            xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
+            xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        elif n_xgb_classes == 2:
+            # Бинарная классификация: нужно определить, какие классы
+            # Проверяем смещение, если оно сохранено
+            if hasattr(self.xgb_model, '_class_offset'):
+                offset = self.xgb_model._class_offset
+                if offset == 1:
+                    # Классы были [1,2] -> [0,1], т.е. LONG и SHORT (без HOLD)
+                    xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (1 -> -1)
+                    xgb_proba_reordered[:, 1] = 0.0  # HOLD = 0
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (2 -> 1)
+                else:
+                    # Классы были [0,1] -> [0,1], т.е. HOLD и LONG (без SHORT)
+                    xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                    xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD (0 -> 0)
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (1 -> 1)
+            else:
+                # Не знаем смещение, предполагаем что это [0,1] -> HOLD и LONG
+                xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD
+                xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG
+        else:
+            # Неожиданное количество классов, используем равномерное распределение
+            xgb_proba_reordered = np.ones((n_samples, 3)) / 3.0
+        
+        # Если RF тоже имеет меньше классов, расширяем до 3
+        if n_rf_classes < 3:
+            rf_proba_expanded = np.zeros((n_samples, 3))
+            # Определяем, какие классы есть в RF
+            rf_classes = self.rf_model.classes_
+            for i, cls in enumerate([-1, 0, 1]):  # SHORT, HOLD, LONG
+                if cls in rf_classes:
+                    rf_idx = np.where(rf_classes == cls)[0][0]
+                    rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
+            rf_proba = rf_proba_expanded
         
         # Взвешенное усреднение
         ensemble_proba = (self.rf_weight * rf_proba + 
@@ -172,20 +258,82 @@ class TripleEnsemble:
         
         # Для XGBoost нужно преобразовать классы обратно
         xgb_proba = self.xgb_model.predict_proba(X)
-        xgb_proba_reordered = np.zeros_like(rf_proba)
-        xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
-        xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
-        xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        
+        # Проверяем количество классов в предсказаниях
+        n_xgb_classes = xgb_proba.shape[1]
+        n_rf_classes = rf_proba.shape[1]
+        
+        # Всегда создаем массив для 3 классов [-1, 0, 1] (SHORT, HOLD, LONG)
+        n_samples = rf_proba.shape[0]
+        xgb_proba_reordered = np.zeros((n_samples, 3))
+        
+        if n_xgb_classes == 3:
+            # Полная классификация: [0,1,2] -> [-1,0,1]
+            xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (0 -> -1)
+            xgb_proba_reordered[:, 1] = xgb_proba[:, 1]  # HOLD (1 -> 0)
+            xgb_proba_reordered[:, 2] = xgb_proba[:, 2]  # LONG (2 -> 1)
+        elif n_xgb_classes == 2:
+            # Бинарная классификация: нужно определить, какие классы
+            if hasattr(self.xgb_model, '_class_offset'):
+                offset = self.xgb_model._class_offset
+                if offset == 1:
+                    # Классы были [1,2] -> [0,1], т.е. LONG и SHORT (без HOLD)
+                    xgb_proba_reordered[:, 0] = xgb_proba[:, 0]  # SHORT (1 -> -1)
+                    xgb_proba_reordered[:, 1] = 0.0  # HOLD = 0
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (2 -> 1)
+                else:
+                    # Классы были [0,1] -> [0,1], т.е. HOLD и LONG (без SHORT)
+                    xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                    xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD (0 -> 0)
+                    xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG (1 -> 1)
+            else:
+                # Не знаем смещение, предполагаем что это [0,1] -> HOLD и LONG
+                xgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+                xgb_proba_reordered[:, 1] = xgb_proba[:, 0]  # HOLD
+                xgb_proba_reordered[:, 2] = xgb_proba[:, 1]  # LONG
+        else:
+            # Неожиданное количество классов, используем равномерное распределение
+            xgb_proba_reordered = np.ones((n_samples, 3)) / 3.0
+        
+        # Если RF тоже имеет меньше классов, расширяем до 3
+        if n_rf_classes < 3:
+            rf_proba_expanded = np.zeros((n_samples, 3))
+            # Определяем, какие классы есть в RF
+            rf_classes = self.rf_model.classes_
+            for i, cls in enumerate([-1, 0, 1]):  # SHORT, HOLD, LONG
+                if cls in rf_classes:
+                    rf_idx = np.where(rf_classes == cls)[0][0]
+                    rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
+            rf_proba = rf_proba_expanded
         
         # Для LightGBM тоже нужно преобразовать
-        # Подавляем предупреждение о feature names (не критично для работы модели)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            lgb_proba = self.lgb_model.predict_proba(X)
-        lgb_proba_reordered = np.zeros_like(rf_proba)
-        lgb_proba_reordered[:, 0] = lgb_proba[:, 0]  # SHORT (0 -> -1)
-        lgb_proba_reordered[:, 1] = lgb_proba[:, 1]  # HOLD (1 -> 0)
-        lgb_proba_reordered[:, 2] = lgb_proba[:, 2]  # LONG (2 -> 1)
+        lgb_proba = self.lgb_model.predict_proba(X)
+        n_lgb_classes = lgb_proba.shape[1]
+        lgb_proba_reordered = np.zeros((n_samples, 3))
+        
+        if n_lgb_classes == 3:
+            # Полная классификация: [0,1,2] -> [-1,0,1]
+            lgb_proba_reordered[:, 0] = lgb_proba[:, 0]  # SHORT (0 -> -1)
+            lgb_proba_reordered[:, 1] = lgb_proba[:, 1]  # HOLD (1 -> 0)
+            lgb_proba_reordered[:, 2] = lgb_proba[:, 2]  # LONG (2 -> 1)
+        elif n_lgb_classes == 2:
+            # Бинарная классификация - предполагаем HOLD и LONG
+            lgb_proba_reordered[:, 0] = 0.0  # SHORT = 0
+            lgb_proba_reordered[:, 1] = lgb_proba[:, 0]  # HOLD
+            lgb_proba_reordered[:, 2] = lgb_proba[:, 1]  # LONG
+        else:
+            lgb_proba_reordered = np.ones((n_samples, 3)) / 3.0
+        
+        # Если RF тоже имеет меньше классов, расширяем до 3
+        if n_rf_classes < 3:
+            rf_proba_expanded = np.zeros((n_samples, 3))
+            # Определяем, какие классы есть в RF
+            rf_classes = self.rf_model.classes_
+            for i, cls in enumerate([-1, 0, 1]):  # SHORT, HOLD, LONG
+                if cls in rf_classes:
+                    rf_idx = np.where(rf_classes == cls)[0][0]
+                    rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
+            rf_proba = rf_proba_expanded
         
         # Взвешенное усреднение всех трех моделей
         ensemble_proba = (self.rf_weight * rf_proba + 
@@ -658,6 +806,10 @@ class ModelTrainer:
         # Преобразуем y для XGBoost (нужны индексы 0,1,2 вместо -1,0,1)
         y_xgb = y + 1  # -1,0,1 -> 0,1,2
         
+        # Определяем количество уникальных классов
+        unique_classes = np.unique(y_xgb)
+        num_classes = len(unique_classes)
+        
         # Вычисляем веса образцов для XGBoost
         sample_weights = np.zeros(len(y_xgb))
         
@@ -687,15 +839,25 @@ class ModelTrainer:
         # Создаем и обучаем модель
         # Примечание: scale_pos_weight работает только для бинарной классификации,
         # поэтому не используем его для мультиклассовой задачи (3 класса)
-        model = xgb.XGBClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            random_state=random_state,
-            n_jobs=-1,
-            eval_metric="mlogloss",
-            # Балансировка классов выполняется через sample_weight в fit()
-        )
+        # Настраиваем параметры в зависимости от количества классов
+        xgb_params = {
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "random_state": random_state,
+            "n_jobs": -1,
+            "eval_metric": "mlogloss",
+        }
+        
+        # Если больше 2 классов, настраиваем для мультиклассовой классификации
+        if num_classes > 2:
+            xgb_params["objective"] = "multi:softprob"
+            xgb_params["num_class"] = num_classes
+        else:
+            # Бинарная классификация
+            xgb_params["objective"] = "binary:logistic"
+        
+        model = xgb.XGBClassifier(**xgb_params)
         
         # Обучаем с весами образцов
         model.fit(X_scaled, y_xgb, sample_weight=sample_weights)
@@ -1165,7 +1327,20 @@ class ModelTrainer:
                 rf_fold.fit(X_train_fold, y_train_fold)
                 
                 # Обучаем XGBoost на fold
-                y_train_xgb = y_train_fold + 1
+                y_train_xgb = y_train_fold + 1  # Преобразуем -1,0,1 -> 0,1,2
+                # Определяем количество уникальных классов
+                unique_classes = np.unique(y_train_xgb)
+                num_classes = len(unique_classes)
+                
+                # XGBoost требует, чтобы классы начинались с 0
+                # Нормализуем классы: [1, 2] -> [0, 1], [0, 1, 2] -> [0, 1, 2]
+                min_class = min(unique_classes)
+                if min_class > 0:
+                    # Сдвигаем классы, чтобы начать с 0
+                    y_train_xgb_normalized = y_train_xgb - min_class
+                else:
+                    y_train_xgb_normalized = y_train_xgb
+                
                 xgb_fold = xgb.XGBClassifier(
                     n_estimators=xgb_n_estimators,
                     max_depth=xgb_max_depth,
@@ -1174,7 +1349,22 @@ class ModelTrainer:
                     n_jobs=-1,
                     eval_metric="mlogloss",
                 )
-                xgb_fold.fit(X_train_fold, y_train_xgb)
+                
+                # Если больше 2 классов, настраиваем для мультиклассовой классификации
+                if num_classes > 2:
+                    xgb_fold.set_params(
+                        objective='multi:softprob',
+                        num_class=num_classes
+                    )
+                else:
+                    # Бинарная классификация
+                    xgb_fold.set_params(objective='binary:logistic')
+                
+                xgb_fold.fit(X_train_fold, y_train_xgb_normalized)
+                
+                # Сохраняем смещение для обратного преобразования предсказаний
+                # Это будет использоваться в ансамбле, если нужно
+                xgb_fold._class_offset = min_class
                 
                 # Обучаем LightGBM на fold (если включен)
                 lgb_fold = None

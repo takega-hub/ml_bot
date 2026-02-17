@@ -536,6 +536,31 @@ class TelegramBot:
         elif query.data.startswith("apply_mtf_strategy_"):
             symbol = query.data.replace("apply_mtf_strategy_", "")
             await self.apply_mtf_strategy(query, symbol)
+        elif query.data.startswith("retrain_all_models_for_symbol_"):
+            symbol = query.data.replace("retrain_all_models_for_symbol_", "").upper()
+            await query.edit_message_text(
+                f"🔄 Запускаю переобучение всех моделей для {symbol}...\n\n"
+                "Это включает:\n"
+                "• 15m модели (без MTF и с MTF)\n"
+                "• 1h модели (без MTF и с MTF)\n\n"
+                "Это может занять 30-60 минут.\n"
+                "Вы будете получать уведомления о прогрессе.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Ожидание...", callback_data="waiting")]])
+            )
+            asyncio.create_task(self.retrain_all_models_for_symbol_async(symbol, query.from_user.id))
+        elif query.data.startswith("test_all_mtf_combinations_"):
+            symbol = query.data.replace("test_all_mtf_combinations_", "").upper()
+            await query.edit_message_text(
+                f"🧪 Запускаю тестирование всех MTF комбинаций для {symbol}...\n\n"
+                "Это включает:\n"
+                "• Тестирование всех комбинаций 1h × 15m моделей\n"
+                "• Сравнение результатов всех комбинаций\n"
+                "• Выбор лучшей комбинации\n\n"
+                "Это может занять 1-3 часа в зависимости от количества моделей.\n"
+                "Вы будете получать уведомления о прогрессе.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Ожидание...", callback_data="waiting")]])
+            )
+            asyncio.create_task(self.test_all_mtf_combinations_async(symbol, query.from_user.id))
         elif query.data.startswith("apply_model_"):
             # Формат: apply_model_{symbol}_{model_index}
             parts = query.data.replace("apply_model_", "").split("_", 1)
@@ -1249,6 +1274,8 @@ class TelegramBot:
             [InlineKeyboardButton("⏰ Выбрать 1h модель", callback_data=f"select_mtf_1h_{symbol}")],
             [InlineKeyboardButton("⏱ Выбрать 15m модель", callback_data=f"select_mtf_15m_{symbol}")],
             [InlineKeyboardButton("✅ Применить MTF стратегию", callback_data=f"apply_mtf_strategy_{symbol}")],
+            [InlineKeyboardButton("🧪 Тестировать все MTF комбинации", callback_data=f"test_all_mtf_combinations_{symbol}")],
+            [InlineKeyboardButton("🔄 Переобучить все модели", callback_data=f"retrain_all_models_for_symbol_{symbol}")],
             [InlineKeyboardButton("🔙 Назад", callback_data="settings_models")]
         ]
         
@@ -1279,6 +1306,8 @@ class TelegramBot:
             [InlineKeyboardButton("⏰ Выбрать 1h модель", callback_data=f"select_mtf_1h_{symbol}")],
             [InlineKeyboardButton("⏱ Выбрать 15m модель", callback_data=f"select_mtf_15m_{symbol}")],
             [InlineKeyboardButton("✅ Применить MTF стратегию", callback_data=f"apply_mtf_strategy_{symbol}")],
+            [InlineKeyboardButton("🧪 Тестировать все MTF комбинации", callback_data=f"test_all_mtf_combinations_{symbol}")],
+            [InlineKeyboardButton("🔄 Переобучить все модели", callback_data=f"retrain_all_models_for_symbol_{symbol}")],
             [InlineKeyboardButton("🔙 Назад", callback_data="settings_models")]
         ]
         
@@ -1753,6 +1782,232 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Error retraining models for {symbol}: {e}", exc_info=True)
             await self.send_notification(f"❌ Ошибка при обучении моделей для {symbol}: {str(e)}")
+    
+    async def retrain_all_models_for_symbol_async(self, symbol: str, user_id: int):
+        """Переобучает все модели по всем таймфреймам (15m и 1h) с MTF и без MTF для символа"""
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        try:
+            await self.send_notification(
+                f"🔄 Начато переобучение всех моделей для {symbol}...\n\n"
+                "Конфигурации:\n"
+                "• 15m без MTF\n"
+                "• 15m с MTF\n"
+                "• 1h без MTF\n"
+                "• 1h с MTF\n\n"
+                "Это может занять 30-60 минут.\n"
+                "Вы будете получать уведомления о прогрессе."
+            )
+            
+            # Путь к скрипту обучения
+            script_path = Path(__file__).parent.parent / "train_all_models_for_symbol.py"
+            
+            if not script_path.exists():
+                await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
+                return
+            
+            # Используем sys.executable для запуска с правильным Python
+            python_exe = sys.executable
+            cmd_args = [python_exe, str(script_path), "--symbol", symbol]
+            
+            # Запускаем обучение в отдельном процессе
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_path.parent)
+            )
+            
+            # Отслеживаем вывод
+            completed_configs = []
+            current_config = None
+            config_patterns = {
+                "15m БЕЗ MTF": ["15m", "БЕЗ MTF"],
+                "15m С MTF": ["15m", "С MTF"],
+                "1h БЕЗ MTF": ["1h", "БЕЗ MTF"],
+                "1h С MTF": ["1h", "С MTF"],
+            }
+            
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                
+                line_text = line.decode('utf-8', errors='ignore').strip()
+                
+                # Парсим вывод для уведомлений
+                for config_name, patterns in config_patterns.items():
+                    if all(pattern in line_text for pattern in patterns):
+                        if "Обучение моделей:" in line_text:
+                            current_config = config_name
+                            await self.send_notification(f"🔄 Обучение: {config_name} для {symbol}...")
+                            break
+                
+                if "✅ Успешно:" in line_text and current_config:
+                    completed_configs.append(current_config)
+                    await self.send_notification(f"✅ {current_config} завершено для {symbol}")
+                    current_config = None
+                
+                if "❌ Ошибка:" in line_text and current_config:
+                    await self.send_notification(f"❌ Ошибка при обучении {current_config} для {symbol}")
+                    current_config = None
+                
+                # Проверяем итоговую сводку
+                if "ИТОГОВАЯ СВОДКА" in line_text:
+                    await self.send_notification(f"📊 Итоговая сводка для {symbol}:\n{line_text[:200]}")
+            
+            # Ждем завершения процесса
+            await process.wait()
+            
+            if process.returncode == 0:
+                await self.send_notification(
+                    f"✅ Переобучение всех моделей для {symbol} завершено!\n\n"
+                    f"Завершено конфигураций: {len(completed_configs)}/4\n\n"
+                    "Обновите список моделей для просмотра результатов."
+                )
+            else:
+                # Читаем ошибки
+                stderr = await process.stderr.read()
+                error_msg = stderr.decode('utf-8', errors='ignore')[:500]
+                await self.send_notification(
+                    f"❌ Ошибка при переобучении моделей для {symbol}:\n{error_msg}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error retraining all models for {symbol}: {e}", exc_info=True)
+            await self.send_notification(f"❌ Ошибка при переобучении моделей для {symbol}: {str(e)}")
+    
+    async def test_all_mtf_combinations_async(self, symbol: str, user_id: int):
+        """Тестирует все MTF комбинации моделей для символа"""
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        try:
+            await self.send_notification(
+                f"🧪 Начато тестирование всех MTF комбинаций для {symbol}...\n\n"
+                "Это включает:\n"
+                "• Тестирование всех комбинаций 1h × 15m моделей\n"
+                "• Сравнение результатов всех комбинаций\n"
+                "• Выбор лучшей комбинации\n\n"
+                "Это может занять 1-3 часа в зависимости от количества моделей.\n"
+                "Вы будете получать уведомления о прогрессе."
+            )
+            
+            # Путь к скрипту тестирования
+            script_path = Path(__file__).parent.parent / "test_all_mtf_combinations.py"
+            
+            if not script_path.exists():
+                await self.send_notification(f"❌ Скрипт тестирования не найден: {script_path}")
+                return
+            
+            # Используем sys.executable для запуска с правильным Python
+            python_exe = sys.executable
+            cmd_args = [python_exe, str(script_path), "--symbol", symbol, "--days", "30"]
+            
+            # Запускаем тестирование в отдельном процессе
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(script_path.parent)
+            )
+            
+            # Отслеживаем вывод
+            total_combinations = 0
+            completed_combinations = 0
+            current_combo = None
+            
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                
+                line_text = line.decode('utf-8', errors='ignore').strip()
+                
+                # Парсим вывод для уведомлений
+                if "Всего комбинаций:" in line_text:
+                    try:
+                        # Извлекаем количество комбинаций
+                        parts = line_text.split(":")
+                        if len(parts) > 1:
+                            total_combinations = int(parts[1].strip())
+                            await self.send_notification(
+                                f"📊 Найдено {total_combinations} комбинаций для тестирования"
+                            )
+                    except:
+                        pass
+                
+                if "Комбинация" in line_text and "/" in line_text:
+                    try:
+                        # Извлекаем номер комбинации
+                        parts = line_text.split("Комбинация")[1].split("/")[0].strip()
+                        combo_num = int(parts)
+                        completed_combinations = combo_num
+                        
+                        # Отправляем уведомление каждые 10 комбинаций или при важных событиях
+                        if combo_num % 10 == 0 or combo_num == 1:
+                            progress_pct = (combo_num / total_combinations * 100) if total_combinations > 0 else 0
+                            await self.send_notification(
+                                f"🔄 Прогресс: {combo_num}/{total_combinations} комбинаций ({progress_pct:.1f}%)"
+                            )
+                    except:
+                        pass
+                
+                if "✅ Результат:" in line_text:
+                    # Извлекаем информацию о результате
+                    if "PnL:" in line_text:
+                        try:
+                            pnl_part = line_text.split("PnL:")[1].split(",")[0].strip()
+                            await self.send_notification(
+                                f"✅ Комбинация {completed_combinations}: {line_text}"
+                            )
+                        except:
+                            pass
+                
+                # Проверяем лучшие комбинации
+                if "🏆 ЛУЧШИЕ КОМБИНАЦИИ" in line_text:
+                    await self.send_notification("🏆 Начинаю анализ лучших комбинаций...")
+                
+                # Проверяем завершение
+                if "✅ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО" in line_text:
+                    await self.send_notification("✅ Тестирование завершено! Анализирую результаты...")
+            
+            # Ждем завершения процесса
+            await process.wait()
+            
+            if process.returncode == 0:
+                # Ищем файл с результатами
+                results_files = sorted(
+                    Path(".").glob(f"mtf_combinations_{symbol}_*.csv"),
+                    key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                    reverse=True
+                )
+                
+                if results_files:
+                    results_file = results_files[0]
+                    await self.send_notification(
+                        f"✅ Тестирование всех MTF комбинаций для {symbol} завершено!\n\n"
+                        f"📊 Результаты сохранены в:\n{results_file.name}\n\n"
+                        "Откройте файл для просмотра всех комбинаций и выбора лучшей."
+                    )
+                else:
+                    await self.send_notification(
+                        f"✅ Тестирование завершено, но файл результатов не найден"
+                    )
+            else:
+                # Читаем ошибки
+                stderr = await process.stderr.read()
+                error_msg = stderr.decode('utf-8', errors='ignore')[:500]
+                await self.send_notification(
+                    f"❌ Ошибка при тестировании MTF комбинаций для {symbol}:\n{error_msg}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error testing all MTF combinations for {symbol}: {e}", exc_info=True)
+            await self.send_notification(f"❌ Ошибка при тестировании MTF комбинаций для {symbol}: {str(e)}")
     
     async def train_new_pair_async(self, symbol: str, user_id: int):
         """Асинхронная функция для обучения модели новой пары"""
