@@ -1485,17 +1485,30 @@ class TradingLoop:
         try:
             # createdTime is usually when the position was opened (or updatedTime if added to)
             # Bybit V5: createdTime is string ms timestamp
-            created_time = float(position.get("createdTime", 0))
-            if created_time == 0:
-                created_time = float(position.get("updatedTime", 0))
+            created_time_ms = float(position.get("createdTime", 0))
+            if created_time_ms == 0:
+                created_time_ms = float(position.get("updatedTime", 0))
             
-            if created_time == 0:
+            if created_time_ms == 0:
                 return
 
-            open_time = pd.Timestamp(created_time, unit='ms')
-            now = pd.Timestamp.now()
-            duration_minutes = (now - open_time).total_seconds() / 60
+            # ВАЖНО: Используем UTC для корректного сравнения
+            open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
+            now = pd.Timestamp.now(tz='UTC')
             
+            # Проверка на аномальное время (будущее или слишком далекое прошлое)
+            # Если позиция открыта "в будущем" (рассинхрон часов), считаем duration = 0
+            if open_time > now:
+                duration_minutes = 0
+                logger.warning(f"[{symbol}] Position open time {open_time} is in the future relative to {now}. Clock sync issue?")
+            else:
+                duration_minutes = (now - open_time).total_seconds() / 60
+            
+            # Если длительность слишком большая (> 1 года), вероятно ошибка парсинга или старая "зависшая" запись
+            if duration_minutes > 525600:
+                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min. Ignoring Time Stop.")
+                return
+
             max_minutes = self.settings.risk.time_stop_minutes
             
             if duration_minutes > max_minutes:
@@ -1507,17 +1520,26 @@ class TradingLoop:
 
     async def check_early_exit(self, symbol: str, position: dict):
         try:
-            created_time = float(position.get("createdTime", 0))
-            if created_time == 0:
-                created_time = float(position.get("updatedTime", 0))
+            created_time_ms = float(position.get("createdTime", 0))
+            if created_time_ms == 0:
+                created_time_ms = float(position.get("updatedTime", 0))
             
-            if created_time == 0:
+            if created_time_ms == 0:
                 return
 
-            open_time = pd.Timestamp(created_time, unit='ms')
-            now = pd.Timestamp.now()
-            duration_minutes = (now - open_time).total_seconds() / 60
+            # ВАЖНО: Используем UTC для корректного сравнения
+            open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
+            now = pd.Timestamp.now(tz='UTC')
             
+            if open_time > now:
+                duration_minutes = 0
+            else:
+                duration_minutes = (now - open_time).total_seconds() / 60
+            
+            # Если длительность слишком большая (> 1 года), игнорируем
+            if duration_minutes > 525600:
+                return
+
             early_exit_minutes = self.settings.risk.early_exit_minutes
             min_profit_pct = self.settings.risk.early_exit_min_profit_pct
             
