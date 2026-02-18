@@ -1493,30 +1493,40 @@ class TradingLoop:
                 return
 
             # ВАЖНО: Используем UTC для корректного сравнения
+            raw_created_time = position.get("createdTime", 0)
+            raw_updated_time = position.get("updatedTime", 0)
+            
             try:
+                created_time_ms = float(raw_created_time)
+                if created_time_ms == 0:
+                    created_time_ms = float(raw_updated_time)
+                
+                if created_time_ms == 0:
+                    return
+
                 open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
                 now = pd.Timestamp.now(tz='UTC')
             except Exception as e:
                 logger.error(f"[{symbol}] Time parsing error: {e}")
                 return
 
-            # Проверка на аномальное время (будущее или слишком далекое прошлое)
-            # Если позиция открыта "в будущем" (рассинхрон часов), считаем duration = 0
+            # Проверка на аномальное время
             if open_time > now:
                 duration_minutes = 0
                 logger.warning(f"[{symbol}] Position open time {open_time} is in the future relative to {now}. Clock sync issue?")
             else:
                 duration_minutes = (now - open_time).total_seconds() / 60
             
-            # Если длительность слишком большая (> 1 года), вероятно ошибка парсинга или старая "зависшая" запись
-            # Увеличил лимит до 2 лет на всякий случай, но добавил логирование
-            if duration_minutes > 1051200: 
-                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min (open_time={open_time}, now={now}). Ignoring Time Stop.")
+            # ЗАЩИТА ОТ ОШИБОК API:
+            # Если длительность > 48 часов (2880 мин), а TimeStop настроен на 6 часов,
+            # то скорее всего это глюк API (старый timestamp) или мы не должны это трогать.
+            # Для intraday бота 48 часов - это вечность.
+            if duration_minutes > 2880: 
+                logger.warning(f"[{symbol}] Suspicious duration {duration_minutes:.1f} min (> 48h). Raw created: {raw_created_time}. Ignoring Time Stop.")
                 return
 
             max_minutes = self.settings.risk.time_stop_minutes
             
-            # Добавлена проверка на адекватность max_minutes
             if max_minutes <= 0:
                 return
 
@@ -1537,7 +1547,17 @@ class TradingLoop:
                 return
 
             # ВАЖНО: Используем UTC для корректного сравнения
+            raw_created_time = position.get("createdTime", 0)
+            raw_updated_time = position.get("updatedTime", 0)
+            
             try:
+                created_time_ms = float(raw_created_time)
+                if created_time_ms == 0:
+                    created_time_ms = float(raw_updated_time)
+                
+                if created_time_ms == 0:
+                    return
+
                 open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
                 now = pd.Timestamp.now(tz='UTC')
             except Exception as e:
@@ -1549,9 +1569,9 @@ class TradingLoop:
             else:
                 duration_minutes = (now - open_time).total_seconds() / 60
             
-            # Если длительность слишком большая (> 1 года), игнорируем
-            if duration_minutes > 1051200:
-                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min (open_time={open_time}, now={now}). Ignoring Early Exit.")
+            # ЗАЩИТА ОТ ОШИБОК API:
+            if duration_minutes > 2880: # 48 hours
+                logger.warning(f"[{symbol}] Suspicious duration {duration_minutes:.1f} min (> 48h). Raw created: {raw_created_time}. Ignoring Early Exit.")
                 return
 
             early_exit_minutes = self.settings.risk.early_exit_minutes
