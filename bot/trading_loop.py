@@ -1493,9 +1493,13 @@ class TradingLoop:
                 return
 
             # ВАЖНО: Используем UTC для корректного сравнения
-            open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
-            now = pd.Timestamp.now(tz='UTC')
-            
+            try:
+                open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
+                now = pd.Timestamp.now(tz='UTC')
+            except Exception as e:
+                logger.error(f"[{symbol}] Time parsing error: {e}")
+                return
+
             # Проверка на аномальное время (будущее или слишком далекое прошлое)
             # Если позиция открыта "в будущем" (рассинхрон часов), считаем duration = 0
             if open_time > now:
@@ -1505,12 +1509,17 @@ class TradingLoop:
                 duration_minutes = (now - open_time).total_seconds() / 60
             
             # Если длительность слишком большая (> 1 года), вероятно ошибка парсинга или старая "зависшая" запись
-            if duration_minutes > 525600:
-                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min. Ignoring Time Stop.")
+            # Увеличил лимит до 2 лет на всякий случай, но добавил логирование
+            if duration_minutes > 1051200: 
+                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min (open_time={open_time}, now={now}). Ignoring Time Stop.")
                 return
 
             max_minutes = self.settings.risk.time_stop_minutes
             
+            # Добавлена проверка на адекватность max_minutes
+            if max_minutes <= 0:
+                return
+
             if duration_minutes > max_minutes:
                 logger.info(f"[{symbol}] ⏰ Time Stop triggered! Duration: {duration_minutes:.1f} min > {max_minutes} min")
                 await self.close_position(symbol, f"Time Stop > {max_minutes} min")
@@ -1528,8 +1537,12 @@ class TradingLoop:
                 return
 
             # ВАЖНО: Используем UTC для корректного сравнения
-            open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
-            now = pd.Timestamp.now(tz='UTC')
+            try:
+                open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
+                now = pd.Timestamp.now(tz='UTC')
+            except Exception as e:
+                logger.error(f"[{symbol}] Time parsing error: {e}")
+                return
             
             if open_time > now:
                 duration_minutes = 0
@@ -1537,12 +1550,16 @@ class TradingLoop:
                 duration_minutes = (now - open_time).total_seconds() / 60
             
             # Если длительность слишком большая (> 1 года), игнорируем
-            if duration_minutes > 525600:
+            if duration_minutes > 1051200:
+                logger.warning(f"[{symbol}] Anomalous duration {duration_minutes} min (open_time={open_time}, now={now}). Ignoring Early Exit.")
                 return
 
             early_exit_minutes = self.settings.risk.early_exit_minutes
             min_profit_pct = self.settings.risk.early_exit_min_profit_pct
             
+            if early_exit_minutes <= 0:
+                return
+
             # Если прошло время раннего выхода, а прибыль все еще маленькая
             if duration_minutes > early_exit_minutes:
                 entry_price = float(position.get("avgPrice", 0))
