@@ -917,8 +917,8 @@ class MLStrategy:
 
                 return sl, level_name, level_price
 
-            # === РАСЧЕТ SL и TP (НОВАЯ ЛОГИКА) ===
-            # Используем фиксированные проценты или параметры маржи
+            # === РАСЧЕТ SL и TP (НОВАЯ ЛОГИКА С ATR) ===
+            # Используем фиксированные проценты из конфига по умолчанию
             if stop_loss_pct:
                 sl_ratio = stop_loss_pct
             else:
@@ -927,21 +927,39 @@ class MLStrategy:
             if take_profit_pct:
                 tp_ratio = take_profit_pct
             else:
-                # Если TP не задан явно, используем ratio из маржи ИЛИ разумное соотношение к SL
-                # Но лучше использовать то, что пришло из конфига
                 tp_ratio = (target_profit_pct_margin / leverage) / 100.0
+
+            # АДАПТАЦИЯ ПО ATR (если доступен)
+            # Если волатильность высокая, расширяем SL/TP, чтобы не выбивало шумом
+            # Если низкая, сужаем, чтобы забирать мелкие движения
+            atr_pct = row.get("atr_pct", np.nan)
+            if np.isfinite(atr_pct) and atr_pct > 0:
+                # Базовый ATR multiplier (можно вынести в конфиг)
+                # Например, SL = 2 * ATR, TP = 3 * ATR
+                # Но мы корректируем базовый фиксированный процент
+                
+                # Нормализуем ATR к среднему (примерно 0.5% для 15m крипты)
+                # Если ATR > 0.5%, значит волатильность повышена -> увеличиваем SL/TP
+                atr_factor = atr_pct / 0.5
+                atr_factor = max(0.8, min(1.5, atr_factor))  # Ограничиваем влияние (0.8x ... 1.5x)
+                
+                sl_ratio *= atr_factor
+                tp_ratio *= atr_factor
+                
+                if self._generate_signal_call_count <= 3:
+                    logger.debug(f"[ml_strategy] ATR adaptation: atr_pct={atr_pct:.4f}, factor={atr_factor:.2f}, new_sl={sl_ratio:.4f}, new_tp={tp_ratio:.4f}")
 
             if prediction == 1:
                 # LONG
                 sl_price = current_price * (1 - sl_ratio)
                 tp_price = current_price * (1 + tp_ratio)
-                sl_source = "fixed_pct"
+                sl_source = "fixed_pct_atr"
                 sl_level = None
             elif prediction == -1:
                 # SHORT
                 sl_price = current_price * (1 + sl_ratio)
                 tp_price = current_price * (1 - tp_ratio)
-                sl_source = "fixed_pct"
+                sl_source = "fixed_pct_atr"
                 sl_level = None
             
             # Опционально: проверяем уровни S/R для валидации (информативно)

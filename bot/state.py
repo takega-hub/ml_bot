@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 import threading
 
 logger = logging.getLogger(__name__)
+trade_logger = logging.getLogger("trades")
+signal_logger = logging.getLogger("signals")
 
 @dataclass
 class TradeRecord:
@@ -234,6 +236,10 @@ class BotState:
             reason=reason,
             indicators=indicators or {}
         )
+        
+        # Log to signals.log
+        signal_logger.info(f"SIGNAL: {symbol} | Action: {action} | Price: {price} | Conf: {confidence:.2f} | Reason: {reason}")
+        
         with self.lock:
             self.signals.append(signal)
             if len(self.signals) > 1000:
@@ -241,6 +247,9 @@ class BotState:
         self.save()
 
     def add_trade(self, trade: TradeRecord):
+        # Log to trades.log
+        trade_logger.info(f"TRADE OPEN: {trade.symbol} | Side: {trade.side} | Entry: {trade.entry_price} | Size: {trade.qty} | Reason: {trade.entry_reason}")
+        
         with self.lock:
             self.trades.append(trade)
             if len(self.trades) > 500:
@@ -482,6 +491,9 @@ class BotState:
         Также экспортирует закрытую сделку в Excel.
         """
         logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, exit_reason={exit_reason}")
+        
+        # Log to trades.log
+        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.2f} ({pnl_pct:.2f}%) | Reason: {exit_reason}")
         
         closed_trade = None
         with self.lock:

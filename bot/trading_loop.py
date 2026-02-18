@@ -21,6 +21,8 @@ except ImportError:
     InvalidRequestError = Exception  # Fallback если pybit не установлен
 
 logger = logging.getLogger(__name__)
+trade_logger = logging.getLogger("trades")
+signal_logger = logging.getLogger("signals")
 
 class TradingLoop:
     def __init__(self, settings: AppSettings, state: BotState, bybit: BybitClient, tg_bot=None):
@@ -776,6 +778,11 @@ class TradingLoop:
                 )
             else:
                 logger.info(f"[{symbol}] Signal: {signal.action.value} | Reason: {signal.reason} | Price: {current_price:.2f} | Confidence: {confidence:.2%} | Candle: {candle_timestamp}")
+            
+            # Log ALL non-HOLD signals to signals.log
+            if signal.action != Action.HOLD:
+                signal_logger.info(f"SIGNAL GEN: {symbol} {signal.action.value} Conf={confidence:.2f} Price={current_price:.2f} Reason={signal.reason}")
+            
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
             # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
@@ -1159,6 +1166,9 @@ class TradingLoop:
             
             if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                 if is_add:
+                    # Log to trades.log
+                    trade_logger.info(f"ORDER PLACED (ADD): {symbol} {side} Qty={qty} Price={signal.price}")
+                    
                     logger.info(f"Successfully added to {side} for {symbol}")
                     await self.notifier.medium(
                         f"➕ ДОБАВЛЕНИЕ К ПОЗИЦИИ {side} {symbol}\n"
@@ -1180,6 +1190,9 @@ class TradingLoop:
                                     if size > 0 and avg_price > 0:
                                         self.state.update_position(symbol, size, avg_price)
                 else:
+                    # Log to trades.log
+                    trade_logger.info(f"ORDER PLACED (OPEN): {symbol} {side} Qty={qty} Price={signal.price} TP={signal.take_profit} SL={signal.stop_loss}")
+                    
                     logger.info(f"Successfully opened {side} for {symbol}")
                     await self.notifier.high(
                         f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\n"
@@ -1453,6 +1466,10 @@ class TradingLoop:
             
             if resp and resp.get("retCode") == 0:
                 logger.info(f"[{symbol}] ✅ Position closed successfully: {reason}")
+                
+                # Log to trades.log
+                trade_logger.info(f"POSITION CLOSED: {symbol} {close_side} Size={size} Reason={reason}")
+                
                 await self.notifier.medium(f"🚫 ПОЗИЦИЯ ЗАКРЫТА ({reason})\n{symbol}\nSize: {size}")
             else:
                 logger.error(f"[{symbol}] Failed to close position: {resp}")
