@@ -28,9 +28,9 @@ class ModelManager:
         symbol = symbol.upper()
         print(f"[model_manager] Starting training for {symbol}...")
         
-        # Определяем, использовать ли MTF
+        # Определяем, использовать ли MTF фичи
         if use_mtf is None:
-            use_mtf = self.settings.ml_strategy.mtf_enabled
+            use_mtf = False
         
         # Вызываем существующий оптимизированный скрипт обучения
         # Мы используем subprocess для изоляции процесса обучения

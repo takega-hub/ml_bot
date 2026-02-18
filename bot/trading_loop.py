@@ -315,6 +315,12 @@ class TradingLoop:
                                             
                                             # Обновляем trailing stop
                                             await self.update_trailing_stop(symbol, position)
+
+                                            # Проверяем Time Stop
+                                            await self.check_time_stop(symbol, position)
+
+                                            # Проверяем Early Exit
+                                            await self.check_early_exit(symbol, position)
                                     else:
                                         # Позиции нет в списке, проверяем локальное состояние
                                         local_pos = self.state.get_open_position(symbol)
@@ -716,6 +722,8 @@ class TradingLoop:
                         leverage=self.settings.leverage,
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
                         max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
+                        stop_loss_pct=self.settings.risk.stop_loss_pct,
+                        take_profit_pct=self.settings.risk.take_profit_pct,
                     )
                 else:
                     # Обычная стратегия - передаем df как обычно
@@ -725,7 +733,9 @@ class TradingLoop:
                         df=df_for_strategy,
                         has_position=has_pos,
                         current_price=current_price,
-                        leverage=self.settings.leverage
+                        leverage=self.settings.leverage,
+                        stop_loss_pct=self.settings.risk.stop_loss_pct,
+                        take_profit_pct=self.settings.risk.take_profit_pct,
                     )
                 logger.info(f"[{symbol}] ✅ strategy.generate_signal() completed")
             except Exception as e:
@@ -1393,16 +1403,125 @@ class TradingLoop:
     def _classify_position_horizon(self, signal: Signal) -> str:
         """Категоризирует позицию по расстоянию до TP/SL."""
         if not signal.take_profit or not signal.stop_loss or not signal.price:
+            return "unknown"
+        
+        tp_dist = abs(signal.take_profit - signal.price) / signal.price
+        sl_dist = abs(signal.stop_loss - signal.price) / signal.price
+        
+        if tp_dist >= self.settings.risk.long_term_tp_pct or sl_dist >= self.settings.risk.long_term_sl_pct:
+            return "long_term"
+        elif tp_dist >= self.settings.risk.mid_term_tp_pct:
+            return "mid_term"
+        else:
             return "short_term"
 
-        tp_pct = abs(signal.take_profit - signal.price) / signal.price
-        sl_pct = abs(signal.price - signal.stop_loss) / signal.price
+    async def close_position(self, symbol: str, reason: str):
+        try:
+            logger.info(f"[{symbol}] 🚨 Initiating close position: {reason}")
+            # Get current position info to be sure about size
+            pos_info = await asyncio.to_thread(self.bybit.get_position_info, symbol=symbol)
+            
+            if not pos_info or pos_info.get("retCode") != 0:
+                logger.error(f"[{symbol}] Failed to get position info for closing: {pos_info}")
+                return
 
-        if tp_pct >= self.settings.risk.long_term_tp_pct or sl_pct >= self.settings.risk.long_term_sl_pct:
-            return "long_term"
-        if tp_pct >= self.settings.risk.mid_term_tp_pct:
-            return "mid_term"
-        return "short_term"
+            result = pos_info.get("result", {}).get("list", [])
+            if not result:
+                logger.warning(f"[{symbol}] No position found to close")
+                return
+
+            position = result[0]
+            size = float(position.get("size", 0))
+            side = position.get("side")
+            
+            if size <= 0:
+                logger.warning(f"[{symbol}] Position size is 0, nothing to close")
+                return
+
+            close_side = "Sell" if side == "Buy" else "Buy"
+            
+            logger.info(f"[{symbol}] Closing {side} position size {size} via Market order...")
+            
+            resp = await asyncio.to_thread(
+                self.bybit.place_order,
+                symbol=symbol,
+                side=close_side,
+                qty=size,
+                order_type="Market",
+                reduce_only=True
+            )
+            
+            if resp and resp.get("retCode") == 0:
+                logger.info(f"[{symbol}] ✅ Position closed successfully: {reason}")
+                await self.notifier.medium(f"🚫 ПОЗИЦИЯ ЗАКРЫТА ({reason})\n{symbol}\nSize: {size}")
+            else:
+                logger.error(f"[{symbol}] Failed to close position: {resp}")
+                
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    async def check_time_stop(self, symbol: str, position: dict):
+        try:
+            # createdTime is usually when the position was opened (or updatedTime if added to)
+            # Bybit V5: createdTime is string ms timestamp
+            created_time = float(position.get("createdTime", 0))
+            if created_time == 0:
+                created_time = float(position.get("updatedTime", 0))
+            
+            if created_time == 0:
+                return
+
+            open_time = pd.Timestamp(created_time, unit='ms')
+            now = pd.Timestamp.now()
+            duration_minutes = (now - open_time).total_seconds() / 60
+            
+            max_minutes = self.settings.risk.time_stop_minutes
+            
+            if duration_minutes > max_minutes:
+                logger.info(f"[{symbol}] ⏰ Time Stop triggered! Duration: {duration_minutes:.1f} min > {max_minutes} min")
+                await self.close_position(symbol, f"Time Stop > {max_minutes} min")
+                
+        except Exception as e:
+            logger.error(f"[{symbol}] Error in check_time_stop: {e}")
+
+    async def check_early_exit(self, symbol: str, position: dict):
+        try:
+            created_time = float(position.get("createdTime", 0))
+            if created_time == 0:
+                created_time = float(position.get("updatedTime", 0))
+            
+            if created_time == 0:
+                return
+
+            open_time = pd.Timestamp(created_time, unit='ms')
+            now = pd.Timestamp.now()
+            duration_minutes = (now - open_time).total_seconds() / 60
+            
+            early_exit_minutes = self.settings.risk.early_exit_minutes
+            min_profit_pct = self.settings.risk.early_exit_min_profit_pct
+            
+            # Если прошло время раннего выхода, а прибыль все еще маленькая
+            if duration_minutes > early_exit_minutes:
+                entry_price = float(position.get("avgPrice", 0))
+                mark_price = float(position.get("markPrice", entry_price))
+                side = position.get("side")
+                
+                if entry_price == 0:
+                    return
+
+                if side == "Buy":
+                    pnl_pct = (mark_price - entry_price) / entry_price
+                else:
+                    pnl_pct = (entry_price - mark_price) / entry_price
+                
+                if pnl_pct < min_profit_pct:
+                    logger.info(f"[{symbol}] 📉 Early Exit triggered! Duration: {duration_minutes:.1f} min > {early_exit_minutes} min, PnL: {pnl_pct*100:.2f}% < {min_profit_pct*100:.2f}%")
+                    await self.close_position(symbol, f"Early Exit (Low PnL < {min_profit_pct*100:.1f}%)")
+                    
+        except Exception as e:
+            logger.error(f"[{symbol}] Error in check_early_exit: {e}")
 
     def _should_dca(self, local_pos: TradeRecord, signal: Signal, current_price: float, confidence: float) -> bool:
         """Проверяет условия для усреднения позиции."""

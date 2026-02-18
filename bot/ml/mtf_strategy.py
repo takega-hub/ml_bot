@@ -311,6 +311,8 @@ class MultiTimeframeMLStrategy:
         leverage: int = 10,
         target_profit_pct_margin: float = 25.0,
         max_loss_pct_margin: float = 10.0,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
         skip_feature_creation: bool = False,
     ) -> Signal:
         """
@@ -325,6 +327,8 @@ class MultiTimeframeMLStrategy:
             leverage: Плечо
             target_profit_pct_margin: Целевая прибыль от маржи в %
             max_loss_pct_margin: Максимальный убыток от маржи в %
+            stop_loss_pct: Фиксированный % SL
+            take_profit_pct: Фиксированный % TP
             skip_feature_creation: Пропустить создание фичей
         
         Returns:
@@ -372,6 +376,8 @@ class MultiTimeframeMLStrategy:
                 leverage=leverage,
                 target_profit_pct_margin=target_profit_pct_margin,
                 max_loss_pct_margin=max_loss_pct_margin,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
                 skip_feature_creation=skip_feature_creation,
             )
             

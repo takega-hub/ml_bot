@@ -124,13 +124,13 @@ class RiskParams:
     # ИСПОЛЬЗУЕТСЯ: минимум из base_order_usd и margin_pct_balance% от баланса
     
     # Параметры стоп-лосса и тейк-профита
-    stop_loss_pct: float = 0.01  # 1% от входа
-    take_profit_pct: float = 0.02  # 2% от входа
+    stop_loss_pct: float = 0.03  # 3% от входа (снижено с 10% для жесткого контроля рисков)
+    take_profit_pct: float = 0.015  # 1.5% от входа (снижено для повышения вероятности исполнения)
     
     # Трейлинг стоп
     enable_trailing_stop: bool = True
-    trailing_stop_activation_pct: float = 0.003  # Активировать при прибыли 0.3%
-    trailing_stop_distance_pct: float = 0.002  # Расстояние 0.2% от максимума
+    trailing_stop_activation_pct: float = 0.007  # Активировать при прибыли 0.7%
+    trailing_stop_distance_pct: float = 0.003  # Расстояние 0.3% от максимума
     
     # Частичное закрытие
     enable_partial_close: bool = True
@@ -141,19 +141,24 @@ class RiskParams:
     # Защита от убытков
     enable_loss_cooldown: bool = True
     loss_cooldown_minutes: int = 120  # Охлаждение 2 часа после убытка
-    max_consecutive_losses: int = 3  # Максимум 3 убытка подряд
+    max_consecutive_losses: int = 2  # Максимум 2 убытка подряд (снижено с 3)
     
     # Защита прибыли
     enable_profit_protection: bool = True
-    profit_protection_activation_pct: float = 0.01  # Активировать при прибыли 1%
-    profit_protection_retreat_pct: float = 0.003  # Закрыть при откате 0.3%
+    profit_protection_activation_pct: float = 0.005  # Активировать при прибыли 0.5%
+    profit_protection_retreat_pct: float = 0.002  # Закрыть при откате 0.2%
     
     # Безубыток (многоуровневый)
     enable_breakeven: bool = True
     breakeven_level1_activation_pct: float = 0.005  # Активировать 1-ю ступень при прибыли 0.5%
-    breakeven_level1_sl_pct: float = 0.002  # SL для 1-й ступени: 0.2% от входа
+    breakeven_level1_sl_pct: float = 0.001  # SL для 1-й ступени: 0.1% от входа (чуть выше безубытка)
     breakeven_level2_activation_pct: float = 0.01  # Активировать 2-ю ступень при прибыли 1.0%
     breakeven_level2_sl_pct: float = 0.005  # SL для 2-й ступени: 0.5% от входа
+    
+    # Временные ограничения (Time Stop)
+    time_stop_minutes: int = 360  # Максимальное время удержания позиции (6 часов)
+    early_exit_minutes: int = 60  # Ранний выход если цена не идет в нашу сторону
+    early_exit_min_profit_pct: float = 0.003  # Минимальная прибыль через early_exit_minutes (0.3%)
 
     # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
     fee_rate: float = 0.0006
@@ -165,7 +170,8 @@ class RiskParams:
     long_term_ignore_reverse: bool = True
 
     # Усреднение (DCA)
-    dca_enabled: bool = True
+    dca_enabled: bool = False  # Отключено для снижения рисков
+
     dca_drawdown_pct: float = 0.003  # Усреднять при просадке 0.3%
     dca_max_adds: int = 2
     dca_min_confidence: float = 0.6

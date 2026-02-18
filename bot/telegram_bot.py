@@ -1693,6 +1693,76 @@ class TelegramBot:
             logger.error(f"Ошибка при оптимизации MTF стратегий: {e}", exc_info=True)
             await self.send_notification(f"❌ Критическая ошибка оптимизации: {str(e)}")
     
+    async def optimize_mtf_for_symbol_async(self, symbol: str):
+        import subprocess
+        import sys
+        from pathlib import Path
+        
+        try:
+            await self.send_notification(
+                f"🚀 Начинаю оптимизацию MTF стратегий для {symbol}..."
+            )
+            
+            cmd = [
+                sys.executable,
+                "optimize_mtf_strategies.py",
+                "--symbols", symbol,
+                "--days", "30",
+                "--top-n", "15"
+            ]
+            
+            logger.info(f"Запуск оптимизации MTF для {symbol}: {' '.join(cmd)}")
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=Path.cwd()
+            )
+            
+            stdout_lines = []
+            stderr_lines = []
+            
+            async def read_stdout():
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str:
+                        stdout_lines.append(line_str)
+                        logger.info(f"[OPTIMIZE {symbol}] {line_str}")
+            
+            async def read_stderr():
+                while True:
+                    line = await process.stderr.readline()
+                    if not line:
+                        break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str:
+                        stderr_lines.append(line_str)
+                        logger.error(f"[OPTIMIZE {symbol} ERROR] {line_str}")
+            
+            await asyncio.gather(read_stdout(), read_stderr())
+            
+            return_code = await process.wait()
+            
+            if return_code == 0:
+                results_text = "\n".join(stdout_lines[-20:])
+                await self.send_notification(
+                    f"✅ Оптимизация MTF стратегий для {symbol} завершена!\n\n"
+                    f"Результаты:\n{results_text[-500:]}"
+                )
+            else:
+                error_text = "\n".join(stderr_lines[-10:])
+                await self.send_notification(
+                    f"❌ Ошибка оптимизации MTF стратегий для {symbol} (код: {return_code})\n\n"
+                    f"Ошибки:\n{error_text[-500:]}"
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при оптимизации MTF стратегий для {symbol}: {e}", exc_info=True)
+            await self.send_notification(f"❌ Критическая ошибка оптимизации MTF для {symbol}: {str(e)}")
+    
     async def retrain_symbol_models_async(self, symbol: str, user_id: int):
         """Обучает все модели для конкретной торговой пары"""
         import subprocess
@@ -2006,7 +2076,7 @@ class TelegramBot:
             await self.send_notification(f"🔄 Начато обучение модели для {symbol}...")
             
             # Запускаем обучение (это синхронная операция, но мы в отдельной задаче)
-            comparison = self.model_manager.train_and_compare(symbol)
+            comparison = self.model_manager.train_and_compare(symbol, use_mtf=False)
             
             if comparison:
                 best_model = comparison.get("new_model", {})
@@ -2023,8 +2093,11 @@ class TelegramBot:
                     f"Модель: {model_name}\n"
                     f"PnL (14 дней): {pnl_pct:.2f}%\n"
                     f"Winrate: {win_rate:.1f}%\n\n"
-                    f"Модель автоматически применена и готова к торговле."
+                    f"Модель автоматически применена и готова к торговле.\n\n"
+                    f"Дополнительно запущена оптимизация MTF стратегий для {symbol}."
                 )
+                
+                asyncio.create_task(self.optimize_mtf_for_symbol_async(symbol))
             else:
                 await self.send_notification(
                     f"⚠️ Обучение для {symbol} завершено, но не удалось выбрать лучшую модель.\n"

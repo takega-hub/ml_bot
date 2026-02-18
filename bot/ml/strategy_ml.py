@@ -724,13 +724,12 @@ class MLStrategy:
         leverage: int = 10,
         target_profit_pct_margin: float = 25.0,
         max_loss_pct_margin: float = 10.0,
+        stop_loss_pct: Optional[float] = None,
+        take_profit_pct: Optional[float] = None,
         skip_feature_creation: bool = False,
     ) -> Signal:
         """
         Генерирует торговый сигнал на основе ML-предсказания.
-        
-        ВАЖНО: SL рассчитывается от значимых уровней (поддержка/сопротивление)
-                TP рассчитывается по RR 2-3:1 от SL
         
         Args:
             row: Текущий бар (pd.Series)
@@ -738,12 +737,14 @@ class MLStrategy:
             has_position: Текущая позиция (None, Bias.LONG, Bias.SHORT)
             current_price: Текущая цена
             leverage: Плечо (default: 10)
-            target_profit_pct_margin: Целевая прибыль от маржи в % (25%)
-            max_loss_pct_margin: Максимальный убыток от маржи в % (10%)
-            skip_feature_creation: Если True, пропускает создание фичей (для оптимизации в бэктесте)
+            target_profit_pct_margin: Целевая прибыль от маржи в % (25%) - используется если tp_pct не задан
+            max_loss_pct_margin: Максимальный убыток от маржи в % (10%) - используется если sl_pct не задан
+            stop_loss_pct: Фиксированный % SL (например 0.03 для 3%)
+            take_profit_pct: Фиксированный % TP (например 0.015 для 1.5%)
+            skip_feature_creation: Если True, пропускает создание фичей
         
         Returns:
-            Signal объект с уровневым SL и RR TP
+            Signal объект
         """
         try:
             # Логируем начало generate_signal для отладки (только первые несколько раз)
@@ -916,94 +917,70 @@ class MLStrategy:
 
                 return sl, level_name, level_price
 
-            # КРИТИЧНО: ВСЕГДА используем SL=1% (строгое требование)
-            # Уровни S/R используем только для информации, но не для расчета SL
+            # === РАСЧЕТ SL и TP (НОВАЯ ЛОГИКА) ===
+            # Используем фиксированные проценты или параметры маржи
+            if stop_loss_pct:
+                sl_ratio = stop_loss_pct
+            else:
+                sl_ratio = (max_loss_pct_margin / leverage) / 100.0
+
+            if take_profit_pct:
+                tp_ratio = take_profit_pct
+            else:
+                # Если TP не задан явно, используем ratio из маржи ИЛИ разумное соотношение к SL
+                # Но лучше использовать то, что пришло из конфига
+                tp_ratio = (target_profit_pct_margin / leverage) / 100.0
+
             if prediction == 1:
-                # LONG: SL = цена * 0.99 (строго 1% ниже)
-                sl_price = current_price * 0.99
-                sl_source = "fixed_1pct"
+                # LONG
+                sl_price = current_price * (1 - sl_ratio)
+                tp_price = current_price * (1 + tp_ratio)
+                sl_source = "fixed_pct"
                 sl_level = None
             elif prediction == -1:
-                # SHORT: SL = цена * 1.01 (строго 1% выше)
-                sl_price = current_price * 1.01
-                sl_source = "fixed_1pct"
+                # SHORT
+                sl_price = current_price * (1 + sl_ratio)
+                tp_price = current_price * (1 - tp_ratio)
+                sl_source = "fixed_pct"
                 sl_level = None
             
-            # Опционально: проверяем уровни S/R для валидации (но не используем для SL)
+            # Опционально: проверяем уровни S/R для валидации (информативно)
             if prediction != 0:
                 sl_from_levels, _, _ = _calculate_sl_from_levels("LONG" if prediction == 1 else "SHORT")
-                if sl_from_levels is not None:
-                    # Проверяем, близок ли SL от уровней к 1% (в пределах ±0.2%)
-                    if prediction == 1:
-                        sl_distance_from_levels = (current_price - sl_from_levels) / current_price
-                        if 0.008 <= sl_distance_from_levels <= 0.012:  # 0.8% - 1.2%
-                            # SL от уровней близок к 1%, можно использовать его (но это опционально)
-                            # Для строгости оставляем фиксированный 1%
-                            pass
-                    else:  # SHORT
-                        sl_distance_from_levels = (sl_from_levels - current_price) / current_price
-                        if 0.008 <= sl_distance_from_levels <= 0.012:  # 0.8% - 1.2%
-                            # SL от уровней близок к 1%, можно использовать его (но это опционально)
-                            # Для строгости оставляем фиксированный 1%
-                            pass
+                # Логику "pass" оставляем, уровни пока не влияют на SL
 
-            # RR 2-3:1 (динамически от уверенности, но всегда в диапазоне)
-            rr = 2.0
-            if _is_finite_number(confidence):
-                rr = 2.0 + min(1.0, max(0.0, (confidence - 0.5) / 0.4))
-            rr = float(min(3.0, max(2.0, rr)))
+            # RR логику (951-962) УДАЛЯЕМ, так как она переписывает TP на основе SL
+            # Мы хотим фиксированный TP/SL из конфига, который доказал эффективность в анализе
 
-            if prediction == 1 and sl_price is not None:
-                risk = abs(current_price - sl_price)
-                tp_price = current_price + (risk * rr)
-            elif prediction == -1 and sl_price is not None:
-                risk = abs(sl_price - current_price)
-                tp_price = current_price - (risk * rr)
             
-            # УЛУЧШЕНИЕ: Валидация TP/SL (из успешного бэктеста)
+            # УЛУЧШЕНИЕ: Валидация TP/SL (с учетом динамических ratio)
             # Проверяем корректность TP/SL для LONG
             if prediction == 1 and tp_price is not None and sl_price is not None:
                 if not (sl_price < current_price and tp_price > current_price):
-                    sl_price = current_price * 0.99
-                    tp_price = current_price * 1.025
+                    sl_price = current_price * (1 - sl_ratio)
+                    tp_price = current_price * (1 + tp_ratio)
             
             # Проверяем корректность TP/SL для SHORT
             if prediction == -1 and tp_price is not None and sl_price is not None:
                 if not (sl_price > current_price and tp_price < current_price):
-                    sl_price = current_price * 1.01
-                    tp_price = current_price * 0.975
+                    sl_price = current_price * (1 + sl_ratio)
+                    tp_price = current_price * (1 - tp_ratio)
             
-            # УЛУЧШЕНИЕ: Финальная проверка на валидность (из успешного бэктеста)
-            # ВАЖНО: Если TP/SL невалидны, мы их пересчитаем позже, но НЕ устанавливаем в None
-            # для LONG/SHORT сигналов, так как они ВСЕГДА должны иметь TP/SL
+            # УЛУЧШЕНИЕ: Финальная проверка на валидность
+            # ВАЖНО: Если TP/SL невалидны, мы их пересчитываем по ratio
             if prediction != 0:  # Только для LONG/SHORT сигналов
                 # КРИТИЧНО: Для LONG/SHORT ВСЕГДА должны быть валидные TP/SL
-                if tp_price is None or sl_price is None:
-                    # Если TP/SL не установлены, устанавливаем их принудительно
+                if tp_price is None or sl_price is None or \
+                   not (np.isfinite(tp_price) and np.isfinite(sl_price)) or \
+                   tp_price <= 0 or sl_price <= 0:
+                    # Если TP/SL не установлены или некорректны, устанавливаем их принудительно
                     if prediction == 1:  # LONG
-                        sl_price = current_price * 0.99
-                        tp_price = current_price * 1.025
+                        sl_price = current_price * (1 - sl_ratio)
+                        tp_price = current_price * (1 + tp_ratio)
                     elif prediction == -1:  # SHORT
-                        sl_price = current_price * 1.01
-                        tp_price = current_price * 0.975
-                # Проверяем, что цены не NaN и не бесконечны
-                elif not (np.isfinite(tp_price) and np.isfinite(sl_price)):
-                    # Для LONG/SHORT пересчитываем, а не устанавливаем None
-                    if prediction == 1:  # LONG
-                        sl_price = current_price * 0.99
-                        tp_price = current_price * 1.025
-                    elif prediction == -1:  # SHORT
-                        sl_price = current_price * 1.01
-                        tp_price = current_price * 0.975
-                # Проверяем, что цены положительные
-                elif tp_price <= 0 or sl_price <= 0:
-                    # Для LONG/SHORT пересчитываем, а не устанавливаем None
-                    if prediction == 1:  # LONG
-                        sl_price = current_price * 0.99
-                        tp_price = current_price * 1.025
-                    elif prediction == -1:  # SHORT
-                        sl_price = current_price * 1.01
-                        tp_price = current_price * 0.975
+                        sl_price = current_price * (1 + sl_ratio)
+                        tp_price = current_price * (1 - tp_ratio)
+
             
             # Определяем силу предсказания
             if confidence >= 0.9:
