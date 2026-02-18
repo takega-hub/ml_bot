@@ -1578,9 +1578,8 @@ class TelegramBot:
             
             for symbol in self.state.active_symbols:
                 await self.send_notification(f"🔄 Обучение модели для {symbol}...")
-                # Используем настройки MTF из конфига
-                use_mtf = self.settings.ml_strategy.mtf_enabled
-                comparison = self.model_manager.train_and_compare(symbol, use_mtf=use_mtf)
+                # Обучаем ТОЛЬКО модели БЕЗ MTF фичей (MTF фичи отключены)
+                comparison = self.model_manager.train_and_compare(symbol, use_mtf=False)
                 
                 if comparison:
                     best_model = comparison.get("new_model", {})
@@ -1713,13 +1712,8 @@ class TelegramBot:
                 await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
                 return
             
-            # Определяем параметры MTF из настроек
-            use_mtf = self.settings.ml_strategy.mtf_enabled
-            cmd_args = ["python3", str(script_path), "--symbol", symbol]
-            
-            # Добавляем параметры MTF (обучаем обе группы: MTF и non-MTF)
-            # Это даст больше вариантов моделей для выбора
-            # Если нужно только MTF или только non-MTF, можно добавить --mtf или --no-mtf
+            # Обучаем ТОЛЬКО модели БЕЗ MTF фичей (MTF фичи отключены)
+            cmd_args = ["python3", str(script_path), "--symbol", symbol, "--no-mtf"]
             
             # Запускаем обучение в отдельном процессе
             process = await asyncio.create_subprocess_exec(
@@ -1794,10 +1788,9 @@ class TelegramBot:
                 f"🔄 Начато переобучение всех моделей для {symbol}...\n\n"
                 "Конфигурации:\n"
                 "• 15m без MTF\n"
-                "• 15m с MTF\n"
-                "• 1h без MTF\n"
-                "• 1h с MTF\n\n"
-                "Это может занять 30-60 минут.\n"
+                "• 1h без MTF\n\n"
+                "MTF фичи отключены.\n"
+                "Это может занять 15-30 минут.\n"
                 "Вы будете получать уведомления о прогрессе."
             )
             
@@ -1825,9 +1818,7 @@ class TelegramBot:
             current_config = None
             config_patterns = {
                 "15m БЕЗ MTF": ["15m", "БЕЗ MTF"],
-                "15m С MTF": ["15m", "С MTF"],
                 "1h БЕЗ MTF": ["1h", "БЕЗ MTF"],
-                "1h С MTF": ["1h", "С MTF"],
             }
             
             while True:
@@ -1864,7 +1855,7 @@ class TelegramBot:
             if process.returncode == 0:
                 await self.send_notification(
                     f"✅ Переобучение всех моделей для {symbol} завершено!\n\n"
-                    f"Завершено конфигураций: {len(completed_configs)}/4\n\n"
+                    f"Завершено конфигураций: {len(completed_configs)}/2\n\n"
                     "Обновите список моделей для просмотра результатов."
                 )
             else:

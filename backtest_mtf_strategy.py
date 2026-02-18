@@ -123,9 +123,69 @@ def find_best_models_from_comparison(symbol: str) -> Tuple[Optional[str], Option
     return None, None
 
 
+def get_effective_models_from_comparison(symbol: str) -> Tuple[set, set]:
+    """
+    Загружает список эффективных моделей из CSV файла сравнения.
+    
+    Returns:
+        (set_1h_model_names, set_15m_model_names) - множества имен эффективных моделей
+    """
+    effective_1h = set()
+    effective_15m = set()
+    
+    # Ищем последний файл сравнения
+    comparison_files = sorted(
+        Path(".").glob("ml_models_comparison_*.csv"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True
+    )
+    
+    if not comparison_files:
+        return effective_1h, effective_15m
+    
+    try:
+        df = pd.read_csv(comparison_files[0])
+        symbol_upper = symbol.upper()
+        
+        # Фильтруем по символу и исключаем модели с 0 сделок или отрицательным PnL
+        symbol_data = df[
+            (df['symbol'] == symbol_upper) & 
+            (df['total_trades'] > 0) & 
+            (df['total_pnl_pct'] > 0)
+        ]
+        
+        if symbol_data.empty:
+            return effective_1h, effective_15m
+        
+        # Разделяем на 1h и 15m модели
+        for _, row in symbol_data.iterrows():
+            # Используем model_filename как основной источник имени (без .pkl)
+            model_filename = row.get('model_filename', '')
+            if model_filename:
+                model_name = model_filename.replace('.pkl', '')
+            else:
+                model_name = row.get('model_name', '')
+            
+            if not model_name:
+                continue
+            
+            mode_suffix = row.get('mode_suffix', '')
+            
+            # Определяем тип модели по mode_suffix или имени файла
+            if mode_suffix == '1h' or '_60_' in model_name or '_1h' in model_name:
+                effective_1h.add(model_name)
+            elif mode_suffix == '15m' or '_15_' in model_name or '_15m' in model_name:
+                effective_15m.add(model_name)
+    except Exception as e:
+        print(f"⚠️  Ошибка загрузки эффективных моделей из CSV: {e}")
+    
+    return effective_1h, effective_15m
+
+
 def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
     """
-    Находит ВСЕ модели 1h и 15m для символа.
+    Находит ВСЕ эффективные модели 1h и 15m для символа.
+    Фильтрует модели на основе CSV файла сравнения (исключает неэффективные).
     
     Returns:
         (list_1h_models, list_15m_models)
@@ -133,6 +193,9 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
     models_dir = Path("ml_models")
     if not models_dir.exists():
         return [], []
+    
+    # Загружаем список эффективных моделей из CSV
+    effective_1h_names, effective_15m_names = get_effective_models_from_comparison(symbol)
     
     # Ищем 1h модели
     models_1h = list(models_dir.glob(f"*_{symbol}_60_*.pkl"))
@@ -143,6 +206,13 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
     models_15m = list(models_dir.glob(f"*_{symbol}_15_*.pkl"))
     if not models_15m:
         models_15m = list(models_dir.glob(f"*_{symbol}_*15m*.pkl"))
+    
+    # Фильтруем модели: оставляем только эффективные (если список не пустой)
+    if effective_1h_names:
+        models_1h = [m for m in models_1h if m.stem in effective_1h_names]
+    
+    if effective_15m_names:
+        models_15m = [m for m in models_15m if m.stem in effective_15m_names]
     
     # Сортируем по имени (для стабильности)
     models_1h = sorted([str(m) for m in models_1h])

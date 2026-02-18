@@ -1,0 +1,109 @@
+{
+  "timestamp": "2026-02-18T02:00:06.354603",
+  "optimization_version": "1.0",
+  "backtest_days": 30,
+  "symbols": {
+    "BTCUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "quad_ensemble_BTCUSDT_60_1h.pkl",
+      "model_15m": "ensemble_BTCUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 99.89981624539291,
+        "win_rate": 71.21212121212122,
+        "profit_factor": 5.796638671737369,
+        "sharpe_ratio": 13.861182216162167,
+        "max_drawdown_pct": 1.4728634673905263
+      },
+      "source": "mtf_combinations_test"
+    },
+    "ETHUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "ensemble_ETHUSDT_60_1h.pkl",
+      "model_15m": "ensemble_ETHUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 156.62647635522558,
+        "win_rate": 69.49152542372882,
+        "profit_factor": 4.698078947508056,
+        "sharpe_ratio": 12.136244328969877,
+        "max_drawdown_pct": 2.474612820370772
+      },
+      "source": "mtf_combinations_test"
+    },
+    "SOLUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "quad_ensemble_SOLUSDT_60_1h.pkl",
+      "model_15m": "xgb_SOLUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 150.03302378890928,
+        "win_rate": 66.66666666666666,
+        "profit_factor": 3.676813876751451,
+        "sharpe_ratio": 9.648610071630513,
+        "max_drawdown_pct": 5.669823803759601
+      },
+      "source": "mtf_combinations_test"
+    },
+    "XRPUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "xgb_XRPUSDT_60_1h.pkl",
+      "model_15m": "ensemble_XRPUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 191.96763934590638,
+        "win_rate": 73.2824427480916,
+        "profit_factor": 5.037395522420221,
+        "sharpe_ratio": 12.747724556029327,
+        "max_drawdown_pct": 2.6965593704957866
+      },
+      "source": "mtf_combinations_test"
+    },
+    "BNBUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "xgb_BNBUSDT_60_1h.pkl",
+      "model_15m": "ensemble_BNBUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 108.73975753528875,
+        "win_rate": 68.23529411764706,
+        "profit_factor": 4.289121324838755,
+        "sharpe_ratio": 11.576705605153752,
+        "max_drawdown_pct": 2.4723452345883707
+      },
+      "source": "mtf_combinations_test"
+    },
+    "ADAUSDT": {
+      "strategy_type": "mtf",
+      "model_1h": "quad_ensemble_ADAUSDT_60_1h.pkl",
+      "model_15m": "triple_ensemble_ADAUSDT_15_15m.pkl",
+      "confidence_threshold_1h": 0.5,
+      "confidence_threshold_15m": 0.35,
+      "alignment_mode": "strict",
+      "require_alignment": true,
+      "metrics": {
+        "total_pnl_pct": 156.37718965304452,
+        "win_rate": 63.829787234042556,
+        "profit_factor": 3.3954626917646493,
+        "sharpe_ratio": 9.27110499213654,
+        "max_drawdown_pct": 4.3556771440797535
+      },
+      "source": "mtf_combinations_test"
+    }
+  }
+}

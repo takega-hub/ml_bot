@@ -1,6 +1,6 @@
 """
 Скрипт для обучения всех моделей по всем таймфреймам (15m и 1h) 
-с MTF фичами и без MTF фичей для определенного символа.
+БЕЗ MTF фичей для определенного символа.
 
 Использование:
     python train_all_models_for_symbol.py --symbol BTCUSDT
@@ -71,7 +71,7 @@ def train_models(symbol: str, interval: str, use_mtf: bool):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Обучение всех моделей по всем таймфреймам с MTF и без MTF",
+        description="Обучение всех моделей по всем таймфреймам БЕЗ MTF фичей",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры:
@@ -109,27 +109,24 @@ def main():
         safe_print(f"⏰ Таймфрейм: {timeframe}")
     safe_print("=" * 80)
     safe_print(f"📊 Символ: {symbol}")
-    safe_print(f"🔧 Режимы: БЕЗ MTF, С MTF")
+    safe_print(f"🔧 Режим: БЕЗ MTF (MTF фичи отключены)")
     safe_print(f"📅 Время начала: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     safe_print("=" * 80)
     
     # Конфигурация обучения: (интервал, использовать_MTF)
+    # Обучаем ТОЛЬКО без MTF фичей
     if timeframe == "all":
         training_configs = [
             ("15m", False),  # 15m без MTF
-            ("15m", True),   # 15m с MTF
             ("60m", False),  # 1h без MTF
-            ("60m", True),   # 1h с MTF
         ]
     elif timeframe == "15m":
         training_configs = [
             ("15m", False),  # 15m без MTF
-            ("15m", True),   # 15m с MTF
         ]
     else:  # timeframe == "1h"
         training_configs = [
             ("60m", False),  # 1h без MTF
-            ("60m", True),   # 1h с MTF
         ]
     
     results = {}
