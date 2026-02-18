@@ -1483,47 +1483,35 @@ class TradingLoop:
 
     async def check_time_stop(self, symbol: str, position: dict):
         try:
-            # createdTime is usually when the position was opened (or updatedTime if added to)
-            # Bybit V5: createdTime is string ms timestamp
-            created_time_ms = float(position.get("createdTime", 0))
-            if created_time_ms == 0:
-                created_time_ms = float(position.get("updatedTime", 0))
-            
-            if created_time_ms == 0:
-                return
-
-            # ВАЖНО: Используем UTC для корректного сравнения
             raw_created_time = position.get("createdTime", 0)
             raw_updated_time = position.get("updatedTime", 0)
-            
-            try:
-                created_time_ms = float(raw_created_time)
-                if created_time_ms == 0:
-                    created_time_ms = float(raw_updated_time)
-                
-                if created_time_ms == 0:
-                    return
 
-                open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
-                now = pd.Timestamp.now(tz='UTC')
-            except Exception as e:
-                logger.error(f"[{symbol}] Time parsing error: {e}")
+            candidates = []
+            for raw in (raw_created_time, raw_updated_time):
+                try:
+                    v = float(raw)
+                    if v > 0:
+                        candidates.append(v)
+                except (TypeError, ValueError):
+                    continue
+
+            if not candidates:
                 return
 
-            # Проверка на аномальное время
+            base_ts = max(candidates)
+            unit = "ms" if base_ts > 1e11 else "s"
+
+            open_time = pd.Timestamp(base_ts, unit=unit, tz="UTC")
+            now = pd.Timestamp.now(tz="UTC")
+
             if open_time > now:
-                duration_minutes = 0
-                logger.warning(f"[{symbol}] Position open time {open_time} is in the future relative to {now}. Clock sync issue?")
+                duration_minutes = 0.0
+                logger.warning(f"[{symbol}] Position open time {open_time} is in the future relative to {now}. createdTime={raw_created_time}, updatedTime={raw_updated_time}")
             else:
                 duration_minutes = (now - open_time).total_seconds() / 60
-            
-            # ЗАЩИТА ОТ ОШИБОК API:
-            # Если длительность > 48 часов (2880 мин), а TimeStop настроен на 6 часов,
-            # то скорее всего это глюк API (старый timestamp) или мы не должны это трогать.
-            # Для intraday бота 48 часов - это вечность.
-            if duration_minutes > 2880: 
-                logger.warning(f"[{symbol}] Suspicious duration {duration_minutes:.1f} min (> 48h). Raw created: {raw_created_time}. Ignoring Time Stop.")
-                return
+
+            if duration_minutes > 60 * 24 * 30:
+                logger.warning(f"[{symbol}] Unusually long duration: {duration_minutes:.1f} min. createdTime={raw_created_time}, updatedTime={raw_updated_time}, open_time={open_time}, now={now}")
 
             max_minutes = self.settings.risk.time_stop_minutes
             
@@ -1539,40 +1527,35 @@ class TradingLoop:
 
     async def check_early_exit(self, symbol: str, position: dict):
         try:
-            created_time_ms = float(position.get("createdTime", 0))
-            if created_time_ms == 0:
-                created_time_ms = float(position.get("updatedTime", 0))
-            
-            if created_time_ms == 0:
-                return
-
-            # ВАЖНО: Используем UTC для корректного сравнения
             raw_created_time = position.get("createdTime", 0)
             raw_updated_time = position.get("updatedTime", 0)
             
-            try:
-                created_time_ms = float(raw_created_time)
-                if created_time_ms == 0:
-                    created_time_ms = float(raw_updated_time)
-                
-                if created_time_ms == 0:
-                    return
+            candidates = []
+            for raw in (raw_created_time, raw_updated_time):
+                try:
+                    v = float(raw)
+                    if v > 0:
+                        candidates.append(v)
+                except (TypeError, ValueError):
+                    continue
 
-                open_time = pd.Timestamp(created_time_ms, unit='ms', tz='UTC')
-                now = pd.Timestamp.now(tz='UTC')
-            except Exception as e:
-                logger.error(f"[{symbol}] Time parsing error: {e}")
+            if not candidates:
                 return
-            
+
+            base_ts = max(candidates)
+            unit = "ms" if base_ts > 1e11 else "s"
+
+            open_time = pd.Timestamp(base_ts, unit=unit, tz="UTC")
+            now = pd.Timestamp.now(tz="UTC")
+
             if open_time > now:
-                duration_minutes = 0
+                duration_minutes = 0.0
+                logger.warning(f"[{symbol}] Position open time {open_time} is in the future relative to {now}. createdTime={raw_created_time}, updatedTime={raw_updated_time}")
             else:
                 duration_minutes = (now - open_time).total_seconds() / 60
-            
-            # ЗАЩИТА ОТ ОШИБОК API:
-            if duration_minutes > 2880: # 48 hours
-                logger.warning(f"[{symbol}] Suspicious duration {duration_minutes:.1f} min (> 48h). Raw created: {raw_created_time}. Ignoring Early Exit.")
-                return
+
+            if duration_minutes > 60 * 24 * 30:
+                logger.warning(f"[{symbol}] Unusually long duration: {duration_minutes:.1f} min. createdTime={raw_created_time}, updatedTime={raw_updated_time}, open_time={open_time}, now={now}")
 
             early_exit_minutes = self.settings.risk.early_exit_minutes
             min_profit_pct = self.settings.risk.early_exit_min_profit_pct
