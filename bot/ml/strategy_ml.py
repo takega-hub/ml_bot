@@ -1121,11 +1121,11 @@ class MLStrategy:
                     logger.warning(f"TP/SL invalid for prediction={prediction}, recalculating. tp={tp_price}, sl={sl_price}, price={current_price}")
                     if prediction == 1:  # LONG
                         sl_price = current_price * 0.99  # 1% ниже
-                        tp_price = current_price + (abs(current_price - sl_price) * rr)
+                        tp_price = current_price * 1.015 # 1.5% выше
                         sl_source = sl_source or "fallback_1pct"
                     elif prediction == -1:  # SHORT
                         sl_price = current_price * 1.01  # 1% выше
-                        tp_price = current_price - (abs(sl_price - current_price) * rr)
+                        tp_price = current_price * 0.985 # 1.5% ниже
                         sl_source = sl_source or "fallback_1pct"
                 
                 # Рассчитываем проценты для отображения
@@ -1172,6 +1172,11 @@ class MLStrategy:
                 cutoff_date = (current_date - timedelta(days=7)).isoformat()
                 self.daily_signals_count = {k: v for k, v in self.daily_signals_count.items() if k >= cutoff_date}
                 
+                # Рассчитываем Risk-Reward Ratio
+                rr_value = 0.0
+                if sl_price and tp_price and abs(current_price - sl_price) > 0:
+                    rr_value = abs(tp_price - current_price) / abs(current_price - sl_price)
+                
                 # Собираем информацию для ML (с улучшениями из успешного бэктеста)
                 indicators_info = {
                     "strategy": "ML",
@@ -1189,7 +1194,7 @@ class MLStrategy:
                     "take_profit": tp_price,  # Цена TP
                     "sl_source": sl_source,
                     "sl_level": sl_level,
-                    "risk_reward": round(rr, 2),
+                    "risk_reward": round(rr_value, 2),
                 }
                 
                 # УЛУЧШЕНИЕ: Добавляем ATR в indicators_info если доступен (из успешного бэктеста)
@@ -1265,6 +1270,11 @@ class MLStrategy:
                 cutoff_date = (current_date - timedelta(days=7)).isoformat()
                 self.daily_signals_count = {k: v for k, v in self.daily_signals_count.items() if k >= cutoff_date}
                 
+                # Рассчитываем Risk-Reward Ratio
+                rr_value = 0.0
+                if sl_price and tp_price and abs(current_price - sl_price) > 0:
+                    rr_value = abs(tp_price - current_price) / abs(current_price - sl_price)
+
                 # Собираем информацию для ML (с улучшениями из успешного бэктеста)
                 indicators_info = {
                     "strategy": "ML",
@@ -1282,7 +1292,7 @@ class MLStrategy:
                     "take_profit": tp_price,  # Цена TP
                     "sl_source": sl_source,
                     "sl_level": sl_level,
-                    "risk_reward": round(rr, 2),
+                    "risk_reward": round(rr_value, 2),
                 }
                 
                 # УЛУЧШЕНИЕ: Добавляем ATR в indicators_info если доступен (из успешного бэктеста)

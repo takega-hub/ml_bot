@@ -736,6 +736,8 @@ class TradingLoop:
                         has_position=has_pos,
                         current_price=current_price,
                         leverage=self.settings.leverage,
+                        target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
+                        max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
                         stop_loss_pct=self.settings.risk.stop_loss_pct,
                         take_profit_pct=self.settings.risk.take_profit_pct,
                     )
