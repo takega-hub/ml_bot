@@ -115,6 +115,20 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
 class RiskParams:
     """Параметры управления рисками"""
     
+    # Динамический расчет SL/TP
+    enable_dynamic_risk: bool = True  # Включить динамический расчет
+    atr_period: int = 14  # Период ATR для расчета волатильности
+    atr_multiplier_sl: float = 1.5  # Множитель ATR для SL (1.5-2.0)
+    atr_multiplier_tp: float = 2.5  # Множитель ATR для TP (RR > 1.5)
+    
+    # Фильтры входа
+    enable_entry_filters: bool = True  # Включить дополнительные фильтры входа
+    min_pullback_pct: float = 0.001  # Минимальный откат для подтверждения (0.1%)
+    max_pullback_pct: float = 0.005  # Максимальный откат (0.5%)
+    
+    # Трейлинг стоп с динамическим шагом
+    trailing_stop_step_atr_multiplier: float = 0.5  # Шаг трейлинга в ATR
+    
     # Размеры позиций
     max_position_usd: float = 200.0
     position_size_mode: str = "percentage"  # УСТАРЕЛО: больше не используется, оставлено для обратной совместимости

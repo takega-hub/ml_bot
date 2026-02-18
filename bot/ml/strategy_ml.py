@@ -933,13 +933,33 @@ class MLStrategy:
             # Если волатильность высокая, расширяем SL/TP, чтобы не выбивало шумом
             # Если низкая, сужаем, чтобы забирать мелкие движения
             atr_pct = row.get("atr_pct", np.nan)
-            if np.isfinite(atr_pct) and atr_pct > 0:
-                # Базовый ATR multiplier (можно вынести в конфиг)
-                # Например, SL = 2 * ATR, TP = 3 * ATR
-                # Но мы корректируем базовый фиксированный процент
+            atr_value = row.get("atr", np.nan)
+            
+            # Новая логика динамического ATR (из конфига)
+            use_dynamic_atr = True  # Можно вынести в настройки стратегии
+            
+            if use_dynamic_atr and np.isfinite(atr_value) and atr_value > 0:
+                # Используем множители из конфига (по умолчанию 1.5 ATR для SL)
+                # Базовый ATR multiplier: SL = 1.5 * ATR, TP = 2.5 * ATR
+                # Это более надежно, чем фиксированный %
                 
+                sl_dist = atr_value * 1.5  # 1.5 ATR
+                tp_dist = atr_value * 2.5  # 2.5 ATR
+                
+                # Конвертируем в % для совместимости
+                sl_ratio = sl_dist / current_price
+                tp_ratio = tp_dist / current_price
+                
+                # Ограничиваем разумными пределами (0.5% ... 5%)
+                sl_ratio = max(0.005, min(0.05, sl_ratio))
+                tp_ratio = max(0.0075, min(0.08, tp_ratio))
+                
+                if self._generate_signal_call_count <= 3:
+                    logger.debug(f"[ml_strategy] Dynamic ATR risk: atr={atr_value:.2f}, sl_ratio={sl_ratio:.4f}, tp_ratio={tp_ratio:.4f}")
+            
+            elif np.isfinite(atr_pct) and atr_pct > 0:
+                # Fallback к старой логике адаптации процента
                 # Нормализуем ATR к среднему (примерно 0.5% для 15m крипты)
-                # Если ATR > 0.5%, значит волатильность повышена -> увеличиваем SL/TP
                 atr_factor = atr_pct / 0.5
                 atr_factor = max(0.8, min(1.5, atr_factor))  # Ограничиваем влияние (0.8x ... 1.5x)
                 
