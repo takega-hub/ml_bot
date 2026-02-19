@@ -128,6 +128,17 @@ class RiskParams:
     
     # Трейлинг стоп с динамическим шагом
     trailing_stop_step_atr_multiplier: float = 0.5  # Шаг трейлинга в ATR
+
+    tp_reentry_enabled: bool = True
+    tp_reentry_wait_candles: int = 2
+    tp_reentry_window_candles: int = 8
+    tp_reentry_min_pullback_pct: float = 0.0
+    tp_reentry_max_pullback_pct: float = 0.006
+    tp_reentry_breakout_buffer_pct: float = 0.0
+    tp_reentry_volume_factor: float = 1.5
+    tp_reentry_sr_lookback: int = 20
+    tp_reentry_trend_lookback: int = 20
+    tp_reentry_min_trend_slope: float = 0.0
     
     # Размеры позиций
     max_position_usd: float = 200.0
@@ -235,6 +246,13 @@ class RiskParams:
             self.dca_drawdown_pct /= 100.0
         if self.reverse_min_confidence >= 1:
             self.reverse_min_confidence /= 100.0
+
+        if self.tp_reentry_min_pullback_pct >= 1:
+            self.tp_reentry_min_pullback_pct /= 100.0
+        if self.tp_reentry_max_pullback_pct >= 1:
+            self.tp_reentry_max_pullback_pct /= 100.0
+        if self.tp_reentry_breakout_buffer_pct >= 1:
+            self.tp_reentry_breakout_buffer_pct /= 100.0
 
 
 @dataclass
@@ -803,6 +821,36 @@ def _load_risk_settings(settings: AppSettings) -> None:
             risk.reverse_min_confidence = value
         if "reverse_min_strength" in data:
             risk.reverse_min_strength = str(data["reverse_min_strength"])
+
+        if "tp_reentry_enabled" in data:
+            risk.tp_reentry_enabled = bool(data["tp_reentry_enabled"])
+        if "tp_reentry_wait_candles" in data:
+            risk.tp_reentry_wait_candles = int(data["tp_reentry_wait_candles"])
+        if "tp_reentry_window_candles" in data:
+            risk.tp_reentry_window_candles = int(data["tp_reentry_window_candles"])
+        if "tp_reentry_min_pullback_pct" in data:
+            value = float(data["tp_reentry_min_pullback_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.tp_reentry_min_pullback_pct = value
+        if "tp_reentry_max_pullback_pct" in data:
+            value = float(data["tp_reentry_max_pullback_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.tp_reentry_max_pullback_pct = value
+        if "tp_reentry_breakout_buffer_pct" in data:
+            value = float(data["tp_reentry_breakout_buffer_pct"])
+            if value >= 1:
+                value /= 100.0
+            risk.tp_reentry_breakout_buffer_pct = value
+        if "tp_reentry_volume_factor" in data:
+            risk.tp_reentry_volume_factor = float(data["tp_reentry_volume_factor"])
+        if "tp_reentry_sr_lookback" in data:
+            risk.tp_reentry_sr_lookback = int(data["tp_reentry_sr_lookback"])
+        if "tp_reentry_trend_lookback" in data:
+            risk.tp_reentry_trend_lookback = int(data["tp_reentry_trend_lookback"])
+        if "tp_reentry_min_trend_slope" in data:
+            risk.tp_reentry_min_trend_slope = float(data["tp_reentry_min_trend_slope"])
         
         print(f"[config] Risk settings loaded from {settings_file}")
     except Exception as e:

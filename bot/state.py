@@ -55,6 +55,20 @@ class SymbolCooldown:
     consecutive_losses: int
     reason: str
 
+@dataclass
+class TPReentryGuard:
+    symbol: str
+    side: str
+    exit_time_utc: str
+    exit_price: float
+    wait_until_utc: str
+    wait_candles: int
+    skipped_signals: int = 0
+    skipped_wait: int = 0
+    skipped_criteria: int = 0
+    allowed_reentries: int = 0
+    last_decision: str = ""
+
 class BotState:
     def __init__(self, state_file: str = "runtime_state.json"):
         self.state_file = Path(state_file)
@@ -77,6 +91,8 @@ class BotState:
         
         # Cooldowns для защиты от убытков
         self.cooldowns: Dict[str, SymbolCooldown] = {}  # symbol -> cooldown
+
+        self.tp_reentry: Dict[str, TPReentryGuard] = {}
         
         self.load()
 
@@ -129,6 +145,9 @@ class BotState:
                 # Load cooldowns
                 for symbol, cooldown_data in data.get("cooldowns", {}).items():
                     self.cooldowns[symbol] = SymbolCooldown(**cooldown_data)
+
+                for symbol, guard_data in data.get("tp_reentry", {}).items():
+                    self.tp_reentry[symbol] = TPReentryGuard(**guard_data)
         except Exception as e:
             print(f"[state] Error loading state: {e}")
 
@@ -155,7 +174,8 @@ class BotState:
                         "symbol_models": dict(self.symbol_models),  # Копируем словарь
                         "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
                         "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
-                        "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()}
+                        "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()},
+                        "tp_reentry": {symbol: asdict(guard) for symbol, guard in self.tp_reentry.items()},
                     }
                 
                 # Записываем в файл БЕЗ основного lock, чтобы не блокировать другие операции
@@ -170,6 +190,67 @@ class BotState:
 
     def set_running(self, status: bool):
         self.is_running = status
+        self.save()
+
+    def set_tp_reentry_guard(
+        self,
+        symbol: str,
+        side: str,
+        exit_time_utc: str,
+        exit_price: float,
+        wait_until_utc: str,
+        wait_candles: int,
+    ) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            self.tp_reentry[symbol] = TPReentryGuard(
+                symbol=symbol,
+                side=side,
+                exit_time_utc=exit_time_utc,
+                exit_price=float(exit_price),
+                wait_until_utc=wait_until_utc,
+                wait_candles=int(wait_candles),
+            )
+        self.save()
+
+    def get_tp_reentry_guard(self, symbol: str) -> Optional[TPReentryGuard]:
+        symbol = symbol.upper()
+        with self.lock:
+            return self.tp_reentry.get(symbol)
+
+    def clear_tp_reentry_guard(self, symbol: str) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            if symbol in self.tp_reentry:
+                del self.tp_reentry[symbol]
+                should_save = True
+            else:
+                should_save = False
+        if should_save:
+            self.save()
+
+    def tp_reentry_record_skip(self, symbol: str, reason: str, is_wait: bool) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            g = self.tp_reentry.get(symbol)
+            if not g:
+                return
+            g.skipped_signals += 1
+            if is_wait:
+                g.skipped_wait += 1
+            else:
+                g.skipped_criteria += 1
+            g.last_decision = reason[:200]
+        self.save()
+
+    def tp_reentry_record_allow(self, symbol: str, reason: str) -> None:
+        symbol = symbol.upper()
+        with self.lock:
+            g = self.tp_reentry.get(symbol)
+            if not g:
+                return
+            g.allowed_reentries += 1
+            g.last_decision = reason[:200]
         self.save()
 
     def toggle_symbol(self, symbol: str) -> bool:

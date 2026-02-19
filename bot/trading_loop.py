@@ -3,6 +3,7 @@ import asyncio
 import logging
 import math
 import pandas as pd
+import numpy as np
 from typing import List, Dict, Optional, Union, TYPE_CHECKING
 from bot.config import AppSettings
 from bot.state import BotState, TradeRecord
@@ -932,6 +933,50 @@ class TradingLoop:
                                 f"{symbol}={signal.action.value} (opposite direction, following BTC)"
                             )
                             return
+
+                guard = None
+                if self.settings.risk.tp_reentry_enabled and has_pos is None and local_pos is None:
+                    guard = self.state.get_tp_reentry_guard(symbol)
+
+                if guard:
+                    desired_side = "Buy" if signal.action == Action.LONG else "Sell"
+                    if desired_side != guard.side:
+                        self.state.clear_tp_reentry_guard(symbol)
+                        guard = None
+
+                if guard:
+                    now_utc = pd.Timestamp.now(tz="UTC")
+                    exit_time = pd.Timestamp(guard.exit_time_utc)
+                    if exit_time.tzinfo is None:
+                        exit_time = exit_time.tz_localize("UTC")
+                    window_minutes = self._timeframe_minutes(self.settings.timeframe) * max(0, int(self.settings.risk.tp_reentry_window_candles))
+                    if window_minutes > 0 and now_utc > (exit_time + pd.Timedelta(minutes=window_minutes)):
+                        logger.info(
+                            f"[{symbol}] TP reentry guard expired: skipped={guard.skipped_signals}, allowed={guard.allowed_reentries}, last={guard.last_decision}"
+                        )
+                        self.state.clear_tp_reentry_guard(symbol)
+                        guard = None
+
+                if guard:
+                    wait_until = pd.Timestamp(guard.wait_until_utc)
+                    if wait_until.tzinfo is None:
+                        wait_until = wait_until.tz_localize("UTC")
+                    ok, detail = self._eval_tp_reentry(symbol, guard, df_for_strategy, signal.action)
+                    if now_utc < wait_until:
+                        self.state.tp_reentry_record_skip(symbol, f"tp_reentry_wait {detail}", True)
+                        logger.info(
+                            f"[{symbol}] ⏭️ TP reentry wait: until={wait_until.isoformat()} {detail}"
+                        )
+                        return
+                    if not ok:
+                        self.state.tp_reentry_record_skip(symbol, f"tp_reentry_block {detail}", False)
+                        logger.info(
+                            f"[{symbol}] ⏭️ TP reentry blocked: {detail}"
+                        )
+                        return
+                    self.state.tp_reentry_record_allow(symbol, detail)
+                    logger.info(f"[{symbol}] ✅ TP reentry allowed: {detail}")
+                    self.state.clear_tp_reentry_guard(symbol)
                 
                 # Открываем позицию, если ее нет или она в другую сторону (для short_term)
                 if signal.action == Action.LONG and has_pos != Bias.LONG:
@@ -1429,6 +1474,102 @@ class TradingLoop:
             return "mid_term"
         else:
             return "short_term"
+
+    def _timeframe_minutes(self, timeframe: str) -> int:
+        tf = str(timeframe).strip().lower()
+        if tf.endswith("m"):
+            try:
+                return int(tf[:-1])
+            except ValueError:
+                return 15
+        if tf.endswith("h"):
+            try:
+                return int(tf[:-1]) * 60
+            except ValueError:
+                return 60
+        try:
+            return int(tf)
+        except ValueError:
+            return 15
+
+    def _next_candle_close_utc(self, timeframe: str) -> pd.Timestamp:
+        minutes = self._timeframe_minutes(timeframe)
+        now = pd.Timestamp.now(tz="UTC")
+        if minutes < 60:
+            base = now.floor(f"{minutes}min")
+            return base + pd.Timedelta(minutes=minutes)
+        if minutes == 60:
+            base = now.floor("h")
+            return base + pd.Timedelta(hours=1)
+        hours = max(1, minutes // 60)
+        base = now.floor(f"{hours}h")
+        return base + pd.Timedelta(hours=hours)
+
+    def _eval_tp_reentry(self, symbol: str, guard, df_15m: pd.DataFrame, action: Action) -> tuple[bool, str]:
+        try:
+            r = self.settings.risk
+            now = pd.Timestamp.now(tz="UTC")
+            exit_time = pd.Timestamp(guard.exit_time_utc)
+            if exit_time.tzinfo is None:
+                exit_time = exit_time.tz_localize("UTC")
+
+            window = df_15m
+            if hasattr(df_15m, "index") and len(df_15m.index) > 0:
+                try:
+                    if isinstance(df_15m.index, pd.DatetimeIndex):
+                        idx = df_15m.index
+                        if idx.tz is None:
+                            idx = idx.tz_localize("UTC")
+                        window = df_15m.loc[idx >= exit_time]
+                except Exception:
+                    window = df_15m
+
+            if window is None or window.empty:
+                window = df_15m.tail(max(5, r.tp_reentry_sr_lookback))
+
+            lb = max(5, int(r.tp_reentry_sr_lookback))
+            tlb = max(5, int(r.tp_reentry_trend_lookback))
+            w = window.tail(max(lb, tlb))
+
+            if not {"high", "low", "close", "volume"}.issubset(set(w.columns)):
+                return True, "tp_reentry_no_ohlcv"
+
+            current_price = float(w["close"].iloc[-1])
+            exit_price = float(guard.exit_price)
+
+            if action == Action.LONG:
+                pullback = (exit_price - float(w["low"].min())) / exit_price if exit_price > 0 else 0.0
+                breakout_level = float(w["high"].iloc[:-1].max()) if len(w) > 1 else float(w["high"].max())
+                breakout_ok = current_price >= breakout_level * (1.0 + r.tp_reentry_breakout_buffer_pct)
+                trend_series = w["close"].tail(tlb).astype(float)
+                x = np.arange(len(trend_series))
+                slope = float(np.polyfit(x, trend_series.values, 1)[0]) / max(1e-12, float(trend_series.values[-1]))
+                trend_ok = slope >= r.tp_reentry_min_trend_slope
+            else:
+                pullback = (float(w["high"].max()) - exit_price) / exit_price if exit_price > 0 else 0.0
+                breakout_level = float(w["low"].iloc[:-1].min()) if len(w) > 1 else float(w["low"].min())
+                breakout_ok = current_price <= breakout_level * (1.0 - r.tp_reentry_breakout_buffer_pct)
+                trend_series = w["close"].tail(tlb).astype(float)
+                x = np.arange(len(trend_series))
+                slope = float(np.polyfit(x, trend_series.values, 1)[0]) / max(1e-12, float(trend_series.values[-1]))
+                trend_ok = slope <= -r.tp_reentry_min_trend_slope
+
+            pullback_ok = (pullback >= r.tp_reentry_min_pullback_pct) and (pullback <= r.tp_reentry_max_pullback_pct)
+
+            vol_series = w["volume"].astype(float)
+            avg_vol = float(vol_series.tail(min(20, len(vol_series))).mean())
+            cur_vol = float(vol_series.iloc[-1])
+            vol_ok = (avg_vol <= 0) or (cur_vol >= avg_vol * r.tp_reentry_volume_factor)
+
+            ok = pullback_ok and breakout_ok and trend_ok and vol_ok
+            reason = (
+                f"tp_reentry ok={ok} pullback={pullback*100:.2f}% "
+                f"[{r.tp_reentry_min_pullback_pct*100:.2f}-{r.tp_reentry_max_pullback_pct*100:.2f}] "
+                f"breakout_ok={breakout_ok} trend_slope={slope:.6f} vol={cur_vol:.2f}/{avg_vol:.2f}x{r.tp_reentry_volume_factor}"
+            )
+            return ok, reason
+        except Exception as e:
+            return True, f"tp_reentry_eval_error:{e}"
 
     async def close_position(self, symbol: str, reason: str):
         try:
@@ -2500,6 +2641,24 @@ class TradingLoop:
             # Устанавливаем кулдаун до закрытия следующей свечи (15 минут)
             # Этот кулдаун не перезапишет более длительный кулдаун от убытков
             self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
+
+            if exit_reason == "TP" and self.settings.risk.tp_reentry_enabled:
+                wait_candles = max(0, int(self.settings.risk.tp_reentry_wait_candles))
+                if wait_candles > 0:
+                    now_utc = pd.Timestamp.now(tz="UTC")
+                    next_close = self._next_candle_close_utc(self.settings.timeframe)
+                    wait_until = next_close + pd.Timedelta(minutes=self._timeframe_minutes(self.settings.timeframe) * wait_candles)
+                    self.state.set_tp_reentry_guard(
+                        symbol=symbol,
+                        side=local_pos.side,
+                        exit_time_utc=now_utc.isoformat(),
+                        exit_price=float(exit_price),
+                        wait_until_utc=wait_until.isoformat(),
+                        wait_candles=wait_candles,
+                    )
+                    logger.info(
+                        f"[{symbol}] TP reentry guard enabled: side={local_pos.side}, wait_candles={wait_candles}, wait_until_utc={wait_until.isoformat()}"
+                    )
             
             # Отправляем уведомление
             pnl_emoji = "✅" if pnl_usd > 0 else "❌"

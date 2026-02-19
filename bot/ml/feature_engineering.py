@@ -3,6 +3,7 @@
 ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок в pandas_ta.
 """
 from typing import List, Optional, Tuple, Dict
+import os
 import numpy as np
 import pandas as pd
 import warnings
@@ -370,70 +371,61 @@ class FeatureEngineer:
         high_clean = pd.to_numeric(df["high"], errors='coerce').fillna(0.0)
         close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
         
-        # Вычисляем касания для каждого бара (векторно)
-        for i in range(lookback_sr, len(df)):
-            window_start = max(0, i - lookback_sr)
-            window_end = i + 1
-            
-            current_support = local_low_clean.iloc[i]
-            current_resistance = local_high_clean.iloc[i]
-            
-            if current_support > 0 and current_resistance > 0:
-                # Толеранс для касаний
-                support_tolerance = current_support * (tolerance_pct / 100)
-                resistance_tolerance = current_resistance * (tolerance_pct / 100)
+        fast_backtest = str(os.getenv("FAST_BACKTEST", "")).strip().lower() in ("1", "true", "yes", "on")
+        if not fast_backtest:
+            for i in range(lookback_sr, len(df)):
+                window_start = max(0, i - lookback_sr)
+                window_end = i + 1
                 
-                # Окно данных
-                window_low = low_clean.iloc[window_start:window_end]
-                window_high = high_clean.iloc[window_start:window_end]
-                window_close = close_clean.iloc[window_start:window_end]
+                current_support = local_low_clean.iloc[i]
+                current_resistance = local_high_clean.iloc[i]
                 
-                # Касания поддержки (low в пределах tolerance)
-                support_touches_mask = (
-                    (window_low >= (current_support - support_tolerance)) & 
-                    (window_low <= (current_support + support_tolerance))
-                )
-                support_touches = support_touches_mask.sum()
-                
-                # Касания сопротивления (high в пределах tolerance)
-                resistance_touches_mask = (
-                    (window_high >= (current_resistance - resistance_tolerance)) & 
-                    (window_high <= (current_resistance + resistance_tolerance))
-                )
-                resistance_touches = resistance_touches_mask.sum()
-                
-                # Сила поддержки = отскоки (касание + цена пошла вверх)
-                if support_touches > 0:
-                    # Находим индексы касаний в окне
-                    touch_indices = window_low[support_touches_mask].index
-                    support_bounces = 0
-                    for touch_idx in touch_indices:
-                        # Проверяем, пошла ли цена вверх после касания
-                        touch_pos = df.index.get_loc(touch_idx)
-                        if touch_pos < len(df) - 1:
-                            if close_clean.iloc[touch_pos + 1] > close_clean.iloc[touch_pos]:
-                                support_bounces += 1
-                else:
-                    support_bounces = 0
-                
-                # Сила сопротивления = отскоки (касание + цена пошла вниз)
-                if resistance_touches > 0:
-                    # Находим индексы касаний в окне
-                    touch_indices = window_high[resistance_touches_mask].index
-                    resistance_bounces = 0
-                    for touch_idx in touch_indices:
-                        # Проверяем, пошла ли цена вниз после касания
-                        touch_pos = df.index.get_loc(touch_idx)
-                        if touch_pos < len(df) - 1:
-                            if close_clean.iloc[touch_pos + 1] < close_clean.iloc[touch_pos]:
-                                resistance_bounces += 1
-                else:
-                    resistance_bounces = 0
-                
-                df.loc[df.index[i], "support_touches"] = float(support_touches)
-                df.loc[df.index[i], "resistance_touches"] = float(resistance_touches)
-                df.loc[df.index[i], "support_strength"] = float(support_bounces)
-                df.loc[df.index[i], "resistance_strength"] = float(resistance_bounces)
+                if current_support > 0 and current_resistance > 0:
+                    support_tolerance = current_support * (tolerance_pct / 100)
+                    resistance_tolerance = current_resistance * (tolerance_pct / 100)
+                    
+                    window_low = low_clean.iloc[window_start:window_end]
+                    window_high = high_clean.iloc[window_start:window_end]
+                    window_close = close_clean.iloc[window_start:window_end]
+                    
+                    support_touches_mask = (
+                        (window_low >= (current_support - support_tolerance)) & 
+                        (window_low <= (current_support + support_tolerance))
+                    )
+                    support_touches = support_touches_mask.sum()
+                    
+                    resistance_touches_mask = (
+                        (window_high >= (current_resistance - resistance_tolerance)) & 
+                        (window_high <= (current_resistance + resistance_tolerance))
+                    )
+                    resistance_touches = resistance_touches_mask.sum()
+                    
+                    if support_touches > 0:
+                        touch_indices = window_low[support_touches_mask].index
+                        support_bounces = 0
+                        for touch_idx in touch_indices:
+                            touch_pos = df.index.get_loc(touch_idx)
+                            if touch_pos < len(df) - 1:
+                                if close_clean.iloc[touch_pos + 1] > close_clean.iloc[touch_pos]:
+                                    support_bounces += 1
+                    else:
+                        support_bounces = 0
+                    
+                    if resistance_touches > 0:
+                        touch_indices = window_high[resistance_touches_mask].index
+                        resistance_bounces = 0
+                        for touch_idx in touch_indices:
+                            touch_pos = df.index.get_loc(touch_idx)
+                            if touch_pos < len(df) - 1:
+                                if close_clean.iloc[touch_pos + 1] < close_clean.iloc[touch_pos]:
+                                    resistance_bounces += 1
+                    else:
+                        resistance_bounces = 0
+                    
+                    df.loc[df.index[i], "support_touches"] = float(support_touches)
+                    df.loc[df.index[i], "resistance_touches"] = float(resistance_touches)
+                    df.loc[df.index[i], "support_strength"] = float(support_bounces)
+                    df.loc[df.index[i], "resistance_strength"] = float(resistance_bounces)
         
         # Нормализуем силу (относительно количества касаний)
         support_touches_clean = pd.to_numeric(df["support_touches"], errors='coerce').fillna(0.0)
