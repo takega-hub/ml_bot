@@ -147,6 +147,38 @@ class StrategyOptimizer:
         }
         self.errors.append(error_info)
         logger.error(f"[{stage}] {symbol}: {error}", exc_info=True)
+
+    def run_command(self, cmd: List[str], timeout: int = 7200) -> int:
+        """Запускает команду с выводом логов в реальном времени"""
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                bufsize=1
+            )
+            
+            # Читаем вывод в реальном времени
+            if process.stdout:
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        logger.info(f"[SUBPROCESS] {line}")
+            
+            # Ждем завершения
+            return_code = process.wait(timeout=timeout)
+            return return_code
+            
+        except subprocess.TimeoutExpired:
+            process.kill()
+            logger.error(f"[SUBPROCESS] Таймаут выполнения команды (>{timeout}с)")
+            return -1
+        except Exception as e:
+            logger.error(f"[SUBPROCESS] Ошибка запуска команды: {e}")
+            return -1
     
     def train_models(self, symbol: str) -> bool:
         """Обучает модели для символа (15m и 1h)"""
@@ -161,16 +193,11 @@ class StrategyOptimizer:
                 "--symbol", symbol,
                 "--no-mtf"  # 15m модели без MTF
             ]
-            result_15m = subprocess.run(
-                cmd_15m,
-                capture_output=True,
-                text=True,
-                timeout=3600  # 1 час таймаут
-            )
             
-            if result_15m.returncode != 0:
+            return_code_15m = self.run_command(cmd_15m, timeout=7200)
+            
+            if return_code_15m != 0:
                 logger.error(f"[TRAINING] {symbol}: Ошибка обучения 15m моделей")
-                logger.error(f"STDERR: {result_15m.stderr[-500:]}")
                 return False
             
             # Обучаем 1h модели
@@ -182,16 +209,11 @@ class StrategyOptimizer:
                 "--no-mtf",
                 "--interval", "60m"  # 1h интервал (60m или 1h)
             ]
-            result_1h = subprocess.run(
-                cmd_1h,
-                capture_output=True,
-                text=True,
-                timeout=3600
-            )
             
-            if result_1h.returncode != 0:
+            return_code_1h = self.run_command(cmd_1h, timeout=7200)
+            
+            if return_code_1h != 0:
                 logger.error(f"[TRAINING] {symbol}: Ошибка обучения 1h моделей")
-                logger.error(f"STDERR: {result_1h.stderr[-500:]}")
                 return False
             
             logger.info(f"[TRAINING] {symbol}: Обучение завершено успешно")
@@ -224,17 +246,10 @@ class StrategyOptimizer:
             
             logger.info(f"[COMPARISON] Команда: {' '.join(cmd)}")
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=7200  # 2 часа таймаут
-            )
+            return_code = self.run_command(cmd, timeout=7200)
             
-            if result.returncode != 0:
+            if return_code != 0:
                 logger.error("[COMPARISON] Ошибка сравнения моделей")
-                logger.error(f"STDERR: {result.stderr[-500:]}")
-                logger.error(f"STDOUT: {result.stdout[-500:]}")
                 return False
             
             # Находим последний файл сравнения

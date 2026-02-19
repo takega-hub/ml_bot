@@ -15,16 +15,9 @@ import sys
 
 # Настраиваем кодировку для Windows (БЕЗОПАСНАЯ ВЕРСИЯ)
 if sys.platform == 'win32':
-    try:
-        # Используем замену ошибок вместо перезаписи stdout/stderr
-        import codecs
-        # Только если не перенаправлен
-        if sys.stdout.isatty():
-            sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
-        if sys.stderr.isatty():
-            sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
-    except:
-        pass  # Если не получилось, продолжаем как есть
+    # Вместо codecs.getwriter используем переопределение print или encode/decode при выводе
+    # так как codecs.getwriter может конфликтовать с некоторыми IDE/терминалами
+    pass
 
 # Подавляем предупреждения
 os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
@@ -40,54 +33,37 @@ from bot.ml.model_trainer import ModelTrainer, WeightedEnsemble, TripleEnsemble
 
 # Функция для безопасного вывода (заменяет эмодзи на текстовые метки для Windows)
 def safe_print(*args, **kwargs):
-    """Безопасный print, который заменяет эмодзи на текстовые метки."""
-    try:
-        # Пытаемся вывести как есть
-        print(*args, **kwargs)
-        sys.stdout.flush()  # Очищаем буфер
-    except (UnicodeEncodeError, IOError) as e:
+        """Безопасный print, который заменяет эмодзи на текстовые метки."""
         try:
-            # Заменяем эмодзи на текстовые метки
+            # Формируем строку
             text = ' '.join(str(arg) for arg in args)
-            # Основные эмодзи
+            
+            # Заменяем эмодзи на текстовые метки (расширенный список)
             replacements = {
-                '🚀': '[START]',
-                '📊': '[INFO]', 
-                '✅': '[OK]',
-                '❌': '[ERROR]',
-                '⏳': '[WAIT]',
-                '🔥': '[HOT]',
-                '📥': '[DOWNLOAD]',
-                '🔧': '[ENGINEERING]',
-                '🎯': '[TARGET]',
-                '📦': '[DATA]',
-                '🤖': '[MODEL]',
-                '🌲': '[RF]',
-                '⚡': '[XGB]',
-                '🎉': '[SUCCESS]',
-                '💡': '[TIP]',
-                '🔄': '[RETRAIN]',
-                '📋': '[LIST]',
-                '🔍': '[SEARCH]',
-                '📈': '[CHART]',
-                '🧪': '[TEST]',
-                '⚙️': '[SETTINGS]'
+                '🚀': '[START]', '📊': '[INFO]', '✅': '[OK]', '❌': '[ERROR]',
+                '⏳': '[WAIT]', '🔥': '[HOT]', '📥': '[DOWNLOAD]', '🔧': '[ENGINEERING]',
+                '🎯': '[TARGET]', '📦': '[DATA]', '🤖': '[MODEL]', '🌲': '[RF]',
+                '⚡': '[XGB]', '🎉': '[SUCCESS]', '💡': '[TIP]', '🔄': '[RETRAIN]',
+                '📋': '[LIST]', '🔍': '[SEARCH]', '📈': '[CHART]', '🧪': '[TEST]',
+                '⚙️': '[SETTINGS]', '⚠️': '[WARN]', 'ℹ️': '[INFO]', '💪': '[STRONG]',
+                '🔹': '[INFO]', '🌲': '[RF]', '⚡': '[XGB]'
             }
+            
             for emoji, replacement in replacements.items():
                 text = text.replace(emoji, replacement)
             
-            # Выводим очищенный текст
+            # Дополнительная очистка от других non-ascii символов, если кодировка не utf-8
+            if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+                text = text.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
+                
             print(text, **kwargs)
             sys.stdout.flush()
-        except:
-            # Последняя попытка - выводим только текст
+        except Exception:
+            # Fallback: просто печатаем с заменой ошибок
             try:
-                text = ' '.join(str(arg) for arg in args)
-                # Удаляем все не-ASCII символы
-                text = ''.join(c for c in text if ord(c) < 128)
-                print(text, **kwargs)
+                print(*args, **kwargs)
             except:
-                print("[ERROR: Could not print message]", **kwargs)
+                pass
 
 
 def load_optimized_weights(weights_file: str = None) -> dict:
