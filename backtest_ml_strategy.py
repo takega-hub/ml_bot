@@ -157,6 +157,16 @@ class MLBacktestSimulator:
         leverage: int = 10,
         maintenance_margin_ratio: float = 0.005,
         max_position_hours: float = 48.0,
+        # Параметры частичного TP и trailing
+        partial_tp_enabled: bool = False,
+        partial_tp_pct: float = 0.015,  # 1.5% - первая цель для breakeven
+        trailing_activation_pct: float = 0.03,  # 3.0% - активация trailing
+        trailing_distance_pct: float = 0.02,  # 2.0% - расстояние trailing
+        # Параметры входа по откату (pullback)
+        pullback_enabled: bool = False,
+        pullback_ema_period: int = 9,  # Период EMA для отката (9 или 20)
+        pullback_pct: float = 0.003,  # 0.3% от high/low сигнальной свечи
+        pullback_max_bars: int = 3,  # Максимальная задержка входа (1-3 свечи)
     ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -166,6 +176,26 @@ class MLBacktestSimulator:
         self.leverage = leverage
         self.maintenance_margin_ratio = maintenance_margin_ratio
         self.max_position_hours = max_position_hours
+        
+        # Параметры частичного TP и trailing
+        self.partial_tp_enabled = partial_tp_enabled
+        self.partial_tp_pct = partial_tp_pct
+        self.trailing_activation_pct = trailing_activation_pct
+        self.trailing_distance_pct = trailing_distance_pct
+        
+        # Флаги состояния для частичного TP
+        self.breakeven_activated = False  # Флаг активации breakeven
+        self.trailing_activated = False  # Флаг активации trailing
+        
+        # Параметры входа по откату
+        self.pullback_enabled = pullback_enabled
+        self.pullback_ema_period = pullback_ema_period
+        self.pullback_pct = pullback_pct
+        self.pullback_max_bars = pullback_max_bars
+        
+        # Ожидающие сигналы (pending signals) для входа по откату
+        # Структура: {signal: Signal, signal_time: datetime, signal_high: float, signal_low: float, bars_waited: int}
+        self.pending_signals: List[Dict] = []
         
         self.trades: List[Trade] = []
         self.current_position: Optional[Trade] = None
@@ -181,6 +211,10 @@ class MLBacktestSimulator:
         
         print(f"[Backtest] Режим: ТОЧНАЯ ИМИТАЦИЯ реального сервера")
         print(f"[Backtest] НЕ исправляю ошибки стратегии!")
+        if self.partial_tp_enabled:
+            print(f"[Backtest] Частичный TP включен: breakeven при {self.partial_tp_pct*100:.2f}%, trailing при {self.trailing_activation_pct*100:.2f}%")
+        if self.pullback_enabled:
+            print(f"[Backtest] Вход по откату включен: EMA{self.pullback_ema_period}, откат {self.pullback_pct*100:.2f}%, макс. задержка {self.pullback_max_bars} баров")
     
     def analyze_signal(self, signal: Signal, current_price: float):
         """Анализирует сигнал от стратегии (только статистика, без изменений)."""
@@ -281,6 +315,122 @@ class MLBacktestSimulator:
         
         return position_size_usd, margin_required
     
+    def check_pullback_condition(self, pending_signal: Dict, current_price: float, high: float, low: float, 
+                                ema_value: Optional[float] = None) -> bool:
+        """
+        Проверяет условия отката для pending сигнала.
+        
+        Args:
+            pending_signal: Словарь с информацией о pending сигнале
+            current_price: Текущая цена закрытия
+            high: High текущей свечи
+            low: Low текущей свечи
+            ema_value: Значение EMA (если доступно)
+        
+        Returns:
+            True если условия отката выполнены, False иначе
+        """
+        signal = pending_signal['signal']
+        signal_high = pending_signal['signal_high']
+        signal_low = pending_signal['signal_low']
+        
+        if signal.action == Action.LONG:
+            # LONG: ждем откат к EMA или к уровню -0.3% от high сигнальной свечи
+            pullback_level = signal_high * (1 - self.pullback_pct)
+            
+            # Проверяем откат к EMA (если доступно)
+            if ema_value is not None and not np.isnan(ema_value):
+                if low <= ema_value <= high:
+                    return True  # Цена коснулась EMA
+            
+            # Проверяем откат к уровню (low текущей свечи <= pullback_level)
+            if low <= pullback_level:
+                return True
+        else:  # SHORT
+            # SHORT: ждем откат вверх к EMA или к уровню +0.3% от low сигнальной свечи
+            pullback_level = signal_low * (1 + self.pullback_pct)
+            
+            # Проверяем откат к EMA (если доступно)
+            if ema_value is not None and not np.isnan(ema_value):
+                if low <= ema_value <= high:
+                    return True  # Цена коснулась EMA
+            
+            # Проверяем откат к уровню (high текущей свечи >= pullback_level)
+            if high >= pullback_level:
+                return True
+        
+        return False
+    
+    def process_pending_signals(self, current_time: datetime, current_price: float, high: float, low: float,
+                                df: pd.DataFrame, current_idx: int) -> Optional[Signal]:
+        """
+        Обрабатывает pending сигналы и проверяет условия отката.
+        
+        Returns:
+            Signal для открытия позиции, если условия выполнены, None иначе
+        """
+        if not self.pullback_enabled or not self.pending_signals:
+            return None
+        
+        # Удаляем устаревшие сигналы (превысили максимальную задержку)
+        self.pending_signals = [
+            ps for ps in self.pending_signals 
+            if ps['bars_waited'] < self.pullback_max_bars
+        ]
+        
+        if not self.pending_signals:
+            return None
+        
+        # Получаем EMA значение, если доступно
+        # В данных используются ema_short (9) и ema_long (21), адаптируемся
+        ema_value = None
+        try:
+            if current_idx < len(df):
+                if self.pullback_ema_period == 9:
+                    # Используем ema_short (9)
+                    if 'ema_short' in df.columns:
+                        ema_value = df.iloc[current_idx]['ema_short']
+                elif self.pullback_ema_period == 20 or self.pullback_ema_period == 21:
+                    # Используем ema_long (21) для периода 20
+                    if 'ema_long' in df.columns:
+                        ema_value = df.iloc[current_idx]['ema_long']
+                else:
+                    # Пробуем найти колонку с нужным периодом
+                    ema_col = f'ema_{self.pullback_ema_period}'
+                    if ema_col in df.columns:
+                        ema_value = df.iloc[current_idx][ema_col]
+                
+                if pd.isna(ema_value) or ema_value is None:
+                    ema_value = None
+        except Exception:
+            pass
+        
+        # Проверяем каждый pending сигнал
+        for pending_signal in self.pending_signals[:]:  # Копируем список для безопасной итерации
+            pending_signal['bars_waited'] += 1
+            
+            # Проверяем условия отката
+            if self.check_pullback_condition(pending_signal, current_price, high, low, ema_value):
+                # Условия выполнены - возвращаем сигнал для открытия позиции
+                signal = pending_signal['signal']
+                self.pending_signals.remove(pending_signal)
+                return signal
+        
+        return None
+    
+    def add_pending_signal(self, signal: Signal, signal_time: datetime, signal_high: float, signal_low: float):
+        """Добавляет сигнал в список ожидающих отката."""
+        if not self.pullback_enabled:
+            return
+        
+        self.pending_signals.append({
+            'signal': signal,
+            'signal_time': signal_time,
+            'signal_high': signal_high,
+            'signal_low': signal_low,
+            'bars_waited': 0,
+        })
+    
     def open_position(self, signal: Signal, current_time: datetime, symbol: str) -> bool:
         """
         Открывает позицию ТОЧНО как реальный бот.
@@ -292,6 +442,10 @@ class MLBacktestSimulator:
         
         if signal.action == Action.HOLD:
             return False
+        
+        # Сбрасываем флаги частичного TP при открытии новой позиции
+        self.breakeven_activated = False
+        self.trailing_activated = False
         
         # 1. Получаем TP/SL ИЗ СИГНАЛА (без проверок!)
         stop_loss = signal.stop_loss
@@ -444,6 +598,81 @@ class MLBacktestSimulator:
         
         pos.max_favorable_excursion = max(pos.max_favorable_excursion, mfe)
         pos.max_adverse_excursion = min(pos.max_adverse_excursion, mae)
+        
+        # 4. Логика частичного TP и trailing (если включено)
+        if self.partial_tp_enabled:
+            if pos.action == Action.LONG:
+                # Breakeven: при достижении partial_tp_pct переводим SL в breakeven
+                if not self.breakeven_activated and mfe >= self.partial_tp_pct:
+                    # Переводим SL в breakeven (чуть выше цены входа)
+                    breakeven_sl = pos.entry_price * 1.001  # 0.1% выше входа
+                    if breakeven_sl > pos.stop_loss:
+                        pos.stop_loss = breakeven_sl
+                        self.breakeven_activated = True
+                        # Проверяем, не сработал ли уже breakeven SL
+                        if low <= pos.stop_loss:
+                            exit_price = min(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.STOP_LOSS)
+                            return True
+                
+                # Trailing: при достижении trailing_activation_pct включаем trailing stop
+                if mfe >= self.trailing_activation_pct:
+                    if not self.trailing_activated:
+                        self.trailing_activated = True
+                    # Обновляем trailing stop
+                    potential_sl = high * (1 - self.trailing_distance_pct)
+                    if potential_sl > pos.stop_loss:
+                        pos.stop_loss = potential_sl
+                        # Проверяем, не сработал ли уже trailing SL
+                        if low <= pos.stop_loss:
+                            exit_price = min(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.TRAILING_STOP)
+                            return True
+                elif self.trailing_activated:
+                    # Trailing уже активирован, продолжаем обновлять
+                    potential_sl = high * (1 - self.trailing_distance_pct)
+                    if potential_sl > pos.stop_loss:
+                        pos.stop_loss = potential_sl
+                        if low <= pos.stop_loss:
+                            exit_price = min(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.TRAILING_STOP)
+                            return True
+            else:  # SHORT
+                # Breakeven: при достижении partial_tp_pct переводим SL в breakeven
+                if not self.breakeven_activated and mfe >= self.partial_tp_pct:
+                    # Переводим SL в breakeven (чуть ниже цены входа)
+                    breakeven_sl = pos.entry_price * 0.999  # 0.1% ниже входа
+                    if breakeven_sl < pos.stop_loss:
+                        pos.stop_loss = breakeven_sl
+                        self.breakeven_activated = True
+                        # Проверяем, не сработал ли уже breakeven SL
+                        if high >= pos.stop_loss:
+                            exit_price = max(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.STOP_LOSS)
+                            return True
+                
+                # Trailing: при достижении trailing_activation_pct включаем trailing stop
+                if mfe >= self.trailing_activation_pct:
+                    if not self.trailing_activated:
+                        self.trailing_activated = True
+                    # Обновляем trailing stop
+                    potential_sl = low * (1 + self.trailing_distance_pct)
+                    if potential_sl < pos.stop_loss:
+                        pos.stop_loss = potential_sl
+                        # Проверяем, не сработал ли уже trailing SL
+                        if high >= pos.stop_loss:
+                            exit_price = max(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.TRAILING_STOP)
+                            return True
+                elif self.trailing_activated:
+                    # Trailing уже активирован, продолжаем обновлять
+                    potential_sl = low * (1 + self.trailing_distance_pct)
+                    if potential_sl < pos.stop_loss:
+                        pos.stop_loss = potential_sl
+                        if high >= pos.stop_loss:
+                            exit_price = max(pos.stop_loss, current_price)
+                            self.close_position(current_time, exit_price, ExitReason.TRAILING_STOP)
+                            return True
         
         return False
     
@@ -689,6 +918,19 @@ class MLBacktestSimulator:
         )
 
 
+def _get_atr_pct_1h_for_time(atr_1h_series: pd.Series, current_time: pd.Timestamp) -> Optional[float]:
+    """Возвращает ATR 1h в % от цены для момента current_time (последняя закрытая 1h свеча)."""
+    if atr_1h_series is None or atr_1h_series.empty:
+        return None
+    valid = atr_1h_series.index <= current_time
+    if not valid.any():
+        return None
+    val = atr_1h_series.loc[valid].iloc[-1]
+    if pd.isna(val) or np.isnan(val):
+        return None
+    return float(val)
+
+
 def run_exact_backtest(
     model_path: str,
     symbol: str = "BTCUSDT",
@@ -697,6 +939,19 @@ def run_exact_backtest(
     initial_balance: float = 100.0,
     risk_per_trade: float = 0.02,
     leverage: int = 10,
+    atr_filter_enabled: bool = False,
+    atr_min_pct: float = 0.3,
+    atr_max_pct: float = 2.0,
+    # Параметры частичного TP и trailing
+    partial_tp_enabled: bool = False,
+    partial_tp_pct: float = 0.015,  # 1.5%
+    trailing_activation_pct: float = 0.03,  # 3.0%
+    trailing_distance_pct: float = 0.02,  # 2.0%
+    # Параметры входа по откату (pullback)
+    pullback_enabled: bool = False,
+    pullback_ema_period: int = 9,  # Период EMA (9 или 20)
+    pullback_pct: float = 0.003,  # 0.3% от high/low
+    pullback_max_bars: int = 3,  # Максимальная задержка (1-3 свечи)
 ) -> Optional[BacktestMetrics]:
     """
     Запускает ТОЧНЫЙ бэктест, который имитирует работу сервера.
@@ -790,6 +1045,30 @@ def run_exact_backtest(
             print(f"❌ Ошибка загрузки данных: {e}")
             return None
         
+        # Загрузка 1h данных для фильтра волатильности (ATR 1h)
+        atr_1h_series: Optional[pd.Series] = None
+        if atr_filter_enabled:
+            try:
+                candles_1h = days_back * 24 + 30  # достаточно для ATR(14)
+                df_1h = client.get_kline_df(symbol, "60", limit=candles_1h)
+                if df_1h.empty or len(df_1h) < 20:
+                    print(f"⚠️ Недостаточно 1h данных для фильтра ATR, фильтр отключен для этого запуска")
+                    atr_filter_enabled = False
+                else:
+                    df_1h = prepare_with_indicators(df_1h)
+                    if "atr_pct" in df_1h.columns:
+                        atr_1h_series = df_1h["atr_pct"]
+                        print(f"✅ Фильтр волатильности: ATR 1h загружен ({len(atr_1h_series)} баров), диапазон {atr_min_pct}–{atr_max_pct}%")
+                    else:
+                        print(f"⚠️ В 1h данных нет atr_pct, фильтр отключен")
+                        atr_filter_enabled = False
+            except Exception as e:
+                import logging
+                log = logging.getLogger(__name__)
+                log.warning(f"[run_exact_backtest] Ошибка загрузки 1h для ATR-фильтра: {e}")
+                print(f"⚠️ Фильтр волатильности отключен из-за ошибки: {e}")
+                atr_filter_enabled = False
+        
         # Определяем, является ли модель MTF (multi-timeframe)
         # и устанавливаем переменную окружения если нужно
         model_name = model_file.stem
@@ -864,6 +1143,14 @@ def run_exact_backtest(
             risk_per_trade=risk_per_trade,
             leverage=leverage,
             max_position_hours=48.0,
+            partial_tp_enabled=partial_tp_enabled,
+            partial_tp_pct=partial_tp_pct,
+            trailing_activation_pct=trailing_activation_pct,
+            trailing_distance_pct=trailing_distance_pct,
+            pullback_enabled=pullback_enabled,
+            pullback_ema_period=pullback_ema_period,
+            pullback_pct=pullback_pct,
+            pullback_max_bars=pullback_max_bars,
         )
         
         # Передаем настройки размера позиции в симулятор (как в реальном боте)
@@ -1153,10 +1440,62 @@ def run_exact_backtest(
                     logger.debug(f"[run_exact_backtest] Ошибка проверки BTCUSDT сигнала: {e}")
                     # Продолжаем обработку, если проверка BTC не удалась
             
+            # Фильтр по волатильности (ATR 1h): входить только когда «есть движение»
+            if atr_filter_enabled and simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
+                atr_pct_1h = _get_atr_pct_1h_for_time(atr_1h_series, current_time)
+                if atr_pct_1h is None:
+                    processed_bars += 1
+                    if processed_bars % 500 == 0:
+                        trades_count = len(simulator.trades)
+                        elapsed = time.time() - start_time_loop if start_time_loop else 0
+                        bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
+                            f"сделок: {trades_count}, ATR 1h недоступен, пропуск входа"
+                        )
+                    continue
+                if atr_pct_1h < atr_min_pct or atr_pct_1h > atr_max_pct:
+                    processed_bars += 1
+                    if processed_bars % 500 == 0:
+                        trades_count = len(simulator.trades)
+                        elapsed = time.time() - start_time_loop if start_time_loop else 0
+                        bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
+                            f"сделок: {trades_count}, ATR 1h={atr_pct_1h:.3f}% вне [{atr_min_pct}, {atr_max_pct}], пропуск входа"
+                        )
+                    continue
+            
+            # Обрабатываем pending сигналы (вход по откату)
+            if simulator.current_position is None and simulator.pullback_enabled:
+                try:
+                    pullback_signal = simulator.process_pending_signals(
+                        current_time, current_price, high, low, df_window, idx
+                    )
+                    if pullback_signal is not None:
+                        # Условия отката выполнены - открываем позицию
+                        try:
+                            opened = simulator.open_position(pullback_signal, current_time, symbol)
+                        except Exception as e:
+                            logger.error(f"[run_exact_backtest] Ошибка в open_position() для pullback сигнала: {e}")
+                            import traceback
+                            logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                            raise
+                except Exception as e:
+                    logger.error(f"[run_exact_backtest] Ошибка в process_pending_signals(): {e}")
+                    import traceback
+                    logger.error(f"[run_exact_backtest] Traceback:\n{traceback.format_exc()}")
+                    # Продолжаем обработку, не прерываем бэктест
+            
             # Проверяем вход в позицию (только если нет открытой позиции)
             if simulator.current_position is None and signal.action in (Action.LONG, Action.SHORT):
                 try:
-                    opened = simulator.open_position(signal, current_time, symbol)
+                    if simulator.pullback_enabled:
+                        # Добавляем сигнал в pending вместо немедленного открытия
+                        simulator.add_pending_signal(signal, current_time, high, low)
+                    else:
+                        # Обычный вход без pullback
+                        opened = simulator.open_position(signal, current_time, symbol)
                 except Exception as e:
                     logger.error(f"[run_exact_backtest] Ошибка в open_position(): {e}")
                     import traceback
@@ -1355,6 +1694,12 @@ def main():
   
   # Для другой пары
   python backtest_ml_strategy.py --model ml_models/ensemble_ETHUSDT_15.pkl --symbol ETHUSDT --days 60
+  
+  # С частичным TP и trailing (breakeven при 1.5%, trailing при 3.0%)
+  python backtest_ml_strategy.py --model ml_models/rf_BTCUSDT_15_15m.pkl --partial-tp --partial-tp-pct 1.5 --trailing-activation-pct 3.0 --trailing-distance-pct 2.0
+  
+  # С входом по откату (ожидание отката к EMA9 или -0.3% от high)
+  python backtest_ml_strategy.py --model ml_models/rf_BTCUSDT_15_15m.pkl --pullback --pullback-ema-period 9 --pullback-pct 0.3 --pullback-max-bars 3
         """
     )
     
@@ -1372,8 +1717,41 @@ def main():
                        help='Риск на сделку (по умолчанию: 0.02 = 2%%)')
     parser.add_argument('--leverage', type=int, default=10,
                        help='Плечо (по умолчанию: 10)')
+    parser.add_argument('--atr-filter', action='store_true',
+                       help='Включить фильтр волатильности по ATR 1h (вход только в диапазоне)')
+    parser.add_argument('--atr-min', type=float, default=None,
+                       help='Минимальный ATR 1h в %% (по умолчанию из конфига или 0.3)')
+    parser.add_argument('--atr-max', type=float, default=None,
+                       help='Максимальный ATR 1h в %% (по умолчанию из конфига или 2.0)')
+    parser.add_argument('--partial-tp', action='store_true',
+                       help='Включить режим частичного TP (breakeven + trailing)')
+    parser.add_argument('--partial-tp-pct', type=float, default=0.015,
+                       help='Порог активации breakeven в %% (по умолчанию: 1.5%%)')
+    parser.add_argument('--trailing-activation-pct', type=float, default=0.03,
+                       help='Порог активации trailing stop в %% (по умолчанию: 3.0%%)')
+    parser.add_argument('--trailing-distance-pct', type=float, default=0.02,
+                       help='Расстояние trailing stop в %% (по умолчанию: 2.0%%)')
+    parser.add_argument('--pullback', action='store_true',
+                       help='Включить вход по откату (ожидание отката к EMA или уровню)')
+    parser.add_argument('--pullback-ema-period', type=int, default=9,
+                       help='Период EMA для отката (по умолчанию: 9, можно 20)')
+    parser.add_argument('--pullback-pct', type=float, default=0.3,
+                       help='Процент отката от high/low сигнальной свечи (по умолчанию: 0.3%%)')
+    parser.add_argument('--pullback-max-bars', type=int, default=3,
+                       help='Максимальная задержка входа в свечах (по умолчанию: 3)')
     
     args = parser.parse_args()
+    
+    # Параметры фильтра ATR из конфига, если не заданы в CLI
+    try:
+        settings = load_settings()
+        atr_filter_enabled = args.atr_filter or settings.ml_strategy.atr_filter_enabled
+        atr_min_pct = args.atr_min if args.atr_min is not None else settings.ml_strategy.atr_min_pct
+        atr_max_pct = args.atr_max if args.atr_max is not None else settings.ml_strategy.atr_max_pct
+    except Exception:
+        atr_filter_enabled = args.atr_filter
+        atr_min_pct = args.atr_min if args.atr_min is not None else 0.3
+        atr_max_pct = args.atr_max if args.atr_max is not None else 2.0
     
     # Запускаем точный бэктест
     metrics = run_exact_backtest(
@@ -1384,6 +1762,17 @@ def main():
         initial_balance=args.balance,
         risk_per_trade=args.risk,
         leverage=args.leverage,
+        atr_filter_enabled=atr_filter_enabled,
+        atr_min_pct=atr_min_pct,
+        atr_max_pct=atr_max_pct,
+        partial_tp_enabled=args.partial_tp,
+        partial_tp_pct=args.partial_tp_pct / 100.0 if args.partial_tp_pct >= 1.0 else args.partial_tp_pct,
+        trailing_activation_pct=args.trailing_activation_pct / 100.0 if args.trailing_activation_pct >= 1.0 else args.trailing_activation_pct,
+        trailing_distance_pct=args.trailing_distance_pct / 100.0 if args.trailing_distance_pct >= 1.0 else args.trailing_distance_pct,
+        pullback_enabled=args.pullback,
+        pullback_ema_period=args.pullback_ema_period,
+        pullback_pct=args.pullback_pct / 100.0 if args.pullback_pct >= 1.0 else args.pullback_pct,
+        pullback_max_bars=args.pullback_max_bars,
     )
     
     if metrics:

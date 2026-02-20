@@ -438,6 +438,13 @@ def run_mtf_backtest(
     confidence_threshold_15m: float = 0.35,
     alignment_mode: str = "strict",
     require_alignment: bool = True,
+    # Параметры 4h таймфрейма
+    enable_4h: bool = False,
+    require_4h_alignment: bool = True,
+    boost_size_on_4h_align: bool = False,
+    boost_tp_on_4h_align: bool = False,
+    size_boost_factor: float = 1.5,
+    tp_boost_factor: float = 1.3,
 ) -> Optional[BacktestMetrics]:
     """
     Запускает бэктест комбинированной MTF стратегии.
@@ -536,6 +543,12 @@ def run_mtf_backtest(
             confidence_threshold_15m=confidence_threshold_15m,
             require_alignment=require_alignment,
             alignment_mode=alignment_mode,
+            enable_4h=enable_4h,
+            require_4h_alignment=require_4h_alignment,
+            boost_size_on_4h_align=boost_size_on_4h_align,
+            boost_tp_on_4h_align=boost_tp_on_4h_align,
+            size_boost_factor=size_boost_factor,
+            tp_boost_factor=tp_boost_factor,
         )
         print("✅ MTF стратегия создана")
         print()
@@ -739,7 +752,24 @@ def run_mtf_backtest(
             # Открываем новую позицию, если есть сигнал
             if signal and signal.action != Action.HOLD:
                 signals_generated += 1
-                trade_opened = simulator.open_position(signal, current_time, symbol)
+                
+                # Проверяем, нужно ли увеличить размер позиции при согласии всех трех таймфреймов
+                if enable_4h and boost_size_on_4h_align:
+                    indicators_info = signal.indicators_info if signal.indicators_info else {}
+                    if indicators_info.get("4h_aligned") and indicators_info.get("size_boost"):
+                        # Временно увеличиваем base_order_usd для этой позиции
+                        original_base_order = simulator._base_order_usd
+                        simulator._base_order_usd = original_base_order * size_boost_factor
+                        try:
+                            trade_opened = simulator.open_position(signal, current_time, symbol)
+                        finally:
+                            # Восстанавливаем оригинальный размер
+                            simulator._base_order_usd = original_base_order
+                    else:
+                        trade_opened = simulator.open_position(signal, current_time, symbol)
+                else:
+                    trade_opened = simulator.open_position(signal, current_time, symbol)
+                
                 if trade_opened:
                     trades_executed += 1
             
@@ -830,6 +860,15 @@ def main():
   # Тестировать ВСЕ комбинации моделей
   python backtest_mtf_strategy.py --symbol BTCUSDT --days 30 --test-all-combinations
   
+  # С включенным фильтром 4h (эвристика EMA 50/200)
+  python backtest_mtf_strategy.py --symbol BTCUSDT --days 30 --enable-4h
+  
+  # С увеличением размера позиции при согласии всех трех таймфреймов
+  python backtest_mtf_strategy.py --symbol BTCUSDT --days 30 --enable-4h --boost-size-on-4h --size-boost-factor 1.5
+  
+  # С расширением TP при согласии всех трех таймфреймов
+  python backtest_mtf_strategy.py --symbol BTCUSDT --days 30 --enable-4h --boost-tp-on-4h --tp-boost-factor 1.3
+  
   # Бэктест с кастомными порогами
   python backtest_mtf_strategy.py --symbol ETHUSDT --days 60 --conf-1h 0.60 --conf-15m 0.40
   
@@ -864,6 +903,20 @@ def main():
                        help="Режим выравнивания: strict (строгое совпадение) или weighted (взвешенное голосование)")
     parser.add_argument("--no-require-alignment", action="store_true",
                        help="Не требовать совпадение направлений (только для weighted режима)")
+    
+    # Параметры 4h таймфрейма
+    parser.add_argument("--enable-4h", action="store_true",
+                       help="Включить фильтр 4h (эвристика EMA 50/200)")
+    parser.add_argument("--no-require-4h-alignment", action="store_true",
+                       help="Не требовать совпадение 4h с 1h и 15m (по умолчанию требуется)")
+    parser.add_argument("--boost-size-on-4h", action="store_true",
+                       help="Увеличить размер позиции при согласии всех трех таймфреймов")
+    parser.add_argument("--boost-tp-on-4h", action="store_true",
+                       help="Расширить TP при согласии всех трех таймфреймов")
+    parser.add_argument("--size-boost-factor", type=float, default=1.5,
+                       help="Множитель размера позиции при согласии 4h (по умолчанию: 1.5)")
+    parser.add_argument("--tp-boost-factor", type=float, default=1.3,
+                       help="Множитель TP при согласии 4h (по умолчанию: 1.3)")
     
     parser.add_argument("--save", action="store_true", help="Сохранить результаты в файл")
     parser.add_argument("--plot", action="store_true", help="Построить графики")
@@ -930,6 +983,12 @@ def main():
         confidence_threshold_15m=args.conf_15m,
         alignment_mode=args.alignment_mode,
         require_alignment=not args.no_require_alignment,
+        enable_4h=args.enable_4h,
+        require_4h_alignment=not args.no_require_4h_alignment,
+        boost_size_on_4h_align=args.boost_size_on_4h,
+        boost_tp_on_4h_align=args.boost_tp_on_4h,
+        size_boost_factor=args.size_boost_factor,
+        tp_boost_factor=args.tp_boost_factor,
     )
     
     if metrics and args.save:

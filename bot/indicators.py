@@ -479,6 +479,9 @@ def compute_15m_features(
         # Fallback: пытаемся преобразовать в Series
         df["atr"] = pd.Series(atr, index=df.index) if hasattr(atr, '__iter__') else pd.Series(index=df.index, dtype=float)
     
+    # ATR в процентах от цены (для фильтра волатильности и ML)
+    df["atr_pct"] = np.where(df["close"] > 0, (df["atr"] / df["close"]) * 100, np.nan)
+    
     # Bollinger Bands для флэтовой стратегии
     bb = None
     try:

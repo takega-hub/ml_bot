@@ -408,23 +408,38 @@ class OptimizedMTFOptimizer:
                 settings['mtf_models'] = {}
             
             for symbol, combo in self.best_combinations.items():
-                if combo:
+                if not combo:
+                    logger.warning(f"[SAVE] {symbol}: Комбинация пустая, пропускаем")
+                    continue
+                
+                # Проверяем наличие обязательных ключей
+                required_keys = ['model_1h', 'model_15m', 'model_1h_path', 'model_15m_path']
+                missing_keys = [key for key in required_keys if key not in combo]
+                
+                if missing_keys:
+                    logger.warning(f"[SAVE] {symbol}: Отсутствуют ключи {missing_keys}, пропускаем сохранение")
+                    continue
+                
+                try:
                     settings['mtf_models'][symbol] = {
                         'model_1h': combo['model_1h'],
                         'model_15m': combo['model_15m'],
                         'model_1h_path': combo['model_1h_path'],
                         'model_15m_path': combo['model_15m_path'],
                         'metrics': {
-                            'total_pnl_pct': combo['total_pnl_pct'],
-                            'win_rate': combo['win_rate'],
-                            'profit_factor': combo['profit_factor'],
-                            'sharpe_ratio': combo['sharpe_ratio'],
-                            'max_drawdown_pct': combo['max_drawdown_pct'],
-                            'total_trades': combo['total_trades']
+                            'total_pnl_pct': combo.get('total_pnl_pct', 0),
+                            'win_rate': combo.get('win_rate', 0),
+                            'profit_factor': combo.get('profit_factor', 0),
+                            'sharpe_ratio': combo.get('sharpe_ratio', 0),
+                            'max_drawdown_pct': combo.get('max_drawdown_pct', 0),
+                            'total_trades': combo.get('total_trades', 0)
                         },
-                        'optimized_at': combo['timestamp']
+                        'optimized_at': combo.get('timestamp', datetime.now().isoformat())
                     }
                     logger.info(f"[SAVE] {symbol}: Сохранена лучшая комбинация в ml_settings.json")
+                except Exception as e:
+                    logger.error(f"[SAVE] {symbol}: Ошибка при сохранении комбинации: {e}")
+                    continue
             
             # Сохраняем обновленные настройки
             with open(settings_file, 'w', encoding='utf-8') as f:
@@ -503,6 +518,11 @@ class OptimizedMTFOptimizer:
         # Этап 4: Реальное тестирование топ-комбинаций
         logger.info("\n[ЭТАП 4] РЕАЛЬНОЕ ТЕСТИРОВАНИЕ ТОП-КОМБИНАЦИЙ")
         logger.info("-" * 80)
+        
+        # Очищаем best_combinations перед реальным тестированием
+        # (предыдущие значения из predictor могут иметь другую структуру)
+        self.best_combinations = {}
+        
         for symbol in self.symbols:
             if symbol not in self.prediction_results:
                 logger.warning(f"[BACKTEST] {symbol}: Нет предсказаний, пропускаем")

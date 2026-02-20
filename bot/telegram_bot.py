@@ -2531,6 +2531,15 @@ class TelegramBot:
             
             # Показываем обновленные настройки
             await self.show_ml_settings(query)
+        elif setting_name == "atr_filter_enabled":
+            # Переключаем фильтр волатильности (ATR 1h)
+            old_value = ml_settings.atr_filter_enabled
+            ml_settings.atr_filter_enabled = not ml_settings.atr_filter_enabled
+            logger.info(f"ATR filter toggled: {old_value} -> {ml_settings.atr_filter_enabled}")
+            self.save_ml_settings()
+            status = "включен" if ml_settings.atr_filter_enabled else "выключен"
+            await query.answer(f"✅ Фильтр волатильности (ATR 1h) {status}", show_alert=True)
+            await self.show_ml_settings(query)
         else:
             logger.warning(f"Unknown ML setting: {setting_name}")
             await query.answer("⚠️ Неизвестная настройка", show_alert=True)
@@ -2607,6 +2616,9 @@ class TelegramBot:
                 "auto_optimize_strategies": self.settings.ml_strategy.auto_optimize_strategies,
                 "auto_optimize_day": self.settings.ml_strategy.auto_optimize_day,
                 "auto_optimize_hour": self.settings.ml_strategy.auto_optimize_hour,
+                "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
+                "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
+                "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
             }
             
             # Сохраняем все настройки
@@ -2650,6 +2662,9 @@ class TelegramBot:
                 "auto_optimize_strategies": self.settings.ml_strategy.auto_optimize_strategies,
                 "auto_optimize_day": self.settings.ml_strategy.auto_optimize_day,
                 "auto_optimize_hour": self.settings.ml_strategy.auto_optimize_hour,
+                "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
+                "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
+                "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
             }
             
             # Проверяем, нужно ли обновить файл
@@ -2768,6 +2783,9 @@ class TelegramBot:
             text += f"   • Порог 1h: {ml_settings.mtf_confidence_threshold_1h*100:.0f}%\n"
             text += f"   • Порог 15m: {ml_settings.mtf_confidence_threshold_15m*100:.0f}%\n"
             text += f"   • Режим: {ml_settings.mtf_alignment_mode}\n\n"
+        text += f"📊 Фильтр волатильности (ATR 1h): {'✅ Включен' if ml_settings.atr_filter_enabled else '❌ Выключен'}\n"
+        if ml_settings.atr_filter_enabled:
+            text += f"   • Диапазон ATR: {ml_settings.atr_min_pct}% – {ml_settings.atr_max_pct}%\n\n"
         text += f"🤖 Автообновление стратегий: {'✅ Включено' if ml_settings.auto_optimize_strategies else '❌ Выключено'}\n"
         if ml_settings.auto_optimize_strategies:
             day_names = {
@@ -2799,6 +2817,10 @@ class TelegramBot:
             [InlineKeyboardButton(
                 f"🔄 MTF стратегия: {'✅ Вкл' if ml_settings.use_mtf_strategy else '❌ Выкл'}", 
                 callback_data="toggle_ml_use_mtf_strategy"
+            )],
+            [InlineKeyboardButton(
+                f"📊 Фильтр волатильности: {'✅ Вкл' if ml_settings.atr_filter_enabled else '❌ Выкл'}", 
+                callback_data="toggle_ml_atr_filter_enabled"
             )],
             [InlineKeyboardButton(
                 f"🤖 Автообновление: {'✅ Вкл' if ml_settings.auto_optimize_strategies else '❌ Выкл'}", 

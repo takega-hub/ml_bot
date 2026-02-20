@@ -10,6 +10,7 @@ from bot.state import BotState, TradeRecord
 from bot.exchange.bybit_client import BybitClient
 from bot.ml.strategy_ml import MLStrategy, build_ml_signals
 from bot.strategy import Action, Signal, Bias
+from bot.indicators import prepare_with_indicators
 from bot.notification_manager import NotificationManager, NotificationLevel
 
 if TYPE_CHECKING:
@@ -38,6 +39,10 @@ class TradingLoop:
         # Кэш сигнала BTCUSDT для проверки направления других пар (обновляется каждые 5 минут)
         self._btc_signal_cache: Optional[Dict] = None
         self._btc_signal_cache_time: Optional[float] = None
+        
+        # Ожидающие сигналы для входа по откату (pullback)
+        # Структура: {symbol: [{'signal': Signal, 'signal_time': datetime, 'signal_high': float, 'signal_low': float, 'bars_waited': int}, ...]}
+        self.pending_pullback_signals: Dict[str, List[Dict]] = {}
         
         # Валидация моделей при старте
         if self.settings.ml_strategy.use_mtf_strategy:
@@ -688,6 +693,35 @@ class TradingLoop:
                 logger.warning(f"Position info is None for {symbol}")
 
             local_pos = self.state.get_open_position(symbol)
+            
+            # Обрабатываем pending сигналы (вход по откату) - проверяем ДО генерации нового сигнала
+            if has_pos is None and self.settings.ml_strategy.pullback_enabled and df is not None and not df.empty:
+                try:
+                    # Получаем текущие данные свечи
+                    if len(df) > 0:
+                        current_price = float(df['close'].iloc[-1])
+                        high = float(df['high'].iloc[-1])
+                        low = float(df['low'].iloc[-1])
+                        
+                        pullback_signal = await self._process_pending_pullback_signals(
+                            symbol, current_price, high, low, df
+                        )
+                        if pullback_signal is not None:
+                            # Условия отката выполнены - открываем позицию
+                            if pullback_signal.action == Action.LONG:
+                                logger.info(f"[{symbol}] ✅ Opening LONG position after pullback")
+                                await self.execute_trade(symbol, "Buy", pullback_signal)
+                            elif pullback_signal.action == Action.SHORT:
+                                logger.info(f"[{symbol}] ✅ Opening SHORT position after pullback")
+                                await self.execute_trade(symbol, "Sell", pullback_signal)
+                            if candle_timestamp is not None:
+                                self.last_processed_candle[symbol] = candle_timestamp
+                            return  # Выходим, так как открыли позицию
+                except Exception as e:
+                    logger.error(f"[{symbol}] Error processing pending pullback signals (before signal generation): {e}")
+                    import traceback
+                    logger.error(f"[{symbol}] Traceback:\n{traceback.format_exc()}")
+                    # Продолжаем обработку, не прерываем цикл
 
             # Генерация сигнала
             # КРИТИЧНО: generate_signal() выполняет долгие синхронные операции (feature engineering, model.predict)
@@ -978,13 +1012,45 @@ class TradingLoop:
                     logger.info(f"[{symbol}] ✅ TP reentry allowed: {detail}")
                     self.state.clear_tp_reentry_guard(symbol)
                 
+                # Фильтр по волатильности (ATR 1h): входить только когда «есть движение»
+                if self.settings.ml_strategy.atr_filter_enabled and (signal.action == Action.LONG and has_pos != Bias.LONG or signal.action == Action.SHORT and has_pos != Bias.SHORT):
+                    atr_pct_1h = await asyncio.to_thread(self._get_atr_pct_1h_sync, symbol)
+                    if atr_pct_1h is not None:
+                        min_pct = self.settings.ml_strategy.atr_min_pct
+                        max_pct = self.settings.ml_strategy.atr_max_pct
+                        if atr_pct_1h < min_pct or atr_pct_1h > max_pct:
+                            logger.info(
+                                f"[{symbol}] ⏭️ ATR filter: skip entry — ATR 1h={atr_pct_1h:.3f}% outside [{min_pct}, {max_pct}] (flat or panic)"
+                            )
+                            if candle_timestamp is not None:
+                                self.last_processed_candle[symbol] = candle_timestamp
+                            return
+                    else:
+                        logger.debug(f"[{symbol}] ATR 1h unavailable, allowing entry")
+                
                 # Открываем позицию, если ее нет или она в другую сторону (для short_term)
                 if signal.action == Action.LONG and has_pos != Bias.LONG:
-                    logger.info(f"[{symbol}] ✅ Opening LONG position (no position or opposite)")
-                    await self.execute_trade(symbol, "Buy", signal)
+                    if self.settings.ml_strategy.pullback_enabled:
+                        # Добавляем сигнал в pending вместо немедленного открытия
+                        # Используем high/low из сигнальной свечи (row)
+                        signal_high = float(row['high'])
+                        signal_low = float(row['low'])
+                        self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                        logger.info(f"[{symbol}] 📋 Added LONG signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
+                    else:
+                        logger.info(f"[{symbol}] ✅ Opening LONG position (no position or opposite)")
+                        await self.execute_trade(symbol, "Buy", signal)
                 elif signal.action == Action.SHORT and has_pos != Bias.SHORT:
-                    logger.info(f"[{symbol}] ✅ Opening SHORT position (no position or opposite)")
-                    await self.execute_trade(symbol, "Sell", signal)
+                    if self.settings.ml_strategy.pullback_enabled:
+                        # Добавляем сигнал в pending вместо немедленного открытия
+                        # Используем high/low из сигнальной свечи (row)
+                        signal_high = float(row['high'])
+                        signal_low = float(row['low'])
+                        self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                        logger.info(f"[{symbol}] 📋 Added SHORT signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
+                    else:
+                        logger.info(f"[{symbol}] ✅ Opening SHORT position (no position or opposite)")
+                        await self.execute_trade(symbol, "Sell", signal)
                 else:
                     logger.info(f"[{symbol}] ⏭️ Skipping trade: action={signal.action.value}, has_pos={has_pos}")
             
@@ -1241,6 +1307,14 @@ class TradingLoop:
                     trade_logger.info(f"ORDER PLACED (OPEN): {symbol} {side} Qty={qty} Price={signal.price} TP={signal.take_profit} SL={signal.stop_loss}")
                     
                     logger.info(f"Successfully opened {side} for {symbol}")
+                    
+                    # Очищаем pending pullback сигналы для этого символа (позиция открыта)
+                    if symbol in self.pending_pullback_signals:
+                        cleared_count = len(self.pending_pullback_signals[symbol])
+                        self.pending_pullback_signals[symbol] = []
+                        if cleared_count > 0:
+                            logger.info(f"[{symbol}] 🧹 Cleared {cleared_count} pending pullback signal(s) after opening position")
+                    
                     await self.notifier.high(
                         f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\n"
                         f"Цена: {signal.price}\nTP: {signal.take_profit}\nSL: {signal.stop_loss}"
@@ -1474,6 +1548,175 @@ class TradingLoop:
             return "mid_term"
         else:
             return "short_term"
+
+    def _get_atr_pct_1h_sync(self, symbol: str) -> Optional[float]:
+        """Синхронно загружает 1h свечи, считает ATR(14) в % от цены. Для фильтра волатильности."""
+        try:
+            df = self.bybit.get_kline_df(symbol, "1h", limit=30)
+            if df is None or df.empty or len(df) < 15:
+                return None
+            df = prepare_with_indicators(df)
+            if "atr_pct" not in df.columns:
+                return None
+            val = df["atr_pct"].iloc[-1]
+            if pd.isna(val) or (isinstance(val, (int, float)) and (val != val or val < 0)):  # NaN or negative
+                return None
+            return float(val)
+        except Exception as e:
+            logger.debug(f"[{symbol}] ATR 1h fetch failed: {e}")
+            return None
+    
+    async def _check_pullback_condition(
+        self, 
+        pending_signal: Dict, 
+        symbol: str, 
+        current_price: float, 
+        high: float, 
+        low: float,
+        df: pd.DataFrame
+    ) -> bool:
+        """
+        Проверяет условия отката для pending сигнала.
+        
+        Args:
+            pending_signal: Словарь с информацией о pending сигнале
+            symbol: Торговая пара
+            current_price: Текущая цена закрытия
+            high: High текущей свечи
+            low: Low текущей свечи
+            df: DataFrame с данными (для получения EMA)
+        
+        Returns:
+            True если условия отката выполнены, False иначе
+        """
+        signal = pending_signal['signal']
+        signal_high = pending_signal['signal_high']
+        signal_low = pending_signal['signal_low']
+        
+        pullback_enabled = self.settings.ml_strategy.pullback_enabled
+        pullback_ema_period = self.settings.ml_strategy.pullback_ema_period
+        pullback_pct = self.settings.ml_strategy.pullback_pct
+        
+        if not pullback_enabled:
+            return False
+        
+        try:
+            # Получаем EMA значение, если доступно
+            ema_value = None
+            if len(df) > 0:
+                if pullback_ema_period == 9:
+                    # Используем ema_short (9)
+                    if 'ema_short' in df.columns:
+                        ema_value = df['ema_short'].iloc[-1]
+                elif pullback_ema_period == 20 or pullback_ema_period == 21:
+                    # Используем ema_long (21) для периода 20
+                    if 'ema_long' in df.columns:
+                        ema_value = df['ema_long'].iloc[-1]
+                
+                if pd.isna(ema_value) or ema_value is None:
+                    ema_value = None
+            
+            if signal.action == Action.LONG:
+                # LONG: ждем откат к EMA или к уровню -0.3% от high сигнальной свечи
+                pullback_level = signal_high * (1 - pullback_pct)
+                
+                # Проверяем откат к EMA (если доступно)
+                if ema_value is not None and not pd.isna(ema_value):
+                    if low <= ema_value <= high:
+                        logger.info(f"[{symbol}] ✅ Pullback condition met: price touched EMA{pullback_ema_period} at {ema_value:.2f}")
+                        return True  # Цена коснулась EMA
+                
+                # Проверяем откат к уровню (low текущей свечи <= pullback_level)
+                if low <= pullback_level:
+                    logger.info(f"[{symbol}] ✅ Pullback condition met: price reached pullback level {pullback_level:.2f} (low={low:.2f})")
+                    return True
+            else:  # SHORT
+                # SHORT: ждем откат вверх к EMA или к уровню +0.3% от low сигнальной свечи
+                pullback_level = signal_low * (1 + pullback_pct)
+                
+                # Проверяем откат к EMA (если доступно)
+                if ema_value is not None and not pd.isna(ema_value):
+                    if low <= ema_value <= high:
+                        logger.info(f"[{symbol}] ✅ Pullback condition met: price touched EMA{pullback_ema_period} at {ema_value:.2f}")
+                        return True  # Цена коснулась EMA
+                
+                # Проверяем откат к уровню (high текущей свечи >= pullback_level)
+                if high >= pullback_level:
+                    logger.info(f"[{symbol}] ✅ Pullback condition met: price reached pullback level {pullback_level:.2f} (high={high:.2f})")
+                    return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"[{symbol}] Error checking pullback condition: {e}")
+            import traceback
+            logger.error(f"[{symbol}] Traceback:\n{traceback.format_exc()}")
+            return False
+    
+    async def _process_pending_pullback_signals(
+        self, 
+        symbol: str, 
+        current_price: float, 
+        high: float, 
+        low: float,
+        df: pd.DataFrame
+    ) -> Optional[Signal]:
+        """
+        Обрабатывает pending сигналы и проверяет условия отката.
+        
+        Returns:
+            Signal для открытия позиции, если условия выполнены, None иначе
+        """
+        pullback_enabled = self.settings.ml_strategy.pullback_enabled
+        pullback_max_bars = self.settings.ml_strategy.pullback_max_bars
+        
+        if not pullback_enabled or symbol not in self.pending_pullback_signals:
+            return None
+        
+        pending_list = self.pending_pullback_signals.get(symbol, [])
+        if not pending_list:
+            return None
+        
+        # Удаляем устаревшие сигналы (превысили максимальную задержку)
+        self.pending_pullback_signals[symbol] = [
+            ps for ps in pending_list 
+            if ps['bars_waited'] < pullback_max_bars
+        ]
+        
+        if not self.pending_pullback_signals[symbol]:
+            return None
+        
+        # Проверяем каждый pending сигнал
+        for pending_signal in self.pending_pullback_signals[symbol][:]:  # Копируем список для безопасной итерации
+            pending_signal['bars_waited'] += 1
+            
+            # Проверяем условия отката
+            if await self._check_pullback_condition(pending_signal, symbol, current_price, high, low, df):
+                # Условия выполнены - возвращаем сигнал для открытия позиции
+                signal = pending_signal['signal']
+                self.pending_pullback_signals[symbol].remove(pending_signal)
+                logger.info(f"[{symbol}] ✅ Pullback condition met after {pending_signal['bars_waited']} bars, opening position")
+                return signal
+        
+        return None
+    
+    def _add_pending_pullback_signal(self, symbol: str, signal: Signal, signal_time: pd.Timestamp, signal_high: float, signal_low: float):
+        """Добавляет сигнал в список ожидающих отката."""
+        pullback_enabled = self.settings.ml_strategy.pullback_enabled
+        if not pullback_enabled:
+            return
+        
+        if symbol not in self.pending_pullback_signals:
+            self.pending_pullback_signals[symbol] = []
+        
+        self.pending_pullback_signals[symbol].append({
+            'signal': signal,
+            'signal_time': signal_time,
+            'signal_high': signal_high,
+            'signal_low': signal_low,
+            'bars_waited': 0,
+        })
+        
+        logger.info(f"[{symbol}] 📋 Added signal to pending pullback queue: {signal.action.value} @ {signal.price:.2f}")
 
     def _timeframe_minutes(self, timeframe: str) -> int:
         tf = str(timeframe).strip().lower()

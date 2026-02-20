@@ -36,6 +36,13 @@ class MultiTimeframeMLStrategy:
         alignment_mode: str = "strict",  # "strict" или "weighted"
         min_signal_strength_1h: str = "среднее",
         min_signal_strength_15m: str = "слабое",
+        # Параметры 4h таймфрейма
+        enable_4h: bool = False,  # Включить фильтр 4h
+        require_4h_alignment: bool = True,  # Требовать совпадение 4h с 1h и 15m
+        boost_size_on_4h_align: bool = False,  # Увеличить размер позиции при согласии всех трех
+        boost_tp_on_4h_align: bool = False,  # Расширить TP при согласии всех трех
+        size_boost_factor: float = 1.5,  # Множитель размера позиции (1.5x = +50%)
+        tp_boost_factor: float = 1.3,  # Множитель TP (1.3x = +30%)
     ):
         """
         Args:
@@ -56,6 +63,14 @@ class MultiTimeframeMLStrategy:
         self.min_confidence_difference = min_confidence_difference
         self.require_alignment = require_alignment
         self.alignment_mode = alignment_mode
+        
+        # Параметры 4h таймфрейма
+        self.enable_4h = enable_4h
+        self.require_4h_alignment = require_4h_alignment
+        self.boost_size_on_4h_align = boost_size_on_4h_align
+        self.boost_tp_on_4h_align = boost_tp_on_4h_align
+        self.size_boost_factor = size_boost_factor
+        self.tp_boost_factor = tp_boost_factor
         
         # Загружаем обе модели
         if not self.model_1h_path.exists():
@@ -82,6 +97,104 @@ class MultiTimeframeMLStrategy:
         logger.info(f"[MTF Strategy] Инициализация завершена")
         logger.info(f"  1h порог: {self.confidence_threshold_1h}, 15m порог: {self.confidence_threshold_15m}")
         logger.info(f"  Режим выравнивания: {self.alignment_mode}, require_alignment: {self.require_alignment}")
+        if self.enable_4h:
+            logger.info(f"  4h фильтр: включен (эвристика EMA 50/200)")
+            logger.info(f"  require_4h_alignment: {self.require_4h_alignment}")
+            logger.info(f"  boost_size_on_4h_align: {self.boost_size_on_4h_align} (x{self.size_boost_factor})")
+            logger.info(f"  boost_tp_on_4h_align: {self.boost_tp_on_4h_align} (x{self.tp_boost_factor})")
+    
+    def get_4h_trend(self, df_15m: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> tuple[int, float]:
+        """
+        Определяет направление тренда на 4h с помощью эвристики EMA 50/200.
+        
+        Args:
+            df_15m: DataFrame с 15m данными (для агрегации 4h если нужно)
+            df_4h: DataFrame с 4h данными (опционально)
+        
+        Returns:
+            (prediction, confidence) где:
+            - prediction: 1 (LONG/uptrend), -1 (SHORT/downtrend), 0 (нейтрально)
+            - confidence: уверенность (0-1), основанная на расстоянии между EMA
+        """
+        if not self.enable_4h:
+            return 0, 0.0
+        
+        try:
+            # Агрегируем 4h из 15m если не предоставлено
+            if df_4h is None or df_4h.empty:
+                df_15m_work = df_15m.copy()
+                
+                # Преобразуем в DatetimeIndex для агрегации
+                if not isinstance(df_15m_work.index, pd.DatetimeIndex):
+                    if "timestamp" in df_15m_work.columns:
+                        df_15m_work = df_15m_work.set_index("timestamp")
+                        df_15m_work.index = pd.to_datetime(df_15m_work.index, unit='ms', errors='coerce')
+                    else:
+                        df_15m_work.index = pd.to_datetime(df_15m_work.index, errors='coerce')
+                
+                if not isinstance(df_15m_work.index, pd.DatetimeIndex):
+                    logger.warning("[MTF Strategy] Не удалось преобразовать индекс для 4h агрегации")
+                    return 0, 0.0
+                
+                ohlcv_agg = {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+                agg_cols = {k: v for k, v in ohlcv_agg.items() if k in df_15m_work.columns}
+                if agg_cols:
+                    df_4h = df_15m_work.resample("240min").agg(agg_cols).dropna()
+                else:
+                    return 0, 0.0
+            
+            if df_4h.empty or len(df_4h) < 200:  # Нужно минимум 200 свечей для EMA 200
+                return 0, 0.0
+            
+            # Вычисляем EMA 50 и EMA 200 на 4h
+            try:
+                import pandas_ta as ta
+                ema_50 = ta.ema(df_4h["close"], length=50)
+                ema_200 = ta.ema(df_4h["close"], length=200)
+            except Exception:
+                # Fallback на pandas
+                ema_50 = df_4h["close"].ewm(span=50, adjust=False).mean()
+                ema_200 = df_4h["close"].ewm(span=200, adjust=False).mean()
+            
+            # Берем последние значения
+            if len(ema_50) == 0 or len(ema_200) == 0:
+                return 0, 0.0
+            
+            ema_50_val = ema_50.iloc[-1]
+            ema_200_val = ema_200.iloc[-1]
+            
+            if pd.isna(ema_50_val) or pd.isna(ema_200_val):
+                return 0, 0.0
+            
+            current_price = df_4h["close"].iloc[-1]
+            
+            # Определяем направление тренда
+            if ema_50_val > ema_200_val:
+                # Быстрая EMA выше медленной = восходящий тренд
+                # Уверенность зависит от расстояния между EMA
+                distance_pct = ((ema_50_val - ema_200_val) / ema_200_val) * 100
+                confidence = min(1.0, max(0.3, distance_pct / 5.0))  # Нормализуем к 0.3-1.0
+                return 1, confidence  # LONG
+            elif ema_50_val < ema_200_val:
+                # Быстрая EMA ниже медленной = нисходящий тренд
+                distance_pct = ((ema_200_val - ema_50_val) / ema_200_val) * 100
+                confidence = min(1.0, max(0.3, distance_pct / 5.0))
+                return -1, confidence  # SHORT
+            else:
+                # EMA пересекаются = нейтрально
+                return 0, 0.0
+                
+        except Exception as e:
+            logger.error(f"[MTF Strategy] Ошибка определения 4h тренда: {e}")
+            import traceback
+            logger.error(f"[MTF Strategy] Traceback:\n{traceback.format_exc()}")
+            return 0, 0.0
     
     def predict_combined(
         self,
@@ -199,13 +312,37 @@ class MultiTimeframeMLStrategy:
             logger.error(f"[MTF Strategy] Traceback:\n{traceback.format_exc()}")
             return 0, 0.0, {"reason": f"15m_prediction_error: {str(e)[:50]}"}
         
-        # 3. Комбинируем предсказания
+        # 3. Проверяем 4h тренд (если включено)
+        pred_4h = 0
+        conf_4h = 0.0
+        if self.enable_4h:
+            pred_4h, conf_4h = self.get_4h_trend(df_15m)
+            # Если требуется согласованность 4h и она не совпадает - отклоняем сигнал
+            if self.require_4h_alignment and pred_4h != 0:
+                # Проверяем совпадение с 1h и 15m
+                if pred_1h != 0 and pred_15m != 0:
+                    if pred_4h != pred_1h or pred_4h != pred_15m:
+                        # 4h не согласована - отклоняем
+                        return 0, 0.0, {
+                            "pred_1h": pred_1h,
+                            "conf_1h": conf_1h,
+                            "pred_15m": pred_15m,
+                            "conf_15m": conf_15m,
+                            "pred_4h": pred_4h,
+                            "conf_4h": conf_4h,
+                            "reason": "4h_mismatch"
+                        }
+        
+        # 4. Комбинируем предсказания
         info = {
             "pred_1h": pred_1h,
             "conf_1h": conf_1h,
             "pred_15m": pred_15m,
             "conf_15m": conf_15m,
+            "pred_4h": pred_4h,
+            "conf_4h": conf_4h,
             "alignment": pred_1h == pred_15m if pred_1h != 0 and pred_15m != 0 else None,
+            "4h_aligned": (pred_4h == pred_1h == pred_15m) if pred_4h != 0 and pred_1h != 0 and pred_15m != 0 else None,
         }
         
         if self.alignment_mode == "strict":
@@ -243,8 +380,15 @@ class MultiTimeframeMLStrategy:
                 
                 # Обе модели согласны - используем 15m для входа
                 combined_confidence = (conf_1h * 0.4 + conf_15m * 0.6)  # 1h=40%, 15m=60%
+                
+                # Если 4h также согласована - увеличиваем уверенность
+                if self.enable_4h and info.get("4h_aligned"):
+                    combined_confidence = min(1.0, combined_confidence * 1.1)  # +10% к уверенности
+                
                 if hasattr(self, '_debug_count') and self._debug_count <= 5:
                     logger.debug(f"[MTF Strategy] ✅ Сигнал принят: {pred_15m}, комбинированная уверенность={combined_confidence:.3f}")
+                    if self.enable_4h:
+                        logger.debug(f"[MTF Strategy] 4h тренд: {pred_4h}, согласованность: {info.get('4h_aligned')}")
                 return pred_15m, combined_confidence, {**info, "reason": "aligned"}
             else:
                 # Не требуем совпадения - используем взвешенное голосование
@@ -368,6 +512,17 @@ class MultiTimeframeMLStrategy:
             
             # Есть сигнал - используем 15m модель для генерации полного сигнала с TP/SL
             # (15m модель уже имеет логику расчета TP/SL)
+            
+            # Проверяем, нужно ли увеличить TP при согласии всех трех таймфреймов
+            adjusted_tp_pct = take_profit_pct
+            if self.enable_4h and self.boost_tp_on_4h_align and info.get("4h_aligned"):
+                # Увеличиваем TP
+                if adjusted_tp_pct is not None:
+                    adjusted_tp_pct = adjusted_tp_pct * self.tp_boost_factor
+                elif target_profit_pct_margin is not None:
+                    # Если TP не задан явно, увеличиваем target_profit_pct_margin
+                    target_profit_pct_margin = target_profit_pct_margin * self.tp_boost_factor
+            
             signal_15m = self.strategy_15m.generate_signal(
                 row=row,
                 df=df_15m,
@@ -377,7 +532,7 @@ class MultiTimeframeMLStrategy:
                 target_profit_pct_margin=target_profit_pct_margin,
                 max_loss_pct_margin=max_loss_pct_margin,
                 stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
+                take_profit_pct=adjusted_tp_pct,
                 skip_feature_creation=skip_feature_creation,
             )
             
@@ -392,6 +547,14 @@ class MultiTimeframeMLStrategy:
                 signal_15m.indicators_info["15m_conf"] = round(info.get("conf_15m", 0), 4)
                 signal_15m.indicators_info["alignment"] = info.get("alignment")
                 signal_15m.indicators_info["mtf_reason"] = info.get("reason")
+                # Информация о 4h
+                if self.enable_4h:
+                    signal_15m.indicators_info["4h_pred"] = info.get("pred_4h")
+                    signal_15m.indicators_info["4h_conf"] = round(info.get("conf_4h", 0), 4)
+                    signal_15m.indicators_info["4h_aligned"] = info.get("4h_aligned")
+                    if info.get("4h_aligned"):
+                        signal_15m.indicators_info["size_boost"] = self.size_boost_factor if self.boost_size_on_4h_align else 1.0
+                        signal_15m.indicators_info["tp_boost"] = self.tp_boost_factor if self.boost_tp_on_4h_align else 1.0
             else:
                 signal_15m.indicators_info = {
                     "strategy": "MTF_ML",
@@ -404,6 +567,14 @@ class MultiTimeframeMLStrategy:
                     "alignment": info.get("alignment"),
                     "mtf_reason": info.get("reason"),
                 }
+                # Информация о 4h
+                if self.enable_4h:
+                    signal_15m.indicators_info["4h_pred"] = info.get("pred_4h")
+                    signal_15m.indicators_info["4h_conf"] = round(info.get("conf_4h", 0), 4)
+                    signal_15m.indicators_info["4h_aligned"] = info.get("4h_aligned")
+                    if info.get("4h_aligned"):
+                        signal_15m.indicators_info["size_boost"] = self.size_boost_factor if self.boost_size_on_4h_align else 1.0
+                        signal_15m.indicators_info["tp_boost"] = self.tp_boost_factor if self.boost_tp_on_4h_align else 1.0
             
             # Обновляем reason с информацией о комбинированной стратегии
             action_str = "LONG" if prediction == 1 else "SHORT"

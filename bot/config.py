@@ -72,6 +72,18 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     auto_optimize_day: str = "sunday"  # День недели для автообновления
     auto_optimize_hour: int = 3  # Час для автообновления (0-23)
     
+    # Фильтр по волатильности (торговать только когда «есть движение»): ATR(14) на 1h в диапазоне
+    # ⚠️ ВНИМАНИЕ: При тестировании показал ухудшение показателей. Не рекомендуется к использованию.
+    atr_filter_enabled: bool = False  # Включить фильтр волатильности по ATR 1h (по умолчанию отключен)
+    atr_min_pct: float = 0.3  # Минимальный ATR 1h в % от цены (ниже = флэт, не входить)
+    atr_max_pct: float = 2.0  # Максимальный ATR 1h в % от цены (выше = паника, не входить)
+    
+    # Вход по откату (pullback): ожидание отката к EMA или уровню перед входом
+    pullback_enabled: bool = True  # Включить вход по откату (по умолчанию включен - показал улучшение)
+    pullback_ema_period: int = 9  # Период EMA для отката (9 или 20)
+    pullback_pct: float = 0.003  # 0.3% от high/low сигнальной свечи
+    pullback_max_bars: int = 3  # Максимальная задержка входа (1-3 свечи)
+    
     def __post_init__(self):
         """Валидация значений"""
         # Убедимся, что confidence_threshold в пределах [0, 1]
@@ -109,6 +121,12 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.auto_optimize_day = "sunday"
         if not 0 <= self.auto_optimize_hour <= 23:
             self.auto_optimize_hour = 3
+        
+        # Валидация фильтра волатильности
+        if self.atr_min_pct < 0:
+            self.atr_min_pct = 0.3
+        if self.atr_max_pct <= self.atr_min_pct:
+            self.atr_max_pct = max(2.0, self.atr_min_pct + 0.5)
 
 
 @dataclass
@@ -467,6 +485,12 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.auto_optimize_day = str(ml_dict["auto_optimize_day"])
                 if "auto_optimize_hour" in ml_dict:
                     settings.ml_strategy.auto_optimize_hour = int(ml_dict["auto_optimize_hour"])
+                if "atr_filter_enabled" in ml_dict:
+                    settings.ml_strategy.atr_filter_enabled = bool(ml_dict["atr_filter_enabled"])
+                if "atr_min_pct" in ml_dict:
+                    settings.ml_strategy.atr_min_pct = float(ml_dict["atr_min_pct"])
+                if "atr_max_pct" in ml_dict:
+                    settings.ml_strategy.atr_max_pct = float(ml_dict["atr_max_pct"])
         except Exception as e:
             logger.warning(f"Failed to load ml_settings.json: {e}")
     
@@ -500,6 +524,23 @@ def load_settings() -> AppSettings:
     ml_mtf_strategy = os.getenv("ML_MTF_STRATEGY_ENABLED", "").strip()
     if ml_mtf_strategy:
         settings.ml_strategy.use_mtf_strategy = ml_mtf_strategy.lower() not in ("0", "false", "no", "off")
+    
+    # Фильтр по волатильности (ATR 1h)
+    ml_atr_filter = os.getenv("ML_ATR_FILTER_ENABLED", "").strip()
+    if ml_atr_filter:
+        settings.ml_strategy.atr_filter_enabled = ml_atr_filter.lower() in ("1", "true", "yes")
+    ml_atr_min = os.getenv("ML_ATR_MIN_PCT", "").strip()
+    if ml_atr_min:
+        try:
+            settings.ml_strategy.atr_min_pct = float(ml_atr_min)
+        except ValueError:
+            pass
+    ml_atr_max = os.getenv("ML_ATR_MAX_PCT", "").strip()
+    if ml_atr_max:
+        try:
+            settings.ml_strategy.atr_max_pct = float(ml_atr_max)
+        except ValueError:
+            pass
     
     # Загружаем путь к модели
     ml_model_path = os.getenv("ML_MODEL_PATH", "").strip()
