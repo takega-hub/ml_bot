@@ -87,7 +87,7 @@ class MLStrategy:
         self.adaptive_confidence_k = adaptive_confidence_k
         self.adaptive_confidence_min = adaptive_confidence_min
         self.adaptive_confidence_max = adaptive_confidence_max
-self.adaptive_confidence_atr_lookback = adaptive_confidence_atr_lookback
+        self.adaptive_confidence_atr_lookback = adaptive_confidence_atr_lookback
         self.use_fixed_sl_from_risk = use_fixed_sl_from_risk
 
         # Определяем минимальный порог уверенности на основе силы сигнала
