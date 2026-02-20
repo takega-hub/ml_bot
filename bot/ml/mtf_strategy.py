@@ -82,7 +82,7 @@ class MultiTimeframeMLStrategy:
         self.adx_trend_threshold = adx_trend_threshold
         self.adx_flat_threshold = adx_flat_threshold
         self.trend_weights = trend_weights or {}
-self.flat_weights = flat_weights or {}
+        self.flat_weights = flat_weights or {}
         self.use_fixed_sl_from_risk = use_fixed_sl_from_risk
 
         # Загружаем обе модели
