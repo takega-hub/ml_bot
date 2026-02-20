@@ -13,10 +13,23 @@ from bot.config import AppSettings
 from bot.state import BotState
 from bot.model_manager import ModelManager
 from pathlib import Path
+from typing import Optional
 
 # Логирование уже настроено в run_bot.py, не нужно настраивать здесь
 # logging.basicConfig() добавляет обработчик к root logger, что вызывает дублирование логов
 logger = logging.getLogger(__name__)
+
+
+def _find_script_path(script_name: str) -> Optional[Path]:
+    """Ищет скрипт в корне проекта или в текущей рабочей директории (для деплоя)."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / script_name,
+        Path.cwd() / script_name,
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 def safe_float(value, default=0.0):
     """Безопасное преобразование в float, обрабатывает пустые строки и None"""
@@ -1775,11 +1788,10 @@ class TelegramBot:
                 "Вы будете получать уведомления о прогрессе."
             )
             
-            # Путь к скрипту обучения
-            script_path = Path(__file__).parent.parent / "retrain_all_models.py"
-            
-            if not script_path.exists():
-                await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
+            # Путь к скрипту обучения (поддержка деплоя: ищем в корне проекта и в cwd)
+            script_path = _find_script_path("retrain_all_models.py")
+            if not script_path:
+                await self.send_notification(f"❌ Скрипт обучения не найден: retrain_all_models.py")
                 return
             
             # Обучаем ТОЛЬКО модели БЕЗ MTF фичей (MTF фичи отключены)
@@ -1864,11 +1876,10 @@ class TelegramBot:
                 "Вы будете получать уведомления о прогрессе."
             )
             
-            # Путь к скрипту обучения
-            script_path = Path(__file__).parent.parent / "train_all_models_for_symbol.py"
-            
-            if not script_path.exists():
-                await self.send_notification(f"❌ Скрипт обучения не найден: {script_path}")
+            # Путь к скрипту обучения (поддержка деплоя: ищем в корне проекта и в cwd)
+            script_path = _find_script_path("train_all_models_for_symbol.py")
+            if not script_path:
+                await self.send_notification(f"❌ Скрипт обучения не найден: train_all_models_for_symbol.py")
                 return
             
             # Используем sys.executable для запуска с правильным Python
@@ -1957,11 +1968,10 @@ class TelegramBot:
                 "Вы будете получать уведомления о прогрессе."
             )
             
-            # Путь к скрипту тестирования
-            script_path = Path(__file__).parent.parent / "test_all_mtf_combinations.py"
-            
-            if not script_path.exists():
-                await self.send_notification(f"❌ Скрипт тестирования не найден: {script_path}")
+            # Путь к скрипту тестирования (поддержка деплоя: ищем в корне проекта и в cwd)
+            script_path = _find_script_path("test_all_mtf_combinations.py")
+            if not script_path:
+                await self.send_notification(f"❌ Скрипт тестирования не найден: test_all_mtf_combinations.py")
                 return
             
             # Используем sys.executable для запуска с правильным Python
