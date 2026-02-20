@@ -550,6 +550,7 @@ class TradingLoop:
                                       f"WR={metrics.get('win_rate', 0):.1f}%, "
                                       f"PF={metrics.get('profit_factor', 0):.2f}")
                         
+                        ms = self.settings.ml_strategy
                         self.strategies[symbol] = MultiTimeframeMLStrategy(
                             model_1h_path=model_1h,
                             model_15m_path=model_15m,
@@ -557,8 +558,16 @@ class TradingLoop:
                             confidence_threshold_15m=confidence_threshold_15m,
                             require_alignment=require_alignment,
                             alignment_mode=alignment_mode,
+                            use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
+                            adx_trend_threshold=getattr(ms, "adx_trend_threshold", 25.0),
+                            adx_flat_threshold=getattr(ms, "adx_flat_threshold", 20.0),
+                            trend_weights=getattr(ms, "trend_weights", None),
+                            flat_weights=getattr(ms, "flat_weights", None),
+                            use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
                         logger.info(f"[{symbol}] ✅ MTF strategy loaded successfully")
+                        dyn = getattr(ms, "use_dynamic_ensemble_weights", False)
+                        logger.info(f"[DEPLOY] {symbol}: MTF, dynamic_ensemble_weights={dyn}")
                     else:
                         # Нет обеих моделей - используем обычную стратегию
                         logger.warning(f"[{symbol}] MTF strategy enabled but models not found:")
@@ -574,17 +583,34 @@ class TradingLoop:
                         # Пытаемся найти модель в папке ml_models
                         models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
                         if models:
+                            # Для BTCUSDT предпочитаем модель с фичей orderbook (_ob)
+                            if symbol == "BTCUSDT":
+                                ob_models = [p for p in models if "_ob" in p.stem]
+                                if ob_models:
+                                    models = ob_models + [p for p in models if p not in ob_models]
                             model_path = str(models[0])
                             self.state.symbol_models[symbol] = model_path
                     
                     if model_path:
                         logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
+                        ms = self.settings.ml_strategy
                         self.strategies[symbol] = MLStrategy(
                             model_path=model_path,
-                            confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                            min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                            confidence_threshold=ms.confidence_threshold,
+                            min_signal_strength=ms.min_signal_strength,
+                            stability_filter=ms.stability_filter,
+                            min_signals_per_day=ms.min_signals_per_day,
+                            max_signals_per_day=ms.max_signals_per_day,
+                            use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
+                            adx_trend_threshold=getattr(ms, "adx_trend_threshold", 25.0),
+                            adx_flat_threshold=getattr(ms, "adx_flat_threshold", 20.0),
+                            trend_weights=getattr(ms, "trend_weights", None),
+                            flat_weights=getattr(ms, "flat_weights", None),
+                            use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
-                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {self.settings.ml_strategy.confidence_threshold}, min_strength: {self.settings.ml_strategy.min_signal_strength})")
+                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {ms.confidence_threshold}, min_strength: {ms.min_signal_strength})")
+                        dyn = getattr(ms, "use_dynamic_ensemble_weights", False)
+                        logger.info(f"[DEPLOY] {symbol}: single TF, dynamic_ensemble_weights={dyn}")
                     else:
                         logger.warning(f"No model found for {symbol}, skipping...")
                         return
@@ -2508,14 +2534,27 @@ class TradingLoop:
                     from pathlib import Path
                     models = list(Path("ml_models").glob("*_BTCUSDT_*.pkl"))
                     if models:
+                        ob_models = [p for p in models if "_ob" in p.stem]
+                        if ob_models:
+                            models = ob_models + [p for p in models if p not in ob_models]
                         model_path = str(models[0])
                         self.state.symbol_models["BTCUSDT"] = model_path
                 
                 if model_path:
+                    ms = self.settings.ml_strategy
                     self.strategies["BTCUSDT"] = MLStrategy(
                         model_path=model_path,
-                        confidence_threshold=self.settings.ml_strategy.confidence_threshold,
-                        min_signal_strength=self.settings.ml_strategy.min_signal_strength
+                        confidence_threshold=ms.confidence_threshold,
+                        min_signal_strength=ms.min_signal_strength,
+                        stability_filter=ms.stability_filter,
+                        min_signals_per_day=ms.min_signals_per_day,
+                        max_signals_per_day=ms.max_signals_per_day,
+                        use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
+                        adx_trend_threshold=getattr(ms, "adx_trend_threshold", 25.0),
+                        adx_flat_threshold=getattr(ms, "adx_flat_threshold", 20.0),
+                        trend_weights=getattr(ms, "trend_weights", None),
+                        flat_weights=getattr(ms, "flat_weights", None),
+                        use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                     )
                 else:
                     return None

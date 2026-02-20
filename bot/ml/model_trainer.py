@@ -100,7 +100,8 @@ class PreTrainedVotingEnsemble:
         self.xgb_weight = xgb_weight
         self.classes_ = np.array([-1, 0, 1])  # SHORT, HOLD, LONG
     
-    def predict_proba(self, X):
+    def predict_proba(self, X, weights_override=None):
+        # weights_override игнорируется для Voting (нет динамических весов по режиму)
         # Получаем вероятности от обеих моделей
         rf_proba = self.rf_model.predict_proba(X)
         # Для XGBoost нужно преобразовать классы обратно
@@ -173,8 +174,10 @@ class WeightedEnsemble:
         self.xgb_weight = xgb_weight
         self.classes_ = np.array([-1, 0, 1])  # SHORT, HOLD, LONG
     
-    def predict_proba(self, X):
-        """Предсказывает вероятности для всех классов."""
+    def predict_proba(self, X, weights_override=None):
+        """Предсказывает вероятности для всех классов.
+        weights_override: опционально dict с ключами rf_weight, xgb_weight (сумма=1) для режима тренд/флэт.
+        """
         # Получаем вероятности от обеих моделей
         rf_proba = self.rf_model.predict_proba(X)
         
@@ -230,9 +233,15 @@ class WeightedEnsemble:
                     rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
             rf_proba = rf_proba_expanded
         
-        # Взвешенное усреднение
-        ensemble_proba = (self.rf_weight * rf_proba + 
-                         self.xgb_weight * xgb_proba_reordered)
+        if weights_override:
+            w_rf = weights_override.get("rf_weight", self.rf_weight)
+            w_xgb = weights_override.get("xgb_weight", self.xgb_weight)
+            s = w_rf + w_xgb
+            if s > 0:
+                w_rf, w_xgb = w_rf / s, w_xgb / s
+        else:
+            w_rf, w_xgb = self.rf_weight, self.xgb_weight
+        ensemble_proba = (w_rf * rf_proba + w_xgb * xgb_proba_reordered)
         return ensemble_proba
     
     def predict(self, X):
@@ -252,7 +261,8 @@ class TripleEnsemble:
         self.lgb_weight = lgb_weight
         self.classes_ = np.array([-1, 0, 1])  # SHORT, HOLD, LONG
     
-    def predict_proba(self, X):
+    def predict_proba(self, X, weights_override=None):
+        """weights_override: опционально dict rf_weight, xgb_weight, lgb_weight (сумма=1) для режима тренд/флэт."""
         # Получаем вероятности от всех трех моделей
         rf_proba = self.rf_model.predict_proba(X)
         
@@ -335,10 +345,18 @@ class TripleEnsemble:
                     rf_proba_expanded[:, i] = rf_proba[:, rf_idx]
             rf_proba = rf_proba_expanded
         
+        # Веса: переопределение для режима тренд/флэт или стандартные
+        if weights_override:
+            w_rf = weights_override.get("rf_weight", self.rf_weight)
+            w_xgb = weights_override.get("xgb_weight", self.xgb_weight)
+            w_lgb = weights_override.get("lgb_weight", self.lgb_weight)
+            s = w_rf + w_xgb + w_lgb
+            if s > 0:
+                w_rf, w_xgb, w_lgb = w_rf / s, w_xgb / s, w_lgb / s
+        else:
+            w_rf, w_xgb, w_lgb = self.rf_weight, self.xgb_weight, self.lgb_weight
         # Взвешенное усреднение всех трех моделей
-        ensemble_proba = (self.rf_weight * rf_proba + 
-                         self.xgb_weight * xgb_proba_reordered +
-                         self.lgb_weight * lgb_proba_reordered)
+        ensemble_proba = (w_rf * rf_proba + w_xgb * xgb_proba_reordered + w_lgb * lgb_proba_reordered)
         return ensemble_proba
     
     def predict(self, X):
@@ -376,13 +394,14 @@ class QuadEnsemble:
         self.sequence_length = sequence_length
         self.classes_ = np.array([-1, 0, 1])  # SHORT, HOLD, LONG
     
-    def predict_proba(self, X, df_history: Optional[pd.DataFrame] = None):
+    def predict_proba(self, X, df_history: Optional[pd.DataFrame] = None, weights_override=None):
         """
         Предсказывает вероятности для всех четырех моделей.
         
         Args:
             X: Матрица фичей (n_samples, n_features) для RF/XGB/LGB
             df_history: DataFrame с историей для LSTM (должен содержать все фичи и иметь минимум sequence_length строк)
+            weights_override: опционально dict rf_weight, xgb_weight, lgb_weight, lstm_weight (сумма=1) для режима тренд/флэт
         
         Returns:
             Массив вероятностей (n_samples, 3) в формате [SHORT, HOLD, LONG]
@@ -620,12 +639,19 @@ class QuadEnsemble:
             print(f"[QuadEnsemble] Warning: LSTM proba contains NaN, using uniform distribution")
             lstm_proba = np.ones_like(lstm_proba) / 3.0
         
-        # Взвешенное усреднение всех четырех моделей
+        if weights_override:
+            w_rf = weights_override.get("rf_weight", self.rf_weight)
+            w_xgb = weights_override.get("xgb_weight", self.xgb_weight)
+            w_lgb = weights_override.get("lgb_weight", self.lgb_weight)
+            w_lstm = weights_override.get("lstm_weight", self.lstm_weight)
+            s = w_rf + w_xgb + w_lgb + w_lstm
+            if s > 0:
+                w_rf, w_xgb, w_lgb, w_lstm = w_rf / s, w_xgb / s, w_lgb / s, w_lstm / s
+        else:
+            w_rf, w_xgb, w_lgb, w_lstm = self.rf_weight, self.xgb_weight, self.lgb_weight, self.lstm_weight
         ensemble_proba = (
-            self.rf_weight * rf_proba + 
-            self.xgb_weight * xgb_proba_reordered +
-            self.lgb_weight * lgb_proba_reordered +
-            self.lstm_weight * lstm_proba
+            w_rf * rf_proba + w_xgb * xgb_proba_reordered +
+            w_lgb * lgb_proba_reordered + w_lstm * lstm_proba
         )
         
         # Проверяем результат на NaN и нормализуем
@@ -641,8 +667,8 @@ class QuadEnsemble:
         
         return ensemble_proba
     
-    def predict(self, X, df_history: Optional[pd.DataFrame] = None):
-        proba = self.predict_proba(X, df_history)
+    def predict(self, X, df_history: Optional[pd.DataFrame] = None, weights_override=None):
+        proba = self.predict_proba(X, df_history, weights_override)
         return self.classes_[np.argmax(proba, axis=1)]
 
 

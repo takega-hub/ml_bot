@@ -49,7 +49,7 @@ class MLStrategy:
     ML-стратегия, использующая обученную модель для предсказания движения цены.
     """
     
-    def __init__(self, model_path: str, confidence_threshold: float = 0.35, min_signal_strength: str = "слабое", stability_filter: bool = True, use_dynamic_threshold: bool = True, min_signals_per_day: int = 1, max_signals_per_day: int = 20):
+    def __init__(self, model_path: str, confidence_threshold: float = 0.35, min_signal_strength: str = "слабое", stability_filter: bool = True, use_dynamic_threshold: bool = True, min_signals_per_day: int = 1, max_signals_per_day: int = 20, use_dynamic_ensemble_weights: bool = False, adx_trend_threshold: float = 25.0, adx_flat_threshold: float = 20.0, trend_weights: Optional[Dict[str, float]] = None, flat_weights: Optional[Dict[str, float]] = None, use_adaptive_confidence_by_atr: bool = False, adaptive_confidence_k: float = 0.3, adaptive_confidence_min: float = 0.8, adaptive_confidence_max: float = 1.2, adaptive_confidence_atr_lookback: int = 500, use_fixed_sl_from_risk: bool = False):
         """
         Инициализирует ML-стратегию.
         
@@ -61,13 +61,35 @@ class MLStrategy:
             use_dynamic_threshold: Использовать динамические пороги на основе рыночных условий
             min_signals_per_day: Минимальное количество сигналов в день (гарантирует хотя бы 1 сигнал)
             max_signals_per_day: Максимальное количество сигналов в день (ограничивает избыточную торговлю)
+            use_dynamic_ensemble_weights: Динамические веса ансамбля по режиму рынка (тренд/флэт по ADX)
+            adx_trend_threshold: ADX > этого значения = тренд
+            adx_flat_threshold: ADX < этого значения = флэт
+            trend_weights: Веса для тренда (rf_weight, xgb_weight, lgb_weight[, lstm_weight])
+            flat_weights: Веса для флэта (rf_weight, xgb_weight, lgb_weight[, lstm_weight])
+            use_adaptive_confidence_by_atr: Порог уверенности по формуле от ATR (выше волатильность — ниже порог)
+            adaptive_confidence_k: Коэффициент k в формуле (1 + k * (atr_median - atr_current) / atr_median)
+            adaptive_confidence_min: Минимальный множитель порога (относительно base)
+            adaptive_confidence_max: Максимальный множитель порога (относительно base)
+            adaptive_confidence_atr_lookback: Число баров для расчёта медианы ATR
+            use_fixed_sl_from_risk: True = SL только из риска (stop_loss_pct / max_loss/leverage), False = от модели/ATR
         """
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.min_signal_strength = min_signal_strength
         self.stability_filter = stability_filter
         self.use_dynamic_threshold = use_dynamic_threshold
-        
+        self.use_dynamic_ensemble_weights = use_dynamic_ensemble_weights
+        self.adx_trend_threshold = adx_trend_threshold
+        self.adx_flat_threshold = adx_flat_threshold
+        self.trend_weights = trend_weights or {}
+        self.flat_weights = flat_weights or {}
+        self.use_adaptive_confidence_by_atr = use_adaptive_confidence_by_atr
+        self.adaptive_confidence_k = adaptive_confidence_k
+        self.adaptive_confidence_min = adaptive_confidence_min
+        self.adaptive_confidence_max = adaptive_confidence_max
+self.adaptive_confidence_atr_lookback = adaptive_confidence_atr_lookback
+        self.use_fixed_sl_from_risk = use_fixed_sl_from_risk
+
         # Определяем минимальный порог уверенности на основе силы сигнала
         strength_thresholds = {
             "слабое": 0.0,
@@ -531,18 +553,33 @@ class MLStrategy:
             logger.error(f"[ml_strategy] Error preparing features: {e}")
             return 0, 0.0
         
+        # Динамические веса ансамбля по режиму рынка (тренд/флэт по ADX)
+        weights_override = None
+        if self.use_dynamic_ensemble_weights and self.is_ensemble and (self.trend_weights or self.flat_weights):
+            try:
+                row = df_with_features.iloc[-1]
+                adx = row.get("adx", np.nan)
+                if np.isfinite(adx):
+                    if adx > self.adx_trend_threshold and self.trend_weights:
+                        weights_override = self.trend_weights
+                    elif adx < self.adx_flat_threshold and self.flat_weights:
+                        weights_override = self.flat_weights
+            except Exception as e:
+                logger.debug(f"[ml_strategy] dynamic_ensemble_weights: {e}")
+        
         # Предсказание
         if hasattr(self.model, "predict_proba"):
             try:
+                # weights_override только для ансамблей; одиночные модели (XGB, RF) его не принимают
+                kw = {"weights_override": weights_override} if (self.is_ensemble and weights_override is not None) else {}
                 # Для классификаторов с вероятностями (включая ансамбль)
                 # Проверяем, является ли это QuadEnsemble (требует историю для LSTM)
                 if hasattr(self.model, 'lstm_trainer') and hasattr(self.model, 'sequence_length'):
                     # QuadEnsemble: передаем историю данных для LSTM
-                    # Используем df_with_features, который уже содержит все фичи
-                    proba = self.model.predict_proba(X_last, df_history=df_with_features)[0]
+                    proba = self.model.predict_proba(X_last, df_history=df_with_features, **kw)[0]
                 else:
-                    # Обычные модели и ансамбли (TripleEnsemble, etc.)
-                    proba = self.model.predict_proba(X_last)[0]
+                    # Обычные модели и ансамбли (TripleEnsemble, WeightedEnsemble)
+                    proba = self.model.predict_proba(X_last, **kw)[0]
             except Exception as e:
                 logger.error(f"[ml_strategy] Ошибка при вызове predict_proba: {e}")
                 logger.error(f"[ml_strategy] Тип модели: {type(self.model)}")
@@ -793,34 +830,37 @@ class MLStrategy:
             # Адаптируем порог на основе рыночных условий
             effective_threshold = self.confidence_threshold
             
-            if self.use_dynamic_threshold and prediction != 0:
-                # Получаем рыночные индикаторы
-                atr_pct = row.get("atr_pct", np.nan)
-                adx = row.get("adx", np.nan)
-                
-                # Адаптация на основе волатильности (ATR)
-                if np.isfinite(atr_pct):
-                    # Высокая волатильность = выше порог (больше шума)
-                    # Низкая волатильность = ниже порог (меньше шума)
-                    if atr_pct > 1.5:  # Высокая волатильность
-                        effective_threshold = self.confidence_threshold * 1.2
-                    elif atr_pct < 0.5:  # Низкая волатильность
-                        effective_threshold = self.confidence_threshold * 0.9
-                
-                # Адаптация на основе силы тренда (ADX)
-                if np.isfinite(adx):
-                    # Слабый тренд (ADX < 20) = выше порог (меньше уверенности)
-                    # Сильный тренд (ADX > 25) = ниже порог (больше уверенности)
-                    if adx < 20:  # Слабый тренд
-                        effective_threshold = max(effective_threshold, self.confidence_threshold * 1.15)
-                    elif adx > 25:  # Сильный тренд
-                        effective_threshold = min(effective_threshold, self.confidence_threshold * 0.95)
-                
-                # Ограничиваем диапазон: минимум не может быть ниже 80% от базового порога
-                # Это гарантирует, что если пользователь установил порог 0.75, он не снизится ниже 0.6
-                min_allowed = self.confidence_threshold * 0.8
-                max_allowed = min(0.95, self.confidence_threshold * 1.5)  # Максимум 95% или 1.5x от базового
-                effective_threshold = max(min_allowed, min(max_allowed, effective_threshold))
+            if prediction != 0:
+                # Режим: адаптивный порог по ATR (формула из роадмэпа)
+                # Высокая волатильность -> ниже порог (больше сигналов), низкая -> выше порог (меньше шума)
+                if self.use_adaptive_confidence_by_atr:
+                    atr_pct = row.get("atr_pct", np.nan)
+                    if np.isfinite(atr_pct) and "atr_pct" in df.columns and len(df) >= 2:
+                        lookback = min(self.adaptive_confidence_atr_lookback, len(df) - 1)
+                        atr_series = df["atr_pct"].dropna()
+                        if len(atr_series) >= max(10, lookback // 2):
+                            atr_median = float(atr_series.iloc[-lookback:].median())
+                            if atr_median > 0:
+                                multiplier = 1.0 + self.adaptive_confidence_k * (atr_median - atr_pct) / atr_median
+                                multiplier = max(self.adaptive_confidence_min, min(self.adaptive_confidence_max, multiplier))
+                                effective_threshold = float(np.clip(self.confidence_threshold * multiplier, 0.01, 0.99))
+                elif self.use_dynamic_threshold:
+                    # Существующая логика: порог по уровням ATR/ADX
+                    atr_pct = row.get("atr_pct", np.nan)
+                    adx = row.get("adx", np.nan)
+                    if np.isfinite(atr_pct):
+                        if atr_pct > 1.5:
+                            effective_threshold = self.confidence_threshold * 1.2
+                        elif atr_pct < 0.5:
+                            effective_threshold = self.confidence_threshold * 0.9
+                    if np.isfinite(adx):
+                        if adx < 20:
+                            effective_threshold = max(effective_threshold, self.confidence_threshold * 1.15)
+                        elif adx > 25:
+                            effective_threshold = min(effective_threshold, self.confidence_threshold * 0.95)
+                    min_allowed = self.confidence_threshold * 0.8
+                    max_allowed = min(0.95, self.confidence_threshold * 1.5)
+                    effective_threshold = max(min_allowed, min(max_allowed, effective_threshold))
             
             # Применяем динамический порог
             if prediction != 0 and confidence < effective_threshold:
@@ -929,14 +969,11 @@ class MLStrategy:
             else:
                 tp_ratio = (target_profit_pct_margin / leverage) / 100.0
 
-            # АДАПТАЦИЯ ПО ATR (если доступен)
-            # Если волатильность высокая, расширяем SL/TP, чтобы не выбивало шумом
-            # Если низкая, сужаем, чтобы забирать мелкие движения
+            # АДАПТАЦИЯ ПО ATR (если доступен) — только когда SL не фиксирован из риска
+            # Если use_fixed_sl_from_risk: всегда используем sl_ratio/tp_ratio из риска (выше)
             atr_pct = row.get("atr_pct", np.nan)
             atr_value = row.get("atr", np.nan)
-            
-            # Новая логика динамического ATR (из конфига)
-            use_dynamic_atr = True  # Можно вынести в настройки стратегии
+            use_dynamic_atr = not self.use_fixed_sl_from_risk  # При фикс. SL из риска не переопределяем ATR
             
             if use_dynamic_atr and np.isfinite(atr_value) and atr_value > 0:
                 # Используем множители из конфига (по умолчанию 1.5 ATR для SL)
@@ -957,7 +994,7 @@ class MLStrategy:
                 if self._generate_signal_call_count <= 3:
                     logger.debug(f"[ml_strategy] Dynamic ATR risk: atr={atr_value:.2f}, sl_ratio={sl_ratio:.4f}, tp_ratio={tp_ratio:.4f}")
             
-            elif np.isfinite(atr_pct) and atr_pct > 0:
+            elif not self.use_fixed_sl_from_risk and np.isfinite(atr_pct) and atr_pct > 0:
                 # Fallback к старой логике адаптации процента
                 # Нормализуем ATR к среднему (примерно 0.5% для 15m крипты)
                 atr_factor = atr_pct / 0.5

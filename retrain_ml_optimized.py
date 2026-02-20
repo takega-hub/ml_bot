@@ -156,6 +156,12 @@ def main():
         choices=["15m", "60m", "1h"],
         help="Базовый таймфрейм для обучения (15m или 60m/1h). По умолчанию: 15m"
     )
+    parser.add_argument(
+        "--model-suffix",
+        type=str,
+        default="",
+        help="Суффикс имени файла модели (например _ob для версии с orderbook). Итог: rf_SYM_15_15m<suffix>.pkl"
+    )
     args = parser.parse_known_args()[0]
     
     safe_print("=" * 80)
@@ -201,6 +207,10 @@ def main():
         mode_suffix = f"mtf_{interval_display}"
     else:
         mode_suffix = interval_display
+    
+    model_suffix = (args.model_suffix or "").strip()
+    if model_suffix and not model_suffix.startswith("_"):
+        model_suffix = "_" + model_suffix
     
     # Загружаем оптимизированные веса, если нужно
     optimized_weights = {}
@@ -475,7 +485,7 @@ def main():
         )
         
         # Сохраняем модель
-        rf_filename = f"rf_{symbol}_{base_interval}_{mode_suffix}.pkl"
+        rf_filename = f"rf_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
         trainer.save_model(
             rf_model,
             trainer.scaler,
@@ -517,7 +527,7 @@ def main():
             )
             
             # Сохраняем модель
-            xgb_filename = f"xgb_{symbol}_{base_interval}_{mode_suffix}.pkl"
+            xgb_filename = f"xgb_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
             trainer.save_model(
                 xgb_model,
                 trainer.scaler,
@@ -621,7 +631,7 @@ def main():
                 )
             
             # Сохраняем модель
-            ensemble_filename = f"ensemble_{symbol}_{base_interval}_{mode_suffix}.pkl"
+            ensemble_filename = f"ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
             trainer.save_model(
                 ensemble_model,
                 trainer.scaler,
@@ -745,7 +755,7 @@ def main():
                     )
                 
                 # Сохраняем модель
-                triple_filename = f"triple_ensemble_{symbol}_{base_interval}_{mode_suffix}.pkl"
+                triple_filename = f"triple_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
                 trainer.save_model(
                     triple_ensemble_model,
                     trainer.scaler,
@@ -810,7 +820,7 @@ def main():
                 )
                 
                 # Сохраняем модель
-                quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}.pkl"
+                quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
                 trainer.save_model(
                     quad_ensemble_model,
                     trainer.scaler,

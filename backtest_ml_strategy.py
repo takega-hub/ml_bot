@@ -257,18 +257,6 @@ class MLBacktestSimulator:
                 
                 self.signal_stats.sl_distances.append(sl_distance_pct)
                 self.signal_stats.tp_distances.append(tp_distance_pct)
-                
-                # Проверяем SL=1%
-                if 0.8 <= sl_distance_pct <= 1.2:  # Допуск ±0.2%
-                    self.signal_stats.signals_with_correct_sl += 1
-                else:
-                    self.signal_stats.signals_with_wrong_sl += 1
-                    
-                    # Логируем только первые 5 неправильных SL
-                    if self.signal_stats.signals_with_wrong_sl <= 5:
-                        print(f"⚠️  Сигнал с НЕстандартным SL: {sl_distance_pct:.2f}%")
-                        print(f"   Действие: {signal.action.value}, Цена: {current_price:.2f}")
-                        print(f"   Причина: {signal.reason}")
         else:
             # HOLD сигналы не должны иметь TP/SL - это нормально
             if signal.action != Action.HOLD:
@@ -952,6 +940,17 @@ def run_exact_backtest(
     pullback_ema_period: int = 9,  # Период EMA (9 или 20)
     pullback_pct: float = 0.003,  # 0.3% от high/low
     pullback_max_bars: int = 3,  # Максимальная задержка (1-3 свечи)
+    # Динамические веса ансамбля по режиму (тренд/флэт по ADX)
+    use_dynamic_ensemble_weights: bool = False,
+    adx_trend_threshold: float = 25.0,
+    adx_flat_threshold: float = 20.0,
+    trend_weights: Optional[Dict[str, float]] = None,
+    flat_weights: Optional[Dict[str, float]] = None,
+    use_adaptive_confidence_by_atr: bool = False,
+    adaptive_confidence_k: float = 0.3,
+    adaptive_confidence_min: float = 0.8,
+    adaptive_confidence_max: float = 1.2,
+    use_dynamic_threshold: Optional[bool] = None,  # None = из настроек; False = фиксированный порог для тестов
 ) -> Optional[BacktestMetrics]:
     """
     Запускает ТОЧНЫЙ бэктест, который имитирует работу сервера.
@@ -1098,13 +1097,25 @@ def run_exact_backtest(
         print(f"\n🤖 Подготовка ML стратегии...")
         try:
             # ВАЖНО: Используем те же параметры, что и реальный бот
+            _use_dynamic = use_dynamic_threshold if use_dynamic_threshold is not None else getattr(settings.ml_strategy, "use_dynamic_threshold", True)
             strategy = MLStrategy(
                 model_path=str(model_file),
                 confidence_threshold=settings.ml_strategy.confidence_threshold,
                 min_signal_strength=settings.ml_strategy.min_signal_strength,
                 stability_filter=settings.ml_strategy.stability_filter,
                 min_signals_per_day=settings.ml_strategy.min_signals_per_day,
-                max_signals_per_day=settings.ml_strategy.max_signals_per_day
+                max_signals_per_day=settings.ml_strategy.max_signals_per_day,
+                use_dynamic_threshold=_use_dynamic,
+                use_dynamic_ensemble_weights=use_dynamic_ensemble_weights or getattr(settings.ml_strategy, "use_dynamic_ensemble_weights", False),
+                adx_trend_threshold=adx_trend_threshold,
+                adx_flat_threshold=adx_flat_threshold,
+                trend_weights=trend_weights or getattr(settings.ml_strategy, "trend_weights", None),
+                flat_weights=flat_weights or getattr(settings.ml_strategy, "flat_weights", None),
+                use_adaptive_confidence_by_atr=use_adaptive_confidence_by_atr or getattr(settings.ml_strategy, "use_adaptive_confidence_by_atr", False),
+                adaptive_confidence_k=adaptive_confidence_k,
+                adaptive_confidence_min=adaptive_confidence_min,
+                adaptive_confidence_max=adaptive_confidence_max,
+                use_fixed_sl_from_risk=getattr(settings.ml_strategy, "use_fixed_sl_from_risk", False),
             )
             
             # Подготавливаем данные (как реальный бот)
@@ -1185,14 +1196,20 @@ def run_exact_backtest(
                         else:
                             os.environ["ML_MTF_ENABLED"] = "0"
                         
-                        # Создаем стратегию BTCUSDT
+                        # Создаем стратегию BTCUSDT (те же улучшения, что и основная стратегия)
                         btc_strategy = MLStrategy(
                             model_path=btc_model_path,
                             confidence_threshold=settings.ml_strategy.confidence_threshold,
                             min_signal_strength=settings.ml_strategy.min_signal_strength,
                             stability_filter=settings.ml_strategy.stability_filter,
                             min_signals_per_day=settings.ml_strategy.min_signals_per_day,
-                            max_signals_per_day=settings.ml_strategy.max_signals_per_day
+                            max_signals_per_day=settings.ml_strategy.max_signals_per_day,
+                            use_dynamic_ensemble_weights=use_dynamic_ensemble_weights or getattr(settings.ml_strategy, "use_dynamic_ensemble_weights", False),
+                            adx_trend_threshold=adx_trend_threshold,
+                            adx_flat_threshold=adx_flat_threshold,
+                            trend_weights=trend_weights or getattr(settings.ml_strategy, "trend_weights", None),
+                            flat_weights=flat_weights or getattr(settings.ml_strategy, "flat_weights", None),
+                            use_fixed_sl_from_risk=getattr(settings.ml_strategy, "use_fixed_sl_from_risk", False),
                         )
                         
                         # Создаем технические индикаторы для BTCUSDT
@@ -1557,7 +1574,6 @@ def run_exact_backtest(
             print(f"   Сигналов с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}% (от {tradable_count} LONG/SHORT)")
         else:
             print(f"   Сигналов с TP/SL: N/A (нет LONG/SHORT сигналов)")
-        print(f"   Сигналов с SL=1%: {metrics.signals_with_correct_sl_pct:.1f}%")
         print(f"   Средний SL в сигналах: {metrics.avg_sl_distance_pct:.2f}%")
         print(f"   Средний TP в сигналах: {metrics.avg_tp_distance_pct:.2f}%")
         print(f"   Средний R/R: {metrics.avg_rr_ratio:.2f}")
@@ -1598,12 +1614,6 @@ def run_exact_backtest(
             print(f"⚠️  ПРЕДУПРЕЖДЕНИЕ: Нет LONG/SHORT сигналов для анализа TP/SL")
             print(f"   Всего сигналов: {metrics.total_signals}, из них HOLD: {metrics.total_signals}")
         
-        if metrics.signals_with_correct_sl_pct < 90:
-            print(f"❌ ПРОБЛЕМА: Только {metrics.signals_with_correct_sl_pct:.1f}% сигналов имеют SL=1%")
-            print(f"   Стратегия НЕ следует правилу SL=1%!")
-            print(f"   Средний SL: {metrics.avg_sl_distance_pct:.2f}% (должен быть 1.0%)")
-            print(f"   ⚠️  На реальных данных будет такой же SL!")
-        
         if metrics.avg_sl_distance_pct > 2.0:
             print(f"🚨 ОПАСНО: Средний SL {metrics.avg_sl_distance_pct:.2f}% СЛИШКОМ ВЕЛИК!")
             print(f"   Риск на сделку ВЫШЕ чем планировалось!")
@@ -1619,10 +1629,6 @@ def run_exact_backtest(
         
         # РЕКОМЕНДАЦИИ
         print(f"\n📋 РЕКОМЕНДАЦИИ ДЛЯ УЛУЧШЕНИЯ СТРАТЕГИИ:")
-        
-        if metrics.signals_with_correct_sl_pct < 90:
-            print(f"1. ❗ ИСПРАВИТЬ bot/ml/strategy_ml.py чтобы ВСЕГДА давать SL=1%")
-            print(f"   Текущий код должен гарантировать: sl_pct = max_loss_pct_margin / leverage")
         
         tradable_count = metrics.long_signals + metrics.short_signals
         if tradable_count > 0 and metrics.signals_with_tp_sl_pct < 90:
@@ -1640,13 +1646,11 @@ def run_exact_backtest(
         print(f"\n🎯 ФИНАЛЬНЫЙ ВЕРДИКТ:")
         if (metrics.win_rate > 50 and 
             metrics.profit_factor > 2.0 and 
-            metrics.signals_with_correct_sl_pct >= 90 and
             (metrics.long_signals + metrics.short_signals == 0 or metrics.signals_with_tp_sl_pct >= 90) and
             metrics.total_trades > 0):
             print(f"✅ СТРАТЕГИЯ ГОТОВА К ПРОДАКШЕНУ!")
             print(f"   Win Rate: {metrics.win_rate:.1f}%")
             print(f"   Profit Factor: {metrics.profit_factor:.2f}")
-            print(f"   Правильный SL: {metrics.signals_with_correct_sl_pct:.1f}% сигналов")
             print(f"   Сигналы с TP/SL: {metrics.signals_with_tp_sl_pct:.1f}%")
             print(f"   Всего сделок: {metrics.total_trades}")
             print(f"   📊 Результаты бэктеста = ожидаемые результаты на реальных данных")
@@ -1781,8 +1785,7 @@ def main():
         
         # Финальный вердикт
         tradable_count = metrics.long_signals + metrics.short_signals
-        if (metrics.signals_with_correct_sl_pct >= 90 and 
-            (tradable_count == 0 or metrics.signals_with_tp_sl_pct >= 90) and
+        if ((tradable_count == 0 or metrics.signals_with_tp_sl_pct >= 90) and
             metrics.total_trades > 0):
             print(f"\n🎯 СТРАТЕГИЯ ПРОШЛА ПРОВЕРКУ")
             print(f"   Можно тестировать на сервере")

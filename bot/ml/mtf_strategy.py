@@ -43,6 +43,13 @@ class MultiTimeframeMLStrategy:
         boost_tp_on_4h_align: bool = False,  # Расширить TP при согласии всех трех
         size_boost_factor: float = 1.5,  # Множитель размера позиции (1.5x = +50%)
         tp_boost_factor: float = 1.3,  # Множитель TP (1.3x = +30%)
+        # Динамические веса ансамбля по режиму (тренд/флэт по ADX)
+        use_dynamic_ensemble_weights: bool = False,
+        adx_trend_threshold: float = 25.0,
+        adx_flat_threshold: float = 20.0,
+        trend_weights: Optional[Dict[str, float]] = None,
+        flat_weights: Optional[Dict[str, float]] = None,
+        use_fixed_sl_from_risk: bool = False,
     ):
         """
         Args:
@@ -71,19 +78,36 @@ class MultiTimeframeMLStrategy:
         self.boost_tp_on_4h_align = boost_tp_on_4h_align
         self.size_boost_factor = size_boost_factor
         self.tp_boost_factor = tp_boost_factor
-        
+        self.use_dynamic_ensemble_weights = use_dynamic_ensemble_weights
+        self.adx_trend_threshold = adx_trend_threshold
+        self.adx_flat_threshold = adx_flat_threshold
+        self.trend_weights = trend_weights or {}
+self.flat_weights = flat_weights or {}
+        self.use_fixed_sl_from_risk = use_fixed_sl_from_risk
+
         # Загружаем обе модели
         if not self.model_1h_path.exists():
             raise FileNotFoundError(f"1h модель не найдена: {model_1h_path}")
         if not self.model_15m_path.exists():
             raise FileNotFoundError(f"15m модель не найдена: {model_15m_path}")
         
+        kw_ensemble = {}
+        if self.use_dynamic_ensemble_weights and (self.trend_weights or self.flat_weights):
+            kw_ensemble = dict(
+                use_dynamic_ensemble_weights=True,
+                adx_trend_threshold=self.adx_trend_threshold,
+                adx_flat_threshold=self.adx_flat_threshold,
+                trend_weights=self.trend_weights,
+                flat_weights=self.flat_weights,
+            )
+        kw_ensemble["use_fixed_sl_from_risk"] = self.use_fixed_sl_from_risk
         logger.info(f"[MTF Strategy] Загрузка 1h модели: {model_1h_path}")
         self.strategy_1h = MLStrategy(
             model_path=str(model_1h_path),
             confidence_threshold=confidence_threshold_1h,
             min_signal_strength=min_signal_strength_1h,
             stability_filter=True,
+            **kw_ensemble,
         )
         
         logger.info(f"[MTF Strategy] Загрузка 15m модели: {model_15m_path}")
@@ -92,6 +116,7 @@ class MultiTimeframeMLStrategy:
             confidence_threshold=confidence_threshold_15m,
             min_signal_strength=min_signal_strength_15m,
             stability_filter=True,
+            **kw_ensemble,
         )
         
         logger.info(f"[MTF Strategy] Инициализация завершена")
@@ -149,45 +174,46 @@ class MultiTimeframeMLStrategy:
                 else:
                     return 0, 0.0
             
-            if df_4h.empty or len(df_4h) < 200:  # Нужно минимум 200 свечей для EMA 200
+            # Минимум 50 свечей 4h (при 30 днях 15m получается ~180 4h баров — раньше требовали 200 и 4h не работал)
+            if df_4h.empty or len(df_4h) < 50:
                 return 0, 0.0
             
-            # Вычисляем EMA 50 и EMA 200 на 4h
+            # При достаточном количестве баров — EMA 50/200; иначе EMA 20/50 (для коротких окон, напр. 30 дней)
+            use_short_ema = len(df_4h) < 200
+            fast_period = 20 if use_short_ema else 50
+            slow_period = 50 if use_short_ema else 200
+            
             try:
                 import pandas_ta as ta
-                ema_50 = ta.ema(df_4h["close"], length=50)
-                ema_200 = ta.ema(df_4h["close"], length=200)
+                ema_fast = ta.ema(df_4h["close"], length=fast_period)
+                ema_slow = ta.ema(df_4h["close"], length=slow_period)
             except Exception:
-                # Fallback на pandas
-                ema_50 = df_4h["close"].ewm(span=50, adjust=False).mean()
-                ema_200 = df_4h["close"].ewm(span=200, adjust=False).mean()
+                ema_fast = df_4h["close"].ewm(span=fast_period, adjust=False).mean()
+                ema_slow = df_4h["close"].ewm(span=slow_period, adjust=False).mean()
             
-            # Берем последние значения
-            if len(ema_50) == 0 or len(ema_200) == 0:
+            if len(ema_fast) == 0 or len(ema_slow) == 0:
                 return 0, 0.0
             
-            ema_50_val = ema_50.iloc[-1]
-            ema_200_val = ema_200.iloc[-1]
+            ema_fast_val = ema_fast.iloc[-1]
+            ema_slow_val = ema_slow.iloc[-1]
             
-            if pd.isna(ema_50_val) or pd.isna(ema_200_val):
+            if pd.isna(ema_fast_val) or pd.isna(ema_slow_val):
                 return 0, 0.0
             
             current_price = df_4h["close"].iloc[-1]
             
             # Определяем направление тренда
-            if ema_50_val > ema_200_val:
+            if ema_fast_val > ema_slow_val:
                 # Быстрая EMA выше медленной = восходящий тренд
-                # Уверенность зависит от расстояния между EMA
-                distance_pct = ((ema_50_val - ema_200_val) / ema_200_val) * 100
-                confidence = min(1.0, max(0.3, distance_pct / 5.0))  # Нормализуем к 0.3-1.0
+                distance_pct = ((ema_fast_val - ema_slow_val) / ema_slow_val) * 100
+                confidence = min(1.0, max(0.3, distance_pct / 5.0))
                 return 1, confidence  # LONG
-            elif ema_50_val < ema_200_val:
+            elif ema_fast_val < ema_slow_val:
                 # Быстрая EMA ниже медленной = нисходящий тренд
-                distance_pct = ((ema_200_val - ema_50_val) / ema_200_val) * 100
+                distance_pct = ((ema_slow_val - ema_fast_val) / ema_slow_val) * 100
                 confidence = min(1.0, max(0.3, distance_pct / 5.0))
                 return -1, confidence  # SHORT
             else:
-                # EMA пересекаются = нейтрально
                 return 0, 0.0
                 
         except Exception as e:

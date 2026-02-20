@@ -8,6 +8,7 @@
     python auto_strategy_optimizer.py --full  # Полный цикл
 """
 import argparse
+import os
 import subprocess
 import sys
 import json
@@ -151,14 +152,17 @@ class StrategyOptimizer:
     def run_command(self, cmd: List[str], timeout: int = 7200) -> int:
         """Запускает команду с выводом логов в реальном времени"""
         try:
+            # На Windows дочерний процесс иначе использует cp1252 для stdout и падает на эмодзи (❌)
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=1
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
             )
             
             # Читаем вывод в реальном времени

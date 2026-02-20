@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import os
 import json
 import logging
@@ -83,6 +83,23 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     pullback_ema_period: int = 9  # Период EMA для отката (9 или 20)
     pullback_pct: float = 0.003  # 0.3% от high/low сигнальной свечи
     pullback_max_bars: int = 3  # Максимальная задержка входа (1-3 свечи)
+    
+    # Динамические веса ансамбля по режиму рынка (тренд vs флэт по ADX)
+    use_dynamic_ensemble_weights: bool = False  # Включить переключение весов по ADX (по умолчанию выключено)
+    adx_trend_threshold: float = 25.0  # ADX > 25 = тренд
+    adx_flat_threshold: float = 20.0  # ADX < 20 = флэт
+    trend_weights: Optional[Dict[str, float]] = None  # Веса для тренда: rf_weight, xgb_weight, lgb_weight[, lstm_weight]
+    flat_weights: Optional[Dict[str, float]] = None  # Веса для флэта (в ml_settings.json или при тесте)
+    
+    # Адаптивный порог уверенности по ATR (выше волатильность — ниже порог)
+    use_adaptive_confidence_by_atr: bool = False
+    adaptive_confidence_k: float = 0.3  # Коэффициент в формуле (1 + k * (atr_median - atr_current) / atr_median)
+    adaptive_confidence_min: float = 0.8  # Мин. множитель порога
+    adaptive_confidence_max: float = 1.2  # Макс. множитель порога
+    adaptive_confidence_atr_lookback: int = 500  # Баров для медианы ATR
+
+    # Источник SL в сигнале: False = от модели/ATR (максимум прибыли), True = фиксированный из риска (stop_loss_pct / max_loss/leverage)
+    use_fixed_sl_from_risk: bool = False
     
     def __post_init__(self):
         """Валидация значений"""
@@ -491,6 +508,19 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.atr_min_pct = float(ml_dict["atr_min_pct"])
                 if "atr_max_pct" in ml_dict:
                     settings.ml_strategy.atr_max_pct = float(ml_dict["atr_max_pct"])
+                # Динамические веса ансамбля (тренд/флэт по ADX)
+                if "use_dynamic_ensemble_weights" in ml_dict:
+                    settings.ml_strategy.use_dynamic_ensemble_weights = bool(ml_dict["use_dynamic_ensemble_weights"])
+                if "adx_trend_threshold" in ml_dict:
+                    settings.ml_strategy.adx_trend_threshold = float(ml_dict["adx_trend_threshold"])
+                if "adx_flat_threshold" in ml_dict:
+                    settings.ml_strategy.adx_flat_threshold = float(ml_dict["adx_flat_threshold"])
+                if "trend_weights" in ml_dict and isinstance(ml_dict["trend_weights"], dict):
+                    settings.ml_strategy.trend_weights = {k: float(v) for k, v in ml_dict["trend_weights"].items()}
+                if "flat_weights" in ml_dict and isinstance(ml_dict["flat_weights"], dict):
+                    settings.ml_strategy.flat_weights = {k: float(v) for k, v in ml_dict["flat_weights"].items()}
+                if "use_fixed_sl_from_risk" in ml_dict:
+                    settings.ml_strategy.use_fixed_sl_from_risk = bool(ml_dict["use_fixed_sl_from_risk"])
         except Exception as e:
             logger.warning(f"Failed to load ml_settings.json: {e}")
     
@@ -682,6 +712,113 @@ def load_settings() -> AppSettings:
     return settings
 
 
+def log_server_config(settings: "AppSettings", log: Optional[logging.Logger] = None) -> None:
+    """
+    Логирует проверку необходимых настроек при старте бота.
+    По логу видно, какие файлы подгрузились, какие параметры активны, что не хватает.
+    Вызывать после load_settings() при старте бота.
+    """
+    logger = log or logging.getLogger(__name__)
+    project_root = Path(__file__).parent.parent
+    env_path = project_root / ".env"
+    ml_settings_file = project_root / "ml_settings.json"
+    risk_file = _get_risk_settings_file()
+    symbol_ml_file = _get_ml_settings_file()
+    models_dir = project_root / "ml_models"
+    n_models = len(list(models_dir.glob("*.pkl"))) if models_dir.exists() else 0
+
+    ms = settings.ml_strategy
+    risk = settings.risk
+
+    def _p(name: str, value: Any, source: str = "") -> str:
+        s = f"    {name}: {value}"
+        if source:
+            s += f"  ({source})"
+        return s
+
+    lines = [
+        "",
+        "[DEPLOY] ========== Проверка настроек при старте ==========",
+        "[DEPLOY] --- Файлы (есть ли на диске и учтены ли при загрузке) ---",
+        f"  .env: {'найден' if env_path.exists() else 'ОТСУТСТВУЕТ'}",
+        f"  ml_settings.json: {'найден, загружен' if ml_settings_file.exists() else 'нет — используются дефолты из кода'}",
+        f"  risk_settings.json: {'найден, загружен' if risk_file.exists() else 'нет — используются дефолты из кода'}",
+        f"  symbol_ml_settings.json: {'найден' if symbol_ml_file.exists() else 'нет'}",
+        f"  ml_models/*.pkl: {n_models} файлов",
+        "[DEPLOY] --- Переменные окружения (без значений) ---",
+        f"  BYBIT_API_KEY: {'задан' if (os.getenv('BYBIT_API_KEY') or '').strip() else 'НЕ ЗАДАН'}",
+        f"  BYBIT_API_SECRET: {'задан' if (os.getenv('BYBIT_API_SECRET') or '').strip() else 'НЕ ЗАДАН'}",
+        f"  TELEGRAM_TOKEN: {'задан' if (settings.telegram_token or '').strip() else 'НЕ ЗАДАН'}",
+        "[DEPLOY] --- Торговые пары ---",
+        f"  active_symbols: {settings.active_symbols}",
+        f"  primary_symbol: {settings.primary_symbol}",
+        "[DEPLOY] --- ML стратегия (текущие значения) ---",
+        _p("confidence_threshold", ms.confidence_threshold),
+        _p("min_confidence_for_trade", ms.min_confidence_for_trade),
+        _p("target_profit_pct_margin", ms.target_profit_pct_margin),
+        _p("max_loss_pct_margin", ms.max_loss_pct_margin),
+        _p("stability_filter", ms.stability_filter),
+        _p("use_mtf_strategy", ms.use_mtf_strategy),
+        _p("pullback_enabled", ms.pullback_enabled),
+        _p("use_dynamic_ensemble_weights", getattr(ms, "use_dynamic_ensemble_weights", False)),
+        _p("use_adaptive_confidence_by_atr", getattr(ms, "use_adaptive_confidence_by_atr", False)),
+        _p("use_fixed_sl_from_risk", getattr(ms, "use_fixed_sl_from_risk", False)),
+        _p("adx_trend_threshold", getattr(ms, "adx_trend_threshold", 25)),
+        _p("adx_flat_threshold", getattr(ms, "adx_flat_threshold", 20)),
+    ]
+    if getattr(ms, "use_dynamic_ensemble_weights", False):
+        tw = getattr(ms, "trend_weights", None)
+        fw = getattr(ms, "flat_weights", None)
+        lines.append(_p("trend_weights", "заданы" if tw else "НЕ заданы"))
+        lines.append(_p("flat_weights", "заданы" if fw else "НЕ заданы"))
+    lines.extend([
+        "[DEPLOY] --- Риск (текущие значения) ---",
+        _p("margin_pct_balance", risk.margin_pct_balance),
+        _p("base_order_usd", risk.base_order_usd),
+        _p("stop_loss_pct", risk.stop_loss_pct),
+        _p("take_profit_pct", risk.take_profit_pct),
+        _p("leverage (app)", settings.leverage),
+    ])
+    # Модели по символам (из symbol_ml_settings после load)
+    lines.append("[DEPLOY] --- Модели по символам (из настроек или автопоиск) ---")
+    for sym in settings.active_symbols:
+        ss = settings.symbol_ml_settings.get(sym)
+        path = ss.model_path if ss else None
+        if path:
+            lines.append(f"  {sym}: {path}")
+        else:
+            lines.append(f"  {sym}: не задан (будет автопоиск в ml_models/)")
+
+    for line in lines:
+        logger.info(line)
+
+    # Итог: что не так
+    warnings = []
+    if not env_path.exists():
+        warnings.append("Файл .env отсутствует — ключи только из окружения.")
+    if not (os.getenv("BYBIT_API_KEY") or "").strip():
+        warnings.append("BYBIT_API_KEY не задан.")
+    if not (os.getenv("BYBIT_API_SECRET") or "").strip():
+        warnings.append("BYBIT_API_SECRET не задан.")
+    if not (settings.telegram_token or "").strip():
+        warnings.append("TELEGRAM_TOKEN не задан — бот не запустится.")
+    if n_models == 0:
+        warnings.append("В ml_models/ нет .pkl — позиции не открываются до появления моделей.")
+    if not ml_settings_file.exists():
+        warnings.append("ml_settings.json отсутствует — ML-настройки из дефолтов (в т.ч. use_dynamic_ensemble_weights=false).")
+    if not risk_file.exists():
+        warnings.append("risk_settings.json отсутствует — риск из дефолтов.")
+
+    if warnings:
+        logger.warning("[DEPLOY] --- Проверка: внимание ---")
+        for w in warnings:
+            logger.warning(f"[DEPLOY]   • {w}")
+    else:
+        logger.info("[DEPLOY] --- Критичные пункты (env, токен, модели) в порядке ---")
+    logger.info("[DEPLOY] ========== Конец проверки настроек ==========")
+    logger.info("")
+
+
 def _auto_find_ml_model(settings: AppSettings) -> None:
     """Автоматически ищет ML модель для активных символов"""
     project_root = Path(__file__).parent.parent
@@ -690,29 +827,38 @@ def _auto_find_ml_model(settings: AppSettings) -> None:
     if not models_dir.exists():
         return
     
+    # Для BTCUSDT по умолчанию предпочитаем модель с фичей orderbook (_ob), проверенную бэктестом
+    PREFER_OB_MODEL_FOR_SYMBOLS = ["BTCUSDT"]
+
     # Ищем модели для каждого активного символа
     for symbol in settings.active_symbols:
         found_model = None
-        
+        candidates = []
+
+        def _pick_best(cands):
+            if not cands:
+                return None
+            if symbol in PREFER_OB_MODEL_FOR_SYMBOLS:
+                ob_models = [p for p in cands if "_ob" in Path(p).stem]
+                if ob_models:
+                    return ob_models[0]
+            return cands[0]
+
         # Сначала пробуем найти по предпочитаемому типу модели
         if settings.ml_strategy.model_type:
             pattern = f"{settings.ml_strategy.model_type}_{symbol}_*.pkl"
-            for model_file in sorted(models_dir.glob(pattern), reverse=True):
-                if model_file.is_file():
-                    found_model = str(model_file)
-                    break
-        
+            candidates = sorted([str(p) for p in models_dir.glob(pattern) if p.is_file()], reverse=True)
+            found_model = _pick_best(candidates)
+
         # Если не нашли, пробуем другие типы
         if not found_model:
             for model_type in ["quad_ensemble", "triple_ensemble", "ensemble", "rf", "gb"]:
                 pattern = f"{model_type}_{symbol}_*.pkl"
-                for model_file in sorted(models_dir.glob(pattern), reverse=True):
-                    if model_file.is_file():
-                        found_model = str(model_file)
-                        break
+                candidates = sorted([str(p) for p in models_dir.glob(pattern) if p.is_file()], reverse=True)
+                found_model = _pick_best(candidates)
                 if found_model:
                     break
-        
+
         # Сохраняем найденную модель в настройки символа
         if found_model:
             symbol_settings = settings.get_ml_settings_for_symbol(symbol)

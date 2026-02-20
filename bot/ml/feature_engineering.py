@@ -2,7 +2,7 @@
 Модуль для создания фичей (признаков) из исторических данных для ML-моделей.
 ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок в pandas_ta.
 """
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Any
 import os
 import numpy as np
 import pandas as pd
@@ -12,6 +12,48 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import pandas_ta as ta
+
+
+def compute_orderbook_imbalance(ob_response: Dict[str, Any], depth: int = 10) -> float:
+    """
+    Вычисляет Order Book Imbalance из ответа Bybit REST API (/v5/market/orderbook).
+    
+    Formula: (bid_volume - ask_volume) / (bid_volume + ask_volume)
+    Результат в диапазоне [-1, 1]: положительный — перевес покупателей, отрицательный — продавцов.
+    
+    Args:
+        ob_response: Сырой ответ от Bybit (get_orderbook). Ожидается result с ключами "b" и "a".
+        depth: Количество уровней стакана для суммирования объёма (по умолчанию 10).
+    
+    Returns:
+        Imbalance в [-1, 1] или 0.0 при ошибке/пустом стакане.
+    """
+    if not ob_response or not isinstance(ob_response, dict):
+        return 0.0
+    result = ob_response.get("result") if ob_response.get("retCode") == 0 else ob_response.get("result")
+    if not result or not isinstance(result, dict):
+        return 0.0
+    
+    def sum_volume(levels: List, n: int) -> float:
+        if not levels or not isinstance(levels, list):
+            return 0.0
+        total = 0.0
+        for i, level in enumerate(levels[:n]):
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                try:
+                    total += float(level[1])  # size
+                except (TypeError, ValueError):
+                    pass
+        return total
+    
+    bids = result.get("b", [])
+    asks = result.get("a", [])
+    bid_vol = sum_volume(bids, depth)
+    ask_vol = sum_volume(asks, depth)
+    total = bid_vol + ask_vol
+    if total <= 0:
+        return 0.0
+    return (bid_vol - ask_vol) / total
 
 
 class FeatureEngineer:
@@ -452,6 +494,13 @@ class FeatureEngineer:
             "support_strength_ratio", "resistance_strength_ratio"
         ])
         
+        # === ORDER BOOK IMBALANCE (стакан заявок) ===
+        # В исторических данных нет стакана — заполняем 0 (нейтрально).
+        # В live можно подставить реальное значение через set_orderbook_imbalance_last_row().
+        df["ob_imbalance"] = 0.0
+        df["ob_imbalance_5"] = 0.0
+        df["ob_imbalance_20"] = 0.0
+        
         # === 11. ОБРАБОТКА NaN ===
         
         # Сначала forward fill, потом backward fill
@@ -641,6 +690,30 @@ class FeatureEngineer:
             print(f"  {name}: {cnt} ({pct:.1f}%)")
         
         return df
+    
+    def set_orderbook_imbalance_last_row(
+        self, df: pd.DataFrame, ob_response: Dict[str, Any], depth: int = 10
+    ) -> None:
+        """
+        Заполняет Order Book Imbalance для последней строки DataFrame (для live).
+        Модифицирует df in-place.
+        
+        Args:
+            df: DataFrame с уже созданными фичами (должны быть колонки ob_imbalance, ob_imbalance_5, ob_imbalance_20).
+            ob_response: Ответ Bybit get_orderbook(symbol, limit=25 или больше).
+            depth: Глубина стакана для основного ob_imbalance (10); для ob_imbalance_5 и ob_imbalance_20 используются 5 и 20.
+        """
+        if df is None or df.empty:
+            return
+        imb = compute_orderbook_imbalance(ob_response, depth=depth)
+        imb_5 = compute_orderbook_imbalance(ob_response, depth=5)
+        imb_20 = compute_orderbook_imbalance(ob_response, depth=20)
+        if "ob_imbalance" in df.columns:
+            df.iloc[-1, df.columns.get_loc("ob_imbalance")] = imb
+        if "ob_imbalance_5" in df.columns:
+            df.iloc[-1, df.columns.get_loc("ob_imbalance_5")] = imb_5
+        if "ob_imbalance_20" in df.columns:
+            df.iloc[-1, df.columns.get_loc("ob_imbalance_20")] = imb_20
     
     def get_feature_names(self) -> List[str]:
         """Возвращает список названий всех созданных фичей."""

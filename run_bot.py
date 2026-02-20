@@ -4,7 +4,7 @@ import signal
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from bot.config import load_settings
+from bot.config import load_settings, log_server_config
 from bot.state import BotState
 from bot.exchange.bybit_client import BybitClient
 from bot.model_manager import ModelManager
@@ -128,6 +128,12 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to load settings: {e}", exc_info=True)
             raise
+
+        # Сводка конфигурации для проверки деплоя (файлы настроек, включённые улучшения)
+        try:
+            log_server_config(settings, log=logger)
+        except Exception as e:
+            logger.warning(f"Could not log server config: {e}")
         
         if not settings.telegram_token:
             logger.error("TELEGRAM_TOKEN not found in .env file!")

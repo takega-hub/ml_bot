@@ -2540,6 +2540,18 @@ class TelegramBot:
             status = "включен" if ml_settings.atr_filter_enabled else "выключен"
             await query.answer(f"✅ Фильтр волатильности (ATR 1h) {status}", show_alert=True)
             await self.show_ml_settings(query)
+        elif setting_name == "use_fixed_sl_from_risk":
+            use_fixed = getattr(ml_settings, "use_fixed_sl_from_risk", False)
+            ml_settings.use_fixed_sl_from_risk = not use_fixed
+            self.save_ml_settings()
+            status = "фиксированный из риска" if ml_settings.use_fixed_sl_from_risk else "от модели/ATR"
+            await query.answer(f"✅ SL в сигнале: {status}", show_alert=True)
+            if self.trading_loop:
+                for symbol in self.settings.active_symbols:
+                    if symbol in self.trading_loop.strategies:
+                        del self.trading_loop.strategies[symbol]
+                        logger.info(f"[{symbol}] Strategy reset due to use_fixed_sl_from_risk change")
+            await self.show_ml_settings(query)
         else:
             logger.warning(f"Unknown ML setting: {setting_name}")
             await query.answer("⚠️ Неизвестная настройка", show_alert=True)
@@ -2619,6 +2631,12 @@ class TelegramBot:
                 "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
                 "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
                 "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
+                "use_dynamic_ensemble_weights": getattr(self.settings.ml_strategy, "use_dynamic_ensemble_weights", False),
+                "adx_trend_threshold": getattr(self.settings.ml_strategy, "adx_trend_threshold", 25.0),
+                "adx_flat_threshold": getattr(self.settings.ml_strategy, "adx_flat_threshold", 20.0),
+                "trend_weights": getattr(self.settings.ml_strategy, "trend_weights", None),
+                "flat_weights": getattr(self.settings.ml_strategy, "flat_weights", None),
+                "use_fixed_sl_from_risk": getattr(self.settings.ml_strategy, "use_fixed_sl_from_risk", False),
             }
             
             # Сохраняем все настройки
@@ -2665,6 +2683,12 @@ class TelegramBot:
                 "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
                 "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
                 "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
+                "use_dynamic_ensemble_weights": getattr(self.settings.ml_strategy, "use_dynamic_ensemble_weights", False),
+                "adx_trend_threshold": getattr(self.settings.ml_strategy, "adx_trend_threshold", 25.0),
+                "adx_flat_threshold": getattr(self.settings.ml_strategy, "adx_flat_threshold", 20.0),
+                "trend_weights": getattr(self.settings.ml_strategy, "trend_weights", None),
+                "flat_weights": getattr(self.settings.ml_strategy, "flat_weights", None),
+                "use_fixed_sl_from_risk": getattr(self.settings.ml_strategy, "use_fixed_sl_from_risk", False),
             }
             
             # Проверяем, нужно ли обновить файл
@@ -2799,6 +2823,7 @@ class TelegramBot:
             }
             day_name = day_names.get(ml_settings.auto_optimize_day, ml_settings.auto_optimize_day)
             text += f"   • Расписание: {day_name}, {ml_settings.auto_optimize_hour:02d}:00\n\n"
+        text += f"📉 SL в сигнале: {'фиксированный из риска' if getattr(ml_settings, 'use_fixed_sl_from_risk', False) else 'от модели/ATR'}\n"
         text += f"🎯 Минимальная уверенность модели: {ml_settings.confidence_threshold*100:.0f}%\n"
         text += f"💰 Минимальная уверенность для сделки: {ml_settings.min_confidence_for_trade*100:.0f}%\n"
         text += f"💪 Минимальная сила сигнала:\n"
@@ -2825,6 +2850,10 @@ class TelegramBot:
             [InlineKeyboardButton(
                 f"🤖 Автообновление: {'✅ Вкл' if ml_settings.auto_optimize_strategies else '❌ Выкл'}", 
                 callback_data="toggle_ml_auto_optimize_strategies"
+            )],
+            [InlineKeyboardButton(
+                f"📉 SL: {'фикс. из риска' if getattr(ml_settings, 'use_fixed_sl_from_risk', False) else 'от модели/ATR'}", 
+                callback_data="toggle_ml_use_fixed_sl_from_risk"
             )],
             [InlineKeyboardButton(f"🎯 Уверенность модели: {ml_settings.confidence_threshold*100:.0f}%", callback_data="edit_ml_confidence_threshold")],
             [InlineKeyboardButton(f"💰 Уверенность для сделки: {ml_settings.min_confidence_for_trade*100:.0f}%", callback_data="edit_ml_min_confidence_for_trade")],
