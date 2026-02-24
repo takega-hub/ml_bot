@@ -197,13 +197,16 @@ def _get_dashboard_data(state, bybit_client, settings) -> Dict[str, Any]:
 
 def create_app(state, bybit_client, settings, trading_loop=None, model_manager=None):
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
+    logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
         from fastapi import FastAPI, Depends, HTTPException, Header, Body
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
-    except ImportError:
-        raise ImportError("Установите fastapi и uvicorn: pip install fastapi uvicorn")
+    except ImportError as e:
+        logger.error(f"[Mobile API] create_app: ошибка импорта FastAPI: {e}")
+        raise ImportError("Установите fastapi и uvicorn: pip install fastapi uvicorn") from e
 
+    logger.info("[Mobile API] create_app: создание app и middleware...")
     app = FastAPI(title="ML Trading Bot API", version="2.0.0")
     app.add_middleware(
         CORSMiddleware,
@@ -604,16 +607,20 @@ async def run_api_server(state, bybit_client, settings, trading_loop=None, model
     try:
         import uvicorn
         from uvicorn import Config, Server
+        logger.info("[Mobile API] uvicorn импортирован")
     except ImportError as e:
         logger.warning(f"[Mobile API] uvicorn не установлен: {e}. Установите: pip install uvicorn")
         return
 
     try:
+        logger.info("[Mobile API] Создание FastAPI приложения...")
         app = create_app(state, bybit_client, settings, trading_loop, model_manager)
+        logger.info("[Mobile API] Config и Server...")
         config = Config(app=app, host=host, port=port, log_level="info")
         server = Server(config)
-        logger.info(f"[Mobile API] Uvicorn слушает http://{host}:{port} (снаружи: http://5.101.179.47:{port}/api/health)")
+        logger.info(f"[Mobile API] Запуск Uvicorn на http://{host}:{port} (снаружи: http://5.101.179.47:{port}/api/health)")
         await server.serve()
+        logger.info("[Mobile API] server.serve() завершён")
     except asyncio.CancelledError:
         logger.info("[Mobile API] Сервер остановлен (CancelledError)")
         raise
