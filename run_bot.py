@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from bot.model_manager import ModelManager
 from bot.telegram_bot import TelegramBot
 from bot.trading_loop import TradingLoop
 from bot.health_monitor import HealthMonitor
+from bot.api_server import run_api_server
 try:
     from telegram.error import Conflict
 except ImportError:
@@ -184,14 +186,22 @@ async def main():
             logger.error(f"Failed to initialize HealthMonitor: {e}", exc_info=True)
             raise
     
-        # 8. Запуск компонентов
+        # 8. Запуск компонентов (включая REST API для мобильного приложения)
+        tasks = [
+            tg_bot.start(),
+            trading_loop.run(),
+            health_monitor.run(),
+        ]
+        mobile_api_key = (os.getenv("MOBILE_API_KEY") or os.getenv("ALLOWED_USER_ID") or "").strip()
+        if mobile_api_key:
+            try:
+                api_port = int(os.getenv("MOBILE_API_PORT", "8765"))
+                tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, port=api_port))
+                logger.info(f"Mobile API will listen on port {api_port}")
+            except Exception as e:
+                logger.warning(f"Mobile API disabled: {e}")
         try:
-            # Запускаем все компоненты параллельно
-            await asyncio.gather(
-                tg_bot.start(),
-                trading_loop.run(),
-                health_monitor.run()
-            )
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Bot execution cancelled.")
         except Exception as e:

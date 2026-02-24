@@ -28,6 +28,7 @@
     --days 30                           # Сколько дней тестировать (по умолчанию 30)
     --symbols auto                      # Автоматически найти все символы из моделей (по умолчанию)
     --symbols BTCUSDT,ETHUSDT,SOLUSDT   # Или указать конкретные символы
+    --symbol BTCUSDT                    # Сравнение только по одному символу (имеет приоритет над --symbols)
     --models-dir ml_models              # Путь к директории с моделями
     --output all                        # Сохранить результаты (csv, plots, all)
     --workers 4                         # Количество параллельных процессов
@@ -1495,6 +1496,9 @@ Examples:
   # Расширенное тестирование с детальным анализом
   python compare_ml_models.py --days 60 --symbols BTCUSDT,ETHUSDT,SOLUSDT,ADAUSDT --detailed-analysis
   
+  # Сравнение моделей только по одному символу
+  python compare_ml_models.py --symbol BTCUSDT --detailed-analysis
+  
   # С проверкой переобучения и 8 процессами
   python compare_ml_models.py --check-overfitting --workers 8 --output all --detailed-analysis
   
@@ -1513,6 +1517,12 @@ Examples:
         type=str,
         default="auto",
         help="Comma-separated list of symbols or 'auto' to auto-detect from models (default: auto)",
+    )
+    parser.add_argument(
+        "--symbol",
+        type=str,
+        default=None,
+        help="Compare models only for this symbol (overrides --symbols). Example: --symbol BTCUSDT",
     )
     parser.add_argument(
         "--models-dir",
@@ -1606,6 +1616,14 @@ Examples:
     if not symbols:
         safe_print(f"[ERROR] Не указаны символы для тестирования")
         return
+    
+    # Ограничение одним символом (--symbol имеет приоритет над --symbols)
+    if args.symbol:
+        symbol_one = args.symbol.strip().upper()
+        if symbol_one not in symbols:
+            safe_print(f"[WARN] Символ {symbol_one} не в списке ({', '.join(symbols)}). Используем только {symbol_one}.")
+        symbols = [symbol_one]
+        safe_print(f"[INFO] Сравнение моделей только по символу: {symbol_one}")
     
     # Запускаем сравнение моделей
     try:

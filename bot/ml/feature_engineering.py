@@ -509,7 +509,7 @@ class FeatureEngineer:
         # Заполняем оставшиеся NaN нулями
         df = df.fillna(0)
         # Восстанавливаем типы после fillna
-        df = df.infer_objects(copy=False)
+        df = df.infer_objects()
         
         # Удаляем строки где основные цены NaN
         price_cols = ["open", "high", "low", "close"]
@@ -611,7 +611,7 @@ class FeatureEngineer:
         
         # Заполняем NaN
         df = df.ffill().bfill().fillna(0)
-        df = df.infer_objects(copy=False)
+        df = df.infer_objects()
         
         return df
     

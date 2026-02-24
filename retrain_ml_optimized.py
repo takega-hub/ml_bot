@@ -124,6 +124,12 @@ def main():
   # Обучение С MTF (15m + 1h + 4h фичи)
   python retrain_ml_optimized.py --mtf
   
+  # Обучение только часовых (1h) моделей (для MTF-фильтра)
+  python retrain_ml_optimized.py --interval 1h
+  
+  # Обучение только 1h моделей для одного символа
+  python retrain_ml_optimized.py --interval 1h --symbol XAUTUSDT
+  
   # Обучение БЕЗ MTF для конкретного символа
   python retrain_ml_optimized.py --symbol SOLUSDT --no-mtf
         """
@@ -176,8 +182,8 @@ def main():
     #["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
     
     # Определяем базовый интервал из аргумента
-    interval_str = args.interval.lower().replace("h", "m")  # "1h" -> "60m"
-    if interval_str == "60m":
+    interval_arg = (args.interval or "15m").strip().lower()
+    if interval_arg in ("1h", "60m"):
         base_interval = "60"  # 1 час
         interval_display = "1h"
     else:
