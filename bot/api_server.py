@@ -3,9 +3,10 @@ REST API для мобильного приложения (iPhone).
 Полный функционал как в Telegram-админке: статус, пары, риск, ML, модели, история, экстренные действия.
 Аутентификация: заголовок X-API-Key (MOBILE_API_KEY в .env).
 """
+import asyncio
 import json
-import os
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -225,6 +226,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    @app.on_event("startup")
+    async def _log_startup():
+        logger.info("[Mobile API] FastAPI готов, запросы принимаются. Проверка: GET /api/health")
 
     @app.get("/api/status", dependencies=[Depends(verify_api_key)])
     def get_status():
@@ -595,14 +600,23 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
 async def run_api_server(state, bybit_client, settings, trading_loop=None, model_manager=None, host: str = "0.0.0.0", port: int = 8765):
     """Запускает API сервер в текущем event loop (для asyncio.gather с ботом)."""
+    logger.info(f"[Mobile API] run_api_server вызван: host={host}, port={port}")
     try:
         import uvicorn
         from uvicorn import Config, Server
-    except ImportError:
-        logger.warning("uvicorn not installed. Mobile API disabled. Install: pip install uvicorn")
+    except ImportError as e:
+        logger.warning(f"[Mobile API] uvicorn не установлен: {e}. Установите: pip install uvicorn")
         return
 
-    app = create_app(state, bybit_client, settings, trading_loop, model_manager)
-    config = Config(app=app, host=host, port=port, log_level="warning")
-    server = Server(config)
-    await server.serve()
+    try:
+        app = create_app(state, bybit_client, settings, trading_loop, model_manager)
+        config = Config(app=app, host=host, port=port, log_level="info")
+        server = Server(config)
+        logger.info(f"[Mobile API] Uvicorn слушает http://{host}:{port} (снаружи: http://5.101.179.47:{port}/api/health)")
+        await server.serve()
+    except asyncio.CancelledError:
+        logger.info("[Mobile API] Сервер остановлен (CancelledError)")
+        raise
+    except Exception as e:
+        logger.error(f"[Mobile API] Ошибка при запуске/работе сервера: {e}", exc_info=True)
+        raise

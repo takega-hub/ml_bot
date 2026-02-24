@@ -196,10 +196,20 @@ async def main():
         if mobile_api_key:
             try:
                 api_port = int(os.getenv("MOBILE_API_PORT", "8765"))
-                tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, port=api_port))
-                logger.info(f"Mobile API will listen on port {api_port}")
+                api_host = "0.0.0.0"
+                tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, host=api_host, port=api_port))
+                logger.info(
+                    f"[Mobile API] Задача добавлена. Слушаем {api_host}:{api_port}. "
+                    f"Снаружи: http://5.101.179.47:{api_port}/api/health (без ключа). "
+                    f"Убедитесь, что порт {api_port} открыт в ufw/security group."
+                )
             except Exception as e:
-                logger.warning(f"Mobile API disabled: {e}")
+                logger.warning(f"[Mobile API] Не удалось добавить задачу: {e}", exc_info=True)
+        else:
+            logger.info(
+                "[Mobile API] Не запущен: в .env нет MOBILE_API_KEY и нет ALLOWED_USER_ID. "
+                "Добавьте MOBILE_API_KEY=ваш_ключ и перезапустите бота."
+            )
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
