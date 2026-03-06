@@ -768,10 +768,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     class TestAllBody(BaseModel):
         symbol: str
         days: int = 14
+        mode: str = "mtf"  # single or mtf
 
     @app.post("/api/models/test_all_combinations", dependencies=[Depends(verify_api_key)])
     def post_test_all_combinations(body: TestAllBody, background_tasks: BackgroundTasks):
-        """Запускает тестирование всех пар (1h + 15m) для MTF."""
+        """Запускает тестирование всех моделей и выбор лучшей."""
         symbol = body.symbol.upper()
         if not model_manager:
              raise HTTPException(status_code=501, detail="Model manager not available")
@@ -779,42 +780,124 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         # Run in background
         def _run_test_all():
             try:
-                # В FastAPI background tasks запускаются в thread pool, поэтому нельзя вызывать asyncio.create_task напрямую
-                # без event loop. Создаем новый event loop для асинхронных операций.
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
+                test_type = "Single Strategy" if body.mode == "single" else "MTF Strategy"
                 if tg_bot:
-                    loop.run_until_complete(tg_bot.send_notification(f"🧪 Started MTF combination test for {symbol}..."))
-                state.add_notification(f"Started MTF test for {symbol}", "info")
-                logger.info(f"Starting MTF combination test for {symbol}...")
+                    loop.run_until_complete(tg_bot.send_notification(f"🧪 Started {test_type} test for {symbol}..."))
+                state.add_notification(f"Started {test_type} test for {symbol}", "info")
+                logger.info(f"Starting {test_type} test for {symbol}...")
                 
-                from bot.ml.model_selector import select_best_models
-                # This function runs comprehensive tests and saves results to csv
-                select_best_models(symbol, use_best_from_comparison=False) 
-                logger.info(f"MTF combination test finished for {symbol}")
+                # 1. Запускаем compare_ml_models.py для бэктеста всех моделей
+                script_path = PROJECT_ROOT / "compare_ml_models.py"
+                cmd = [
+                    sys.executable, 
+                    str(script_path), 
+                    "--symbol", symbol, 
+                    "--days", str(body.days),
+                    "--output", "csv"
+                ]
+                
+                # Если Single mode, можно (опционально) фильтровать, но лучше протестировать всё
+                # и выбрать лучшее из результатов.
+                
+                process = subprocess.run(
+                    cmd, 
+                    cwd=str(PROJECT_ROOT), 
+                    capture_output=True, 
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace'
+                )
+                
+                if process.returncode != 0:
+                    logger.error(f"Compare models failed: {process.stderr}")
+                    raise Exception(f"Backtest script failed: {process.stderr[:200]}")
+                
+                # Обновляем результаты в model_manager из CSV
+                try:
+                    import pandas as pd
+                    comp_files = sorted(list(PROJECT_ROOT.glob("ml_models_comparison_*.csv")), reverse=True)
+                    if comp_files:
+                        df = pd.read_csv(comp_files[0])
+                        for _, row in df.iterrows():
+                            if row['symbol'] == symbol:
+                                m_path = row['model_path']
+                                # Convert row to dict (cleaning nan values)
+                                res = row.to_dict()
+                                clean_res = {k: v for k, v in res.items() if pd.notna(v)}
+                                model_manager.save_model_test_result(symbol, m_path, clean_res)
+                        logger.info(f"Updated test results for {symbol} from {comp_files[0].name}")
+                except Exception as e:
+                    logger.error(f"Error updating model results from CSV: {e}")
+
+                # 2. Выбираем лучшие модели на основе результатов
+                from bot.ml.model_selector import select_best_models, select_best_single_model
+                
+                selected_info = ""
+                
+                if body.mode == "single":
+                    # Выбираем лучшую Single модель
+                    best_model_path, info = select_best_single_model(symbol, use_best_from_comparison=True)
+                    
+                    if best_model_path:
+                        # Применяем модель
+                        model_manager.apply_model(symbol, best_model_path)
+                        # Обновляем конфиг
+                        config = {"mode": "single", "model_path": best_model_path}
+                        state.symbol_models[symbol] = best_model_path
+                        state.set_strategy_config(symbol, config)
+                        
+                        pnl = info.get('pnl_pct', 0)
+                        name = info.get('model_name', 'Unknown')
+                        selected_info = f"Selected: {name} (PnL: {pnl:.2f}%)"
+                    else:
+                        selected_info = "No suitable single model found"
+                        
+                else:
+                    # Выбираем лучшие MTF модели (как раньше)
+                    # select_best_models сохраняет результат в internal state? 
+                    # Нет, она возвращает пути. Нам нужно их применить.
+                    m1h, m15m, info = select_best_models(symbol, use_best_from_comparison=True)
+                    
+                    if m1h and m15m:
+                        config = {
+                            "mode": "mtf", 
+                            "model_1h_path": m1h, 
+                            "model_15m_path": m15m
+                        }
+                        state.set_strategy_config(symbol, config)
+                        # Нужно ли применять? MTF стратегия читает пути из конфига/state при запуске.
+                        # Но лучше обновить активную стратегию если она запущена.
+                        # В текущей архитектуре restart стратегии может потребоваться.
+                        
+                        selected_info = f"Selected MTF: 1h={info.get('model_1h')}, 15m={info.get('model_15m')}"
+                    else:
+                        selected_info = "No suitable MTF combination found"
+
+                logger.info(f"{test_type} finished for {symbol}. {selected_info}")
                 
                 if tg_bot:
-                    loop.run_until_complete(tg_bot.send_notification(f"✅ MTF combination test finished for {symbol}. Check app for results."))
-                state.add_notification(f"MTF test finished for {symbol}", "success")
+                    loop.run_until_complete(tg_bot.send_notification(f"✅ {test_type} finished for {symbol}.\n{selected_info}"))
+                state.add_notification(f"{test_type} finished for {symbol}", "success")
                 
                 loop.close()
             except Exception as e:
-                logger.error(f"Error in MTF test for {symbol}: {e}")
-                # Для отправки ошибки тоже нужен loop, если предыдущий упал
+                logger.error(f"Error in {test_type} for {symbol}: {e}")
                 try:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     if tg_bot:
-                        loop.run_until_complete(tg_bot.send_notification(f"❌ MTF testing failed for {symbol}: {e}"))
+                        loop.run_until_complete(tg_bot.send_notification(f"❌ Testing failed for {symbol}: {e}"))
                     loop.close()
                 except:
                     pass
-                state.add_notification(f"MTF test failed for {symbol}", "error")
+                state.add_notification(f"Testing failed for {symbol}", "error")
 
         background_tasks.add_task(_run_test_all)
         
-        return {"ok": True, "symbol": symbol, "message": "MTF test started in background"}
+        return {"ok": True, "symbol": symbol, "message": "Test started in background"}
 
     class RetrainBody(BaseModel):
         symbol: str

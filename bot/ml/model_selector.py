@@ -364,3 +364,87 @@ def select_best_models(
             info["source"] = "fallback_first_found"
     
     return model_1h, model_15m, info
+
+
+def select_best_single_model(
+    symbol: str,
+    use_best_from_comparison: bool = True
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """
+    Выбирает лучшую SINGLE модель для символа.
+    
+    Args:
+        symbol: Торговая пара
+        use_best_from_comparison: Использовать результаты сравнения
+        
+    Returns:
+        (model_path, info_dict)
+    """
+    models_dir = Path("ml_models")
+    info = {
+        "source": "unknown",
+        "model_name": None,
+        "strategy_type": "single",
+        "pnl_pct": None,
+        "win_rate": None
+    }
+    
+    if not models_dir.exists():
+        return None, info
+
+    symbol_upper = symbol.upper()
+
+    # 1. Ищем в ml_models_comparison_*.csv
+    comparison_files = sorted(
+        Path(".").glob("ml_models_comparison_*.csv"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True
+    )
+    
+    if use_best_from_comparison and comparison_files:
+        try:
+            df = pd.read_csv(comparison_files[0])
+            # Фильтруем по символу
+            symbol_data = df[df['symbol'] == symbol_upper]
+            
+            if not symbol_data.empty:
+                # Исключаем MTF модели (если они там есть)
+                if 'mode_suffix' in symbol_data.columns:
+                    symbol_data = symbol_data[symbol_data['mode_suffix'] != 'mtf']
+                
+                # Сортируем по PnL
+                best_model = symbol_data.sort_values('total_pnl_pct', ascending=False).iloc[0]
+                
+                model_name = best_model.get('model_name', '') or best_model.get('model_filename', '').replace('.pkl', '')
+                model_path = models_dir / f"{model_name}.pkl"
+                
+                if model_path.exists():
+                    info.update({
+                        "source": "comparison_csv",
+                        "model_name": model_name,
+                        "pnl_pct": best_model.get('total_pnl_pct'),
+                        "win_rate": best_model.get('win_rate_pct'),
+                        "filename": comparison_files[0].name
+                    })
+                    logger.info(f"[{symbol}] ✅ Выбрана лучшая Single модель: {model_name} (PnL: {best_model.get('total_pnl_pct'):.2f}%)")
+                    return str(model_path), info
+        except Exception as e:
+            logger.error(f"Ошибка выбора single модели из сравнения: {e}")
+
+    # 2. Fallback: берем первую попавшуюся 15m модель
+    models_15m = list(models_dir.glob(f"*_{symbol}_15_*.pkl"))
+    if not models_15m:
+        models_15m = list(models_dir.glob(f"*_{symbol}_*15m*.pkl"))
+        
+    if models_15m:
+        # Сортируем чтобы брать последнюю (обычно лучшую или последнюю обученную)
+        models_15m.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        model_path = models_15m[0]
+        info.update({
+            "source": "fallback_latest_15m",
+            "model_name": model_path.stem
+        })
+        logger.info(f"[{symbol}] 📦 Fallback Single модель: {model_path.stem}")
+        return str(model_path), info
+
+    return None, info

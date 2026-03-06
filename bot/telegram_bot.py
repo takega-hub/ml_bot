@@ -622,7 +622,10 @@ class TelegramBot:
                 "Вы получите уведомления о прогрессе.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Ожидание...", callback_data="waiting")]])
             )
-            asyncio.create_task(self.optimize_mtf_strategies_async(query.from_user.id))
+            # Используем run_in_executor для запуска тяжелой задачи
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, lambda: asyncio.run(self.optimize_mtf_strategies_async(query.from_user.id)))
+
         elif query.data.startswith("edit_risk_"):
             setting_name = query.data.replace("edit_risk_", "")
             await self.start_edit_risk_setting(query, setting_name)
