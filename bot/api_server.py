@@ -1089,6 +1089,57 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             logger.error(f"Error closing position {sym}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/kline", dependencies=[Depends(verify_api_key)])
+    def get_kline(symbol: str, interval: str = "15", limit: int = 100):
+        """Возвращает свечные данные (OHLCV)."""
+        symbol = symbol.upper()
+        if not bybit_client:
+            raise HTTPException(status_code=501, detail="Exchange client not available")
+        
+        # Map interval: '15m' -> '15', '1h' -> '60'
+        mapped_interval = interval
+        if interval == "15m": mapped_interval = "15"
+        elif interval == "1h": mapped_interval = "60"
+        elif interval == "4h": mapped_interval = "240"
+        elif interval == "1d": mapped_interval = "D"
+            
+        try:
+            # Bybit V5 API: category=linear for USDT perps
+            # kline returns list of [startTime, open, high, low, close, volume, turnover]
+            # startTime in ms
+            resp = bybit_client.get_kline(category="linear", symbol=symbol, interval=mapped_interval, limit=limit)
+            
+            if resp.get("retCode") != 0:
+                raise HTTPException(status_code=400, detail=f"Bybit error: {resp.get('retMsg')}")
+                
+            result = resp.get("result", {})
+            list_data = result.get("list", [])
+            
+            # Convert to more friendly format
+            candles = []
+            for item in list_data:
+                # item: [startTime, open, high, low, close, volume, turnover]
+                # We need to return them in chronological order (Bybit returns reverse chronological)
+                candles.append({
+                    "time": int(item[0]),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                })
+            
+            # Sort by time ascending
+            candles.sort(key=lambda x: x["time"])
+            
+            return {"symbol": symbol, "interval": interval, "candles": candles}
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting kline for {symbol}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/notifications/unread", dependencies=[Depends(verify_api_key)])
     def get_unread_notifications():
         """Возвращает список непрочитанных уведомлений."""
