@@ -54,7 +54,7 @@ class NotificationRecord:
     timestamp: str
     message: str
     type: str = "info" # info, success, warning, error
-    read: bool = false
+    read: bool = False
 
 @dataclass
 class SymbolCooldown:
