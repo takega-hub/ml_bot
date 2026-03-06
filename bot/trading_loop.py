@@ -384,7 +384,18 @@ class TradingLoop:
             required_limit = 500 if use_mtf else 200  # Для MTF запрашиваем больше данных
             
             # Загружаем кэшированные 15m данные
-            df = await asyncio.to_thread(self._load_cached_15m_data, symbol)
+            logger.debug(f"[{symbol}] Loading cached 15m data...")
+            try:
+                df = await asyncio.wait_for(
+                    asyncio.to_thread(self._load_cached_15m_data, symbol),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[{symbol}] ⚠️ Timeout loading 15m cache, skipping cache")
+                df = None
+            except Exception as e:
+                logger.error(f"[{symbol}] ❌ Error loading 15m cache: {e}")
+                df = None
             
             # Проверяем актуальность данных
             needs_update = False
@@ -425,7 +436,18 @@ class TradingLoop:
             # Обновляем кэш если нужно
             if needs_update:
                 # Подгружаем только новые данные
-                df = await asyncio.to_thread(self._fetch_and_cache_15m_data, symbol, df, required_limit)
+                try:
+                    df = await asyncio.wait_for(
+                        asyncio.to_thread(self._fetch_and_cache_15m_data, symbol, df, required_limit),
+                        timeout=30.0  # Таймаут 30 секунд на запрос к API
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[{symbol}] ⚠️ Timeout fetching 15m data from exchange")
+                    return
+                except Exception as e:
+                    logger.error(f"[{symbol}] ❌ Error fetching 15m data: {e}")
+                    return
+
                 if df is not None and not df.empty:
                     logger.info(f"[{symbol}] ✅ Updated cache with {len(df)} 15m candles from exchange")
                 else:
