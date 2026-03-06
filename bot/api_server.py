@@ -779,21 +779,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         # Run in background
         def _run_test_all():
             try:
+                # В FastAPI background tasks запускаются в thread pool, поэтому нельзя вызывать asyncio.create_task напрямую
+                # без event loop. Создаем новый event loop для асинхронных операций.
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
                 if tg_bot:
-                    asyncio.create_task(tg_bot.send_notification(f"🧪 Started MTF combination test for {symbol}..."))
+                    loop.run_until_complete(tg_bot.send_notification(f"🧪 Started MTF combination test for {symbol}..."))
                 state.add_notification(f"Started MTF test for {symbol}", "info")
                 logger.info(f"Starting MTF combination test for {symbol}...")
+                
                 from bot.ml.model_selector import select_best_models
                 # This function runs comprehensive tests and saves results to csv
                 select_best_models(symbol, use_best_from_comparison=False) 
                 logger.info(f"MTF combination test finished for {symbol}")
+                
                 if tg_bot:
-                    asyncio.create_task(tg_bot.send_notification(f"✅ MTF combination test finished for {symbol}. Check app for results."))
+                    loop.run_until_complete(tg_bot.send_notification(f"✅ MTF combination test finished for {symbol}. Check app for results."))
                 state.add_notification(f"MTF test finished for {symbol}", "success")
+                
+                loop.close()
             except Exception as e:
                 logger.error(f"Error in MTF test for {symbol}: {e}")
-                if tg_bot:
-                    asyncio.create_task(tg_bot.send_notification(f"❌ MTF testing failed for {symbol}: {e}"))
+                # Для отправки ошибки тоже нужен loop, если предыдущий упал
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    if tg_bot:
+                        loop.run_until_complete(tg_bot.send_notification(f"❌ MTF testing failed for {symbol}: {e}"))
+                    loop.close()
+                except:
+                    pass
                 state.add_notification(f"MTF test failed for {symbol}", "error")
 
         background_tasks.add_task(_run_test_all)
