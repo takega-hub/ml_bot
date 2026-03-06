@@ -83,6 +83,7 @@ class BotState:
         self.active_symbols: List[str] = ["BTCUSDT"]
         self.known_symbols: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
         self.symbol_models: Dict[str, str] = {}  # symbol -> model_path
+        self.symbol_strategies: Dict[str, Dict[str, Any]] = {}  # symbol -> strategy config (mode, models, etc)
         self.max_active_symbols: int = 5
         
         # History
@@ -122,6 +123,7 @@ class BotState:
                     if s not in self.known_symbols:
                         self.known_symbols.append(s)
                 self.symbol_models = data.get("symbol_models", {})
+                self.symbol_strategies = data.get("symbol_strategies", {})
                 
                 # Load trades (с поддержкой обратной совместимости для старых записей)
                 for t in data.get("trades", []):
@@ -172,6 +174,7 @@ class BotState:
                         "active_symbols": list(self.active_symbols),  # Копируем список
                         "known_symbols": list(self.known_symbols),  # Копируем список
                         "symbol_models": dict(self.symbol_models),  # Копируем словарь
+                        "symbol_strategies": dict(self.symbol_strategies),
                         "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
                         "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
                         "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()},
@@ -649,3 +652,16 @@ class BotState:
                     trade.dca_count += 1
                     break
         self.save()
+
+    def set_strategy_config(self, symbol: str, config: Dict[str, Any]):
+        """Sets strategy configuration for a symbol (mode, models, etc)"""
+        symbol = symbol.upper()
+        with self.lock:
+            self.symbol_strategies[symbol] = config
+        self.save()
+
+    def get_strategy_config(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Gets strategy configuration for a symbol"""
+        symbol = symbol.upper()
+        with self.lock:
+            return self.symbol_strategies.get(symbol)

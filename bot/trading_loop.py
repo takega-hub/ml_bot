@@ -478,39 +478,76 @@ class TradingLoop:
                     logger.info(f"[{symbol}] ✅ Using cached 1h data ({len(df_1h_cached)} candles)")
 
             # 2. Инициализируем стратегию если нужно
-            # Проверяем, нужно ли переинициализировать стратегию из-за изменения настроек MTF
-            current_strategy = self.strategies.get(symbol)
-            use_mtf = self.settings.ml_strategy.use_mtf_strategy
+            from pathlib import Path
             
-            if current_strategy is not None:
-                # Проверяем, соответствует ли текущая стратегия настройкам
-                is_mtf_strategy = hasattr(current_strategy, 'predict_combined')
-                if is_mtf_strategy != use_mtf:
-                    logger.info(f"[{symbol}] Strategy type mismatch: current={'MTF' if is_mtf_strategy else 'Single'}, required={'MTF' if use_mtf else 'Single'}")
-                    logger.info(f"[{symbol}] Removing old strategy to reinitialize with new settings")
-                    del self.strategies[symbol]
-                    current_strategy = None  # Помечаем, что нужно переинициализировать
+            # Получаем конфигурацию для символа
+            strat_config = self.state.get_strategy_config(symbol)
+            
+            # Определяем режим и модели
+            use_mtf = self.settings.ml_strategy.use_mtf_strategy # Default from global
+            target_model_single = self.state.symbol_models.get(symbol)
+            target_model_1h = None
+            target_model_15m = None
+            
+            if strat_config:
+                mode = strat_config.get("mode")
+                if mode == "mtf":
+                    use_mtf = True
+                    target_model_1h = strat_config.get("model_1h_path")
+                    target_model_15m = strat_config.get("model_15m_path")
+                elif mode == "single":
+                    use_mtf = False
+                    target_model_single = strat_config.get("model_path")
+            
+            # Проверяем текущую загруженную стратегию
+            current_strategy = self.strategies.get(symbol)
+            need_reinit = False
+            
+            if current_strategy:
+                is_mtf_instance = hasattr(current_strategy, 'predict_combined')
+                if is_mtf_instance != use_mtf:
+                    logger.info(f"[{symbol}] Strategy type mismatch: current={'MTF' if is_mtf_instance else 'Single'}, required={'MTF' if use_mtf else 'Single'}")
+                    need_reinit = True
+                elif use_mtf:
+                    # Проверяем пути моделей для MTF
+                    curr_1h = str(getattr(current_strategy, 'model_1h_path', ''))
+                    curr_15m = str(getattr(current_strategy, 'model_15m_path', ''))
+                    if target_model_1h and str(Path(target_model_1h)) != str(Path(curr_1h)):
+                        logger.info(f"[{symbol}] 1h model changed: {curr_1h} -> {target_model_1h}")
+                        need_reinit = True
+                    if target_model_15m and str(Path(target_model_15m)) != str(Path(curr_15m)):
+                        logger.info(f"[{symbol}] 15m model changed: {curr_15m} -> {target_model_15m}")
+                        need_reinit = True
+                else:
+                    # Проверяем путь модели для Single
+                    curr_path = str(getattr(current_strategy, 'model_path', ''))
+                    if target_model_single and str(Path(target_model_single)) != str(Path(curr_path)):
+                        logger.info(f"[{symbol}] Model changed: {curr_path} -> {target_model_single}")
+                        need_reinit = True
+
+            if need_reinit:
+                logger.info(f"[{symbol}] Reinitializing strategy...")
+                del self.strategies[symbol]
             
             if symbol not in self.strategies:
-                from pathlib import Path
-                
-                # Проверяем, включена ли MTF стратегия и есть ли обе модели
-                use_mtf = self.settings.ml_strategy.use_mtf_strategy
-                logger.info(f"[{symbol}] MTF strategy setting: use_mtf_strategy={use_mtf}")
+                logger.info(f"[{symbol}] Initializing strategy: use_mtf={use_mtf}")
                 
                 if use_mtf:
                     # Используем комбинированную MTF стратегию
                     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
                     from bot.ml.model_selector import select_best_models
                     
-                    logger.info(f"[{symbol}] Attempting to load MTF strategy...")
-                    # Выбираем лучшие модели автоматически
-                    model_1h, model_15m, model_info = select_best_models(
-                        symbol=symbol,
-                        use_best_from_comparison=True,
-                    )
+                    model_1h = target_model_1h
+                    model_15m = target_model_15m
+                    model_info = {}
                     
-                    logger.info(f"[{symbol}] MTF model selection result: model_1h={model_1h}, model_15m={model_15m}, source={model_info.get('source', 'unknown')}")
+                    # Если модели не заданы явно в конфиге, пытаемся выбрать лучшие
+                    if not model_1h or not model_15m:
+                        logger.info(f"[{symbol}] Attempting to auto-select MTF models...")
+                        model_1h, model_15m, model_info = select_best_models(
+                            symbol=symbol,
+                            use_best_from_comparison=True,
+                        )
                     
                     if model_1h and model_15m:
                         # Используем параметры из best_strategies.json, если доступны
@@ -544,11 +581,6 @@ class TradingLoop:
                         logger.info(f"  1h model: {Path(model_1h).name}")
                         logger.info(f"  15m model: {Path(model_15m).name}")
                         logger.info(f"  Parameters: 1h_threshold={confidence_threshold_1h}, 15m_threshold={confidence_threshold_15m}, alignment_mode={alignment_mode}, require_alignment={require_alignment}")
-                        if model_info.get('metrics'):
-                            metrics = model_info['metrics']
-                            logger.info(f"  Expected metrics: PnL={metrics.get('total_pnl_pct', 0):.2f}%, "
-                                      f"WR={metrics.get('win_rate', 0):.1f}%, "
-                                      f"PF={metrics.get('profit_factor', 0):.2f}")
                         
                         ms = self.settings.ml_strategy
                         self.strategies[symbol] = MultiTimeframeMLStrategy(
@@ -566,19 +598,17 @@ class TradingLoop:
                             use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
                         logger.info(f"[{symbol}] ✅ MTF strategy loaded successfully")
-                        dyn = getattr(ms, "use_dynamic_ensemble_weights", False)
-                        logger.info(f"[DEPLOY] {symbol}: MTF, dynamic_ensemble_weights={dyn}")
                     else:
                         # Нет обеих моделей - используем обычную стратегию
-                        logger.warning(f"[{symbol}] MTF strategy enabled but models not found:")
-                        logger.warning(f"  1h model: {model_1h}, 15m model: {model_15m}")
+                        logger.warning(f"[{symbol}] MTF strategy enabled but models not found/selected")
                         logger.warning(f"[{symbol}] Falling back to single timeframe strategy")
                         use_mtf = False
                 
                 if not use_mtf:
                     # Используем обычную стратегию (15m или 1h)
-                    model_path = self.state.symbol_models.get(symbol)
-                    # Если путь не задан, используем автопоиск из конфига (реализован в _auto_find_ml_model)
+                    model_path = target_model_single
+                    
+                    # Если путь не задан, используем автопоиск
                     if not model_path:
                         # Пытаемся найти модель в папке ml_models
                         models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))

@@ -60,6 +60,12 @@ def _get_status_data(state, bybit_client, settings, trading_loop=None) -> Dict[s
                     entry_price = _safe_float(p.get("avgPrice"), 0)
                     mark_price = _safe_float(p.get("markPrice"), 0) or _safe_float(p.get("lastPrice"), entry_price) or entry_price
                     unrealised_pnl = _safe_float(p.get("unrealisedPnl"), 0)
+                    if unrealised_pnl == 0:
+                        # Иногда Bybit не возвращает unrealisedPnl сразу, считаем сами
+                        if side == "Buy":
+                            unrealised_pnl = (mark_price - entry_price) * size
+                        else:
+                            unrealised_pnl = (entry_price - mark_price) * size
                     leverage = _safe_float(p.get("leverage", settings.leverage), settings.leverage)
                     margin = _safe_float(p.get("positionMargin"), 0) or _safe_float(p.get("positionIM"), 0)
                     if margin == 0:
@@ -89,23 +95,48 @@ def _get_status_data(state, bybit_client, settings, trading_loop=None) -> Dict[s
     strategies: List[Dict[str, Any]] = []
     for symbol in state.active_symbols:
         strategy_info: Dict[str, Any] = {"symbol": symbol, "model": None, "mtf": False}
+        
+        # Try to get from running strategy first
+        strategy = None
         if trading_loop and getattr(trading_loop, "strategies", None):
             strategy = trading_loop.strategies.get(symbol)
-            if strategy and getattr(strategy, "predict_combined", None):
+            
+        if strategy:
+            if getattr(strategy, "predict_combined", None):
                 strategy_info["mtf"] = True
                 strategy_info["model_1h"] = getattr(strategy, "model_1h_path", None)
                 strategy_info["model_15m"] = getattr(strategy, "model_15m_path", None)
-            elif strategy:
-                strategy_info["model"] = getattr(strategy, "model_path", None) or state.symbol_models.get(symbol)
+            else:
+                strategy_info["model"] = getattr(strategy, "model_path", None)
         else:
-            strategy_info["model"] = state.symbol_models.get(symbol)
+            # Fallback to state config
+            config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
+            if config:
+                mode = config.get("mode", "single")
+                if mode == "mtf":
+                    strategy_info["mtf"] = True
+                    strategy_info["model_1h"] = config.get("model_1h_path")
+                    strategy_info["model_15m"] = config.get("model_15m_path")
+                else:
+                    strategy_info["model"] = config.get("model_path") or state.symbol_models.get(symbol)
+            else:
+                strategy_info["model"] = state.symbol_models.get(symbol)
+                
         cooldown = state.get_cooldown_info(symbol) if hasattr(state, "get_cooldown_info") else None
         if cooldown and cooldown.get("active"):
             strategy_info["cooldown"] = {"hours_left": cooldown.get("hours_left"), "reason": cooldown.get("reason", "")}
         strategies.append(strategy_info)
 
     stats = state.get_stats()
-
+    unrealized_pnl = sum(p["pnl"] for p in open_positions)
+    
+    # Calculate Today PnL
+    from datetime import datetime
+    today = datetime.now().date()
+    closed = [t for t in state.trades if t.status == "closed"]
+    today_trades = [t for t in closed if t.exit_time and datetime.fromisoformat(t.exit_time).date() == today]
+    today_pnl = sum(t.pnl_usd for t in today_trades)
+    
     return {
         "is_running": state.is_running,
         "wallet_balance": round(wallet_balance, 2),
@@ -115,6 +146,8 @@ def _get_status_data(state, bybit_client, settings, trading_loop=None) -> Dict[s
         "strategies": strategies,
         "active_symbols": list(state.active_symbols),
         "total_pnl": round(stats["total_pnl"], 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "today_pnl": round(today_pnl, 2),
         "win_rate": round(stats["win_rate"], 1),
         "total_trades": stats["total_trades"],
     }
@@ -199,7 +232,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
     logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
-        from fastapi import FastAPI, Depends, HTTPException, Header, Body
+        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError as e:
@@ -225,6 +258,16 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=500, detail="MOBILE_API_KEY not configured")
         if not x_api_key or x_api_key.strip() != api_key:
             raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+    @app.get("/")
+    def root():
+        """Корень: подсказка для проверки API."""
+        return {
+            "service": "ML Trading Bot API",
+            "status": "ok",
+            "health": "/api/health",
+            "docs": "/docs",
+        }
 
     @app.get("/api/health")
     def health():
@@ -268,10 +311,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.get("/api/pairs", dependencies=[Depends(verify_api_key)])
     def get_pairs():
         """Список известных и активных пар с cooldown."""
-        all_possible = sorted(set(
-            s for s in state.known_symbols
-            if isinstance(s, str) and s.endswith("USDT")
-        ) + list(state.active_symbols))
+        known = {s for s in state.known_symbols if isinstance(s, str) and s.endswith("USDT")}
+        active = set(state.active_symbols)
+        all_possible = sorted(list(known | active))
+        
         cooldowns = {}
         for s in all_possible:
             info = state.get_cooldown_info(s) if hasattr(state, "get_cooldown_info") else None
@@ -460,30 +503,159 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=501, detail="Model manager not available")
         models = model_manager.find_models_for_symbol(symbol)
         results = model_manager.get_model_test_results(symbol)
-        current = state.symbol_models.get(symbol)
+        
+        # Determine current models
+        current_1h = None
+        current_15m = None
+        current_single = None
+        mode = "single"
+
+        if trading_loop and getattr(trading_loop, "strategies", None):
+            strategy = trading_loop.strategies.get(symbol)
+            if strategy:
+                if getattr(strategy, "predict_combined", None):
+                    mode = "mtf"
+                    current_1h = getattr(strategy, "model_1h_path", None)
+                    current_15m = getattr(strategy, "model_15m_path", None)
+                else:
+                    mode = "single"
+                    current_single = getattr(strategy, "model_path", None)
+        
+        if not current_single and not current_1h and not current_15m:
+             # Try to get from config
+             config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
+             if config:
+                 mode = config.get("mode", "single")
+                 if mode == "mtf":
+                     current_1h = config.get("model_1h_path")
+                     current_15m = config.get("model_15m_path")
+                 else:
+                     current_single = config.get("model_path")
+             
+             if not current_single and not current_1h:
+                  current_single = state.symbol_models.get(symbol)
+
+        # Calculate real stats per model
+        real_stats = {}
+        for t in state.trades:
+            if t.symbol == symbol and t.model_name:
+                if t.model_name not in real_stats:
+                    real_stats[t.model_name] = {"pnl": 0.0, "wins": 0, "count": 0}
+                
+                if t.status == "closed":
+                    real_stats[t.model_name]["pnl"] += t.pnl_usd
+                    real_stats[t.model_name]["count"] += 1
+                    if t.pnl_usd > 0:
+                        real_stats[t.model_name]["wins"] += 1
+
         list_models = []
         for i, mp in enumerate(models):
             mp_str = str(mp)
-            res = results.get(mp_str, {})
+            m_name = Path(mp).stem
+            res_test = results.get(mp_str, {})
+            
+            # Get real stats
+            r_stats = real_stats.get(m_name, {"pnl": 0.0, "wins": 0, "count": 0})
+            win_rate = (r_stats["wins"] / r_stats["count"] * 100) if r_stats["count"] > 0 else 0.0
+            
+            res_real = {
+                "total_pnl": r_stats["pnl"],
+                "win_rate": win_rate,
+                "total_trades": r_stats["count"]
+            }
+
             list_models.append({
                 "index": i,
                 "path": mp_str,
-                "name": Path(mp).stem,
-                "current": mp_str == current,
-                "test": res,
+                "name": m_name,
+                "is_active_single": mp_str == current_single,
+                "is_active_1h": mp_str == current_1h,
+                "is_active_15m": mp_str == current_15m,
+                "test": res_test,
+                "real": res_real,
             })
-        return {"symbol": symbol, "models": list_models, "current": current}
+            
+        return {
+            "symbol": symbol, 
+            "models": list_models, 
+            "mode": mode,
+            "current_single": current_single,
+            "current_1h": current_1h,
+            "current_15m": current_15m
+        }
 
     class ApplyModelBody(BaseModel):
-        model_path: str
+        model_path: Optional[str] = None
+        model_1h_path: Optional[str] = None
+        model_15m_path: Optional[str] = None
+        mode: str = "single"  # single or mtf
 
     @app.post("/api/models/{symbol}/apply", dependencies=[Depends(verify_api_key)])
     def post_apply_model(symbol: str, body: ApplyModelBody):
         symbol = symbol.upper()
         if not model_manager:
             raise HTTPException(status_code=501, detail="Model manager not available")
-        model_manager.apply_model(symbol, body.model_path)
-        return {"ok": True, "symbol": symbol, "model_path": body.model_path}
+            
+        config = {"mode": body.mode}
+        
+        if body.mode == "mtf":
+            if not body.model_1h_path or not body.model_15m_path:
+                 raise HTTPException(status_code=400, detail="Both 1h and 15m models required for MTF")
+            
+            config["model_1h_path"] = body.model_1h_path
+            config["model_15m_path"] = body.model_15m_path
+            
+            logger.info(f"Applying MTF for {symbol}: 1h={body.model_1h_path}, 15m={body.model_15m_path}")
+            state.set_strategy_config(symbol, config)
+            
+            return {"ok": True, "mode": "mtf"}
+            
+        else:
+            if not body.model_path:
+                raise HTTPException(status_code=400, detail="Model path required for Single mode")
+            
+            config["model_path"] = body.model_path
+            
+            model_manager.apply_model(symbol, body.model_path)
+            state.symbol_models[symbol] = body.model_path
+            state.set_strategy_config(symbol, config)
+            
+            return {"ok": True, "mode": "single", "model_path": body.model_path}
+
+    class TestModelBody(BaseModel):
+        symbol: str
+        model_path: Optional[str] = None
+        days: int = 14
+
+    @app.post("/api/models/test", dependencies=[Depends(verify_api_key)])
+    def post_test_model(body: TestModelBody, background_tasks: BackgroundTasks):
+        symbol = body.symbol.upper()
+        
+        # Determine model path
+        model_path = body.model_path
+        if not model_path:
+             model_path = state.symbol_models.get(symbol)
+        
+        if not model_path:
+            raise HTTPException(status_code=400, detail=f"No active model for {symbol}")
+
+        if not model_manager:
+             raise HTTPException(status_code=501, detail="Model manager not available")
+
+        # Run in background
+        def _run_test():
+            try:
+                logger.info(f"Starting background test for {symbol} model {model_path}")
+                results = model_manager.test_model(model_path, symbol, days=body.days)
+                if results:
+                    model_manager.save_model_test_result(symbol, model_path, results)
+                    logger.info(f"Test finished for {symbol}")
+            except Exception as e:
+                logger.error(f"Error in background test for {symbol}: {e}")
+
+        background_tasks.add_task(_run_test)
+        
+        return {"ok": True, "symbol": symbol, "message": "Test started in background"}
 
     class RetrainBody(BaseModel):
         symbol: str
