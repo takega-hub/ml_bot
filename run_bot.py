@@ -197,7 +197,7 @@ async def main():
             try:
                 api_port = int(os.getenv("MOBILE_API_PORT", "8765"))
                 api_host = "0.0.0.0"
-                tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, host=api_host, port=api_port))
+                tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, tg_bot, host=api_host, port=api_port))
                 logger.info(
                     f"[Mobile API] Задача добавлена. Слушаем {api_host}:{api_port}. "
                     f"Снаружи: http://5.101.179.47:{api_port}/api/health (без ключа). "

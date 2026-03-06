@@ -34,6 +34,7 @@ class TradeRecord:
     stop_loss: Optional[float] = None  # SL цена
     leverage: int = 1  # Плечо
     margin_usd: float = 0.0  # Маржа в USD
+    commission: float = 0.0  # Комиссия за сделку (открытие + закрытие)
     signal_strength: str = ""  # Сила сигнала (слабое, умеренное, сильное и т.д.)
     signal_parameters: Dict[str, Any] = field(default_factory=dict)  # Дополнительные параметры сигнала
 
@@ -46,6 +47,14 @@ class SignalRecord:
     confidence: float
     reason: str
     indicators: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class NotificationRecord:
+    id: str
+    timestamp: str
+    message: str
+    type: str = "info" # info, success, warning, error
+    read: bool = false
 
 @dataclass
 class SymbolCooldown:
@@ -89,6 +98,7 @@ class BotState:
         # History
         self.trades: List[TradeRecord] = []
         self.signals: List[SignalRecord] = []
+        self.notifications: List[NotificationRecord] = []
         
         # Cooldowns для защиты от убытков
         self.cooldowns: Dict[str, SymbolCooldown] = {}  # symbol -> cooldown
@@ -136,6 +146,7 @@ class BotState:
                     trade_dict.setdefault("stop_loss", None)
                     trade_dict.setdefault("leverage", 1)
                     trade_dict.setdefault("margin_usd", 0.0)
+                    trade_dict.setdefault("commission", 0.0)
                     trade_dict.setdefault("signal_strength", "")
                     trade_dict.setdefault("signal_parameters", {})
                     self.trades.append(TradeRecord(**trade_dict))
@@ -568,16 +579,17 @@ class BotState:
         exit_price: float, 
         pnl_usd: float, 
         pnl_pct: float,
-        exit_reason: str = ""
+        exit_reason: str = "",
+        commission: float = 0.0
     ):
         """
         Обновляет сделку при закрытии и проверяет необходимость cooldown.
         Также экспортирует закрытую сделку в Excel.
         """
-        logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, exit_reason={exit_reason}")
+        logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, commission={commission:.2f}, exit_reason={exit_reason}")
         
         # Log to trades.log
-        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.2f} ({pnl_pct:.2f}%) | Reason: {exit_reason}")
+        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.2f} ({pnl_pct:.2f}%) | Fee: ${commission:.2f} | Reason: {exit_reason}")
         
         closed_trade = None
         with self.lock:
@@ -589,6 +601,7 @@ class BotState:
                     trade.pnl_usd = pnl_usd
                     trade.pnl_pct = pnl_pct
                     trade.status = "closed"
+                    trade.commission = commission
                     if exit_reason:
                         trade.exit_reason = exit_reason
                     closed_trade = trade
@@ -652,6 +665,34 @@ class BotState:
                     trade.dca_count += 1
                     break
         self.save()
+
+    def add_notification(self, message: str, type: str = "info"):
+        """Добавляет уведомление в очередь"""
+        import uuid
+        with self.lock:
+            notif = NotificationRecord(
+                id=str(uuid.uuid4()),
+                timestamp=datetime.now().isoformat(),
+                message=message,
+                type=type,
+                read=False
+            )
+            self.notifications.append(notif)
+            # Храним последние 50 уведомлений
+            if len(self.notifications) > 50:
+                self.notifications.pop(0)
+    
+    def get_unread_notifications(self) -> List[Dict[str, Any]]:
+        """Возвращает непрочитанные уведомления и помечает их как прочитанные"""
+        with self.lock:
+            unread = [n for n in self.notifications if not n.read]
+            result = [asdict(n) for n in unread]
+            
+            # Mark as read
+            for n in self.notifications:
+                n.read = True
+            
+            return result
 
     def set_strategy_config(self, symbol: str, config: Dict[str, Any]):
         """Sets strategy configuration for a symbol (mode, models, etc)"""

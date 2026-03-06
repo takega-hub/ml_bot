@@ -2803,44 +2803,102 @@ class TradingLoop:
             pnl_pct = 0.0
             
             # Метод 1: Пытаемся получить из закрытых позиций (closed PnL) - самый точный источник
-            try:
-                closed_pnl = await asyncio.to_thread(
-                    self.bybit.get_closed_pnl,
-                    symbol=symbol,
-                    start_time=start_time,
-                    end_time=end_time,
-                    limit=10
-                )
-                
-                if closed_pnl and isinstance(closed_pnl, dict) and closed_pnl.get("retCode") == 0:
-                    result = closed_pnl.get("result")
-                    if result and isinstance(result, dict):
-                        pnl_list = result.get("list", [])
-                        if pnl_list and len(pnl_list) > 0:
-                            # Ищем последнюю закрытую позицию для этого символа
-                            for pnl_item in pnl_list:
-                                if pnl_item and isinstance(pnl_item, dict):
-                                    pnl_symbol = pnl_item.get("symbol", "")
-                                    pnl_side = pnl_item.get("side", "")
-                                    # Проверяем, что это наша позиция (тот же символ и сторона)
-                                    if pnl_symbol == symbol and pnl_side == local_pos.side:
-                                        # Получаем точные данные из API
-                                        avg_exit_price = float(pnl_item.get("avgExitPrice", 0))
-                                        closed_pnl_value = float(pnl_item.get("closedPnl", 0))
-                                        
-                                        if avg_exit_price > 0:
-                                            exit_price = avg_exit_price
-                                            # Используем closedPnl из API, если доступен
-                                            if closed_pnl_value != 0:
+            # Делаем несколько попыток с небольшой задержкой, так как данные могут появиться не сразу
+            total_fee_usd = 0.0
+            
+            for attempt in range(3):
+                try:
+                    if attempt > 0:
+                        await asyncio.sleep(1.5) # Ждем 1.5 секунды перед повторной попыткой
+                    
+                    closed_pnl = await asyncio.to_thread(
+                        self.bybit.get_closed_pnl,
+                        symbol=symbol,
+                        start_time=start_time,
+                        end_time=end_time,
+                        limit=50  # Увеличиваем лимит
+                    )
+                    
+                    if closed_pnl and isinstance(closed_pnl, dict) and closed_pnl.get("retCode") == 0:
+                        result = closed_pnl.get("result")
+                        if result and isinstance(result, dict):
+                            pnl_list = result.get("list", [])
+                            if pnl_list and len(pnl_list) > 0:
+                                # Ищем последнюю закрытую позицию для этого символа
+                                # Сортируем по времени создания (createdTime), чтобы взять самую свежую
+                                try:
+                                    pnl_list.sort(key=lambda x: int(x.get("createdTime", 0)), reverse=True)
+                                except:
+                                    pass
+                                    
+                                for pnl_item in pnl_list:
+                                    if pnl_item and isinstance(pnl_item, dict):
+                                        pnl_symbol = pnl_item.get("symbol", "")
+                                        pnl_side = pnl_item.get("side", "")
+                                        # Проверяем, что это наша позиция (тот же символ и сторона)
+                                        if pnl_symbol == symbol and pnl_side == local_pos.side:
+                                            # Получаем точные данные из API
+                                            avg_exit_price = float(pnl_item.get("avgExitPrice", 0))
+                                            closed_pnl_value = float(pnl_item.get("closedPnl", 0))
+                                            
+                                            # Пытаемся вычислить реальную комиссию
+                                            qty_val = float(pnl_item.get("qty", local_pos.qty))
+                                            entry_price_val = float(pnl_item.get("avgEntryPrice", local_pos.entry_price))
+                                            
+                                            if avg_exit_price > 0:
+                                                exit_price = avg_exit_price
+                                                
+                                                # Используем closedPnl из API как основной источник
                                                 pnl_usd = closed_pnl_value
+                                                
+                                                # Рассчитываем Gross PnL (без комиссий) для определения комиссии
+                                                if pnl_side == "Buy":
+                                                    gross_pnl = (avg_exit_price - entry_price_val) * qty_val
+                                                else:
+                                                    gross_pnl = (entry_price_val - avg_exit_price) * qty_val
+                                                    
+                                                # Комиссия = Gross PnL - Net PnL (closedPnl)
+                                                real_fee = gross_pnl - closed_pnl_value
+                                                total_fee_usd = real_fee
+                                                
+                                                # Пытаемся получить разбивку комиссий через историю исполнений
+                                                closing_fee = 0.0
+                                                opening_fee_approx = 0.0
+                                                closing_order_id = pnl_item.get("orderId")
+                                                
+                                                if closing_order_id:
+                                                    try:
+                                                        # Получаем исполнения для закрывающего ордера
+                                                        exec_resp = await asyncio.to_thread(
+                                                            self.bybit.get_execution_list,
+                                                            symbol=symbol,
+                                                            order_id=closing_order_id
+                                                        )
+                                                        if exec_resp and isinstance(exec_resp, dict) and exec_resp.get("retCode") == 0:
+                                                            exec_result = exec_resp.get("result", {})
+                                                            exec_list = exec_result.get("list", []) if isinstance(exec_result, dict) else []
+                                                            
+                                                            for exc in exec_list:
+                                                                if isinstance(exc, dict):
+                                                                    closing_fee += float(exc.get("execFee", 0))
+                                                            
+                                                            # Вычисляем примерную комиссию за открытие (+ фандинг)
+                                                            opening_fee_approx = total_fee_usd - closing_fee
+                                                            logger.info(f"Fee breakdown for {symbol}: Closing=${closing_fee:.4f}, Opening+Funding=${opening_fee_approx:.4f}, Total=${total_fee_usd:.4f}")
+                                                    except Exception as e:
+                                                        logger.warning(f"Error fetching closing executions for {symbol}: {e}")
+
                                                 # Рассчитываем процент PnL на основе closedPnl
-                                                margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                                                margin = (entry_price_val * qty_val) / self.settings.leverage
                                                 if margin > 0:
                                                     pnl_pct = (pnl_usd / margin) * 100
-                                            logger.info(f"Found closed PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%")
-                                            break
-            except Exception as e:
-                logger.warning(f"Error getting closed PnL for {symbol}: {e}")
+                                                    
+                                                logger.info(f"Found closed PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, real_fee={real_fee:.4f}")
+                                                break
+                                if exit_price is not None:
+                                    break
+                except Exception as e:
+                    logger.warning(f"Error getting closed PnL for {symbol} (attempt {attempt+1}): {e}")
             
             # Метод 2: Если не нашли в closed PnL, пытаемся получить из истории исполнений
             try:
@@ -2948,7 +3006,8 @@ class TradingLoop:
             # Можно добавить более детальную причину, если доступна информация о trailing stop и т.д.
             
             # Обновляем статус сделки (может установить кулдаун от убытков)
-            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, exit_reason)
+            # Передаем реальную комиссию (если она была рассчитана)
+            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, exit_reason, commission=total_fee_usd)
             
             # Устанавливаем кулдаун до закрытия следующей свечи (15 минут)
             # Этот кулдаун не перезапишет более длительный кулдаун от убытков
@@ -3009,7 +3068,7 @@ class TradingLoop:
                         pnl_usd -= fee_usd
                         if margin > 0:
                             pnl_pct = (pnl_usd / margin) * 100
-                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, "MANUAL_CLOSE")
+                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, "MANUAL_CLOSE", commission=fee_usd)
                     # Устанавливаем кулдаун до закрытия следующей свечи
                     self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
                 else:

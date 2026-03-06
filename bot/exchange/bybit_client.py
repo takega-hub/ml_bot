@@ -847,6 +847,7 @@ class BybitClient:
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         limit: int = 50,
+        order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Получить историю исполненных ордеров (execution history).
@@ -856,6 +857,7 @@ class BybitClient:
             start_time: Начальное время в миллисекундах (опционально)
             end_time: Конечное время в миллисекундах (опционально)
             limit: Максимальное количество записей (по умолчанию 50)
+            order_id: ID ордера (опционально)
         
         Returns:
             Словарь с результатами запроса
@@ -870,6 +872,8 @@ class BybitClient:
             params["startTime"] = start_time
         if end_time:
             params["endTime"] = end_time
+        if order_id:
+            params["orderId"] = order_id
         # Используем get_executions из Position API для получения истории исполненных ордеров
         # get_execution_list из Trade API может не включать все поля, нужные для определения Order ID закрытия
         try:

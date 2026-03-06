@@ -228,7 +228,7 @@ def _get_dashboard_data(state, bybit_client, settings) -> Dict[str, Any]:
     }
 
 
-def create_app(state, bybit_client, settings, trading_loop=None, model_manager=None):
+def create_app(state, bybit_client, settings, trading_loop=None, model_manager=None, tg_bot=None):
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
     logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
@@ -288,11 +288,17 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.post("/api/start", dependencies=[Depends(verify_api_key)])
     def post_start():
         state.set_running(True)
+        if tg_bot:
+            asyncio.create_task(tg_bot.send_notification("🟢 Bot started via Mobile App"))
+        state.add_notification("Bot started via Mobile App", "success")
         return {"ok": True, "is_running": True}
 
     @app.post("/api/stop", dependencies=[Depends(verify_api_key)])
     def post_stop():
         state.set_running(False)
+        if tg_bot:
+            asyncio.create_task(tg_bot.send_notification("🔴 Bot stopped via Mobile App"))
+        state.add_notification("Bot stopped via Mobile App", "warning")
         return {"ok": True, "is_running": False}
 
     @app.get("/api/settings", dependencies=[Depends(verify_api_key)])
@@ -737,38 +743,108 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         # Run in background
         def _run_test():
             try:
+                if tg_bot:
+                    asyncio.create_task(tg_bot.send_notification(f"🧪 Started testing model {model_path} for {symbol}..."))
+                state.add_notification(f"Started testing {symbol}", "info")
                 logger.info(f"Starting background test for {symbol} model {model_path}")
                 results = model_manager.test_model(model_path, symbol, days=body.days)
                 if results:
                     model_manager.save_model_test_result(symbol, model_path, results)
                     logger.info(f"Test finished for {symbol}")
+                    pnl = results.get('total_pnl_pct', 0)
+                    if tg_bot:
+                        asyncio.create_task(tg_bot.send_notification(f"✅ Testing finished for {symbol}\nPnL: {pnl:.2f}%"))
+                    state.add_notification(f"Testing finished for {symbol}. PnL: {pnl:.2f}%", "success")
             except Exception as e:
                 logger.error(f"Error in background test for {symbol}: {e}")
+                if tg_bot:
+                    asyncio.create_task(tg_bot.send_notification(f"❌ Testing failed for {symbol}: {e}"))
+                state.add_notification(f"Testing failed for {symbol}", "error")
 
         background_tasks.add_task(_run_test)
         
         return {"ok": True, "symbol": symbol, "message": "Test started in background"}
 
+    class TestAllBody(BaseModel):
+        symbol: str
+        days: int = 14
+
+    @app.post("/api/models/test_all_combinations", dependencies=[Depends(verify_api_key)])
+    def post_test_all_combinations(body: TestAllBody, background_tasks: BackgroundTasks):
+        """Запускает тестирование всех пар (1h + 15m) для MTF."""
+        symbol = body.symbol.upper()
+        if not model_manager:
+             raise HTTPException(status_code=501, detail="Model manager not available")
+
+        # Run in background
+        def _run_test_all():
+            try:
+                if tg_bot:
+                    asyncio.create_task(tg_bot.send_notification(f"🧪 Started MTF combination test for {symbol}..."))
+                state.add_notification(f"Started MTF test for {symbol}", "info")
+                logger.info(f"Starting MTF combination test for {symbol}...")
+                from bot.ml.model_selector import select_best_models
+                # This function runs comprehensive tests and saves results to csv
+                select_best_models(symbol, use_best_from_comparison=False) 
+                logger.info(f"MTF combination test finished for {symbol}")
+                if tg_bot:
+                    asyncio.create_task(tg_bot.send_notification(f"✅ MTF combination test finished for {symbol}. Check app for results."))
+                state.add_notification(f"MTF test finished for {symbol}", "success")
+            except Exception as e:
+                logger.error(f"Error in MTF test for {symbol}: {e}")
+                if tg_bot:
+                    asyncio.create_task(tg_bot.send_notification(f"❌ MTF testing failed for {symbol}: {e}"))
+                state.add_notification(f"MTF test failed for {symbol}", "error")
+
+        background_tasks.add_task(_run_test_all)
+        
+        return {"ok": True, "symbol": symbol, "message": "MTF test started in background"}
+
     class RetrainBody(BaseModel):
         symbol: str
 
     @app.post("/api/models/retrain", dependencies=[Depends(verify_api_key)])
-    def post_retrain(body: RetrainBody):
+    def post_retrain(body: RetrainBody, background_tasks: BackgroundTasks):
         """Запуск переобучения в фоне (subprocess)."""
         sym = body.symbol.upper()
         script = PROJECT_ROOT / "retrain_ml_optimized.py"
         if not script.exists():
             raise HTTPException(status_code=501, detail="retrain_ml_optimized.py not found")
-        try:
-            subprocess.Popen(
-                [sys.executable, str(script), "--symbol", sym],
-                cwd=str(PROJECT_ROOT),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            logger.exception("Retrain start failed")
-            raise HTTPException(status_code=500, detail=str(e))
+            
+        def _run_retrain_task():
+             try:
+                 if tg_bot:
+                     asyncio.create_task(tg_bot.send_notification(f"🔄 Retraining started for {sym} via Mobile App..."))
+                 state.add_notification(f"Started retraining {sym}", "info")
+                 
+                 # Run synchronously (blocking thread)
+                 result = subprocess.run(
+                     [sys.executable, str(script), "--symbol", sym],
+                     cwd=str(PROJECT_ROOT),
+                     capture_output=True,
+                     text=True,
+                     encoding='utf-8',
+                     errors='replace'
+                 )
+                 
+                 if result.returncode == 0:
+                     logger.info(f"Retrain finished for {sym}")
+                     if tg_bot:
+                         asyncio.create_task(tg_bot.send_notification(f"✅ Retraining finished for {sym} successfully."))
+                     state.add_notification(f"Retraining finished for {sym}", "success")
+                 else:
+                     logger.error(f"Retrain failed for {sym}: {result.stderr}")
+                     if tg_bot:
+                         err_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                         asyncio.create_task(tg_bot.send_notification(f"❌ Retraining failed for {sym}.\nError: {err_msg}"))
+                     state.add_notification(f"Retraining failed for {sym}", "error")
+             except Exception as e:
+                 logger.error(f"Retrain exception: {e}")
+                 if tg_bot:
+                     asyncio.create_task(tg_bot.send_notification(f"❌ Retraining error for {sym}: {e}"))
+                 state.add_notification(f"Retraining error for {sym}", "error")
+
+        background_tasks.add_task(_run_retrain_task)
         return {"ok": True, "symbol": sym, "message": "Retrain started in background"}
 
     # --- History & stats ---
@@ -835,11 +911,97 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             points.append({"time": t.exit_time or t.entry_time, "pnl_cum": round(cum, 2), "trade_pnl": round(t.pnl_usd, 2)})
         return {"points": points, "total_pnl": round(cum, 2)}
 
+    @app.get("/api/analytics/daily_pnl", dependencies=[Depends(verify_api_key)])
+    def get_daily_pnl(days: int = 7):
+        """PnL по дням (бары) за последние N дней."""
+        from datetime import datetime, timedelta
+        
+        now = datetime.now().date()
+        start_date = now - timedelta(days=days-1)
+        
+        # Initialize map with 0.0 for all days
+        daily_map = {}
+        for i in range(days):
+            d = start_date + timedelta(days=i)
+            daily_map[d.isoformat()] = 0.0
+            
+        closed = [t for t in state.trades if t.status == "closed"]
+        
+        for t in closed:
+            if not t.exit_time:
+                continue
+            try:
+                # Handle ISO format with potential timezone or fractional seconds
+                # Using simple split 'T' or assuming fromisoformat works
+                dt = datetime.fromisoformat(t.exit_time).date()
+                if dt >= start_date and dt <= now:
+                    iso = dt.isoformat()
+                    if iso in daily_map:
+                        daily_map[iso] += t.pnl_usd
+            except Exception:
+                pass
+                    
+        # Convert to list sorted by date
+        result = [{"date": k, "pnl": round(v, 2)} for k, v in sorted(daily_map.items())]
+        return {"data": result}
+
+    class ClosePositionBody(BaseModel):
+        symbol: str
+
+    @app.post("/api/positions/close", dependencies=[Depends(verify_api_key)])
+    def post_close_position(body: ClosePositionBody):
+        sym = body.symbol.upper()
+        if not bybit_client:
+            raise HTTPException(status_code=501, detail="Exchange client not available")
+        
+        try:
+            # Get position info to know side and size
+            pos_info = bybit_client.get_position_info(symbol=sym)
+            if pos_info.get("retCode") != 0:
+                raise HTTPException(status_code=400, detail="Failed to get position info")
+            
+            closed = False
+            for p in pos_info.get("result", {}).get("list", []):
+                size = _safe_float(p.get("size"), 0)
+                if size <= 0:
+                    continue
+                side = p.get("side")
+                close_side = "Sell" if side == "Buy" else "Buy"
+                
+                resp = bybit_client.place_order(
+                    symbol=sym, side=close_side, qty=size, order_type="Market", reduce_only=True
+                )
+                
+                if resp.get("retCode") == 0:
+                    closed = True
+                    if tg_bot:
+                        asyncio.create_task(tg_bot.send_notification(f"⚠️ Position {sym} closed manually via Mobile App"))
+                else:
+                    raise HTTPException(status_code=400, detail=f"Failed to close: {resp.get('retMsg')}")
+            
+            if not closed:
+                 raise HTTPException(status_code=400, detail="No open position found to close")
+                 
+            return {"ok": True, "symbol": sym, "message": "Position closed"}
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error closing position {sym}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/notifications/unread", dependencies=[Depends(verify_api_key)])
+    def get_unread_notifications():
+        """Возвращает список непрочитанных уведомлений."""
+        return {"notifications": state.get_unread_notifications()}
+
     # --- Emergency ---
     @app.post("/api/emergency/stop_all", dependencies=[Depends(verify_api_key)])
     def post_emergency_stop_all():
         """Остановить бота и закрыть все позиции."""
         state.set_running(False)
+        if tg_bot:
+            asyncio.create_task(tg_bot.send_notification("🚨 EMERGENCY STOP triggered via Mobile App! All positions closed."))
         closed = []
         if bybit_client:
             for symbol in state.active_symbols:
@@ -865,7 +1027,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     return app
 
 
-async def run_api_server(state, bybit_client, settings, trading_loop=None, model_manager=None, host: str = "0.0.0.0", port: int = 8765):
+async def run_api_server(state, bybit_client, settings, trading_loop=None, model_manager=None, tg_bot=None, host: str = "0.0.0.0", port: int = 8765):
     """Запускает API сервер в текущем event loop (для asyncio.gather с ботом)."""
     logger.info(f"[Mobile API] run_api_server вызван: host={host}, port={port}")
     try:
@@ -878,7 +1040,7 @@ async def run_api_server(state, bybit_client, settings, trading_loop=None, model
 
     try:
         logger.info("[Mobile API] Создание FastAPI приложения...")
-        app = create_app(state, bybit_client, settings, trading_loop, model_manager)
+        app = create_app(state, bybit_client, settings, trading_loop, model_manager, tg_bot)
         logger.info("[Mobile API] Config и Server...")
         config = Config(app=app, host=host, port=port, log_level="info")
         server = Server(config)
