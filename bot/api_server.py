@@ -310,21 +310,54 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     # --- Pairs ---
     @app.get("/api/pairs", dependencies=[Depends(verify_api_key)])
     def get_pairs():
-        """Список известных и активных пар с cooldown."""
+        """Список известных и активных пар с cooldown и статистикой."""
         known = {s for s in state.known_symbols if isinstance(s, str) and s.endswith("USDT")}
         active = set(state.active_symbols)
         all_possible = sorted(list(known | active))
         
         cooldowns = {}
+        stats = {}
+        
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+        
         for s in all_possible:
+            # Cooldowns
             info = state.get_cooldown_info(s) if hasattr(state, "get_cooldown_info") else None
             if info and info.get("active"):
                 cooldowns[s] = {"hours_left": info.get("hours_left"), "reason": info.get("reason", "")}
+            
+            # Stats
+            s_trades = [t for t in state.trades if t.symbol == s and t.status == "closed"]
+            
+            def calc_period_stats(trades_subset):
+                if not trades_subset:
+                    return {"count": 0, "win_rate": 0.0, "pnl": 0.0}
+                wins = len([t for t in trades_subset if t.pnl_usd > 0])
+                pnl = sum(t.pnl_usd for t in trades_subset)
+                return {
+                    "count": len(trades_subset),
+                    "win_rate": round(wins / len(trades_subset) * 100, 1),
+                    "pnl": round(pnl, 2)
+                }
+
+            week_trades = [t for t in s_trades if t.exit_time and datetime.fromisoformat(t.exit_time) >= week_ago]
+            month_trades = [t for t in s_trades if t.exit_time and datetime.fromisoformat(t.exit_time) >= month_ago]
+            
+            stats[s] = {
+                "week": calc_period_stats(week_trades),
+                "month": calc_period_stats(month_trades),
+                "all": calc_period_stats(s_trades)
+            }
+
         return {
             "known_symbols": list(state.known_symbols),
             "active_symbols": list(state.active_symbols),
             "max_active": getattr(state, "max_active_symbols", 5),
             "cooldowns": cooldowns,
+            "stats": stats
         }
 
     class TogglePairBody(BaseModel):
@@ -496,6 +529,61 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             out.append({"symbol": symbol, "model_path": path, "model_name": name})
         return {"symbols": out}
 
+    def _get_mtf_candidates(symbol: str) -> List[Dict[str, Any]]:
+        try:
+            import pandas as pd
+            # Find latest comparison file
+            comp_files = sorted(list(PROJECT_ROOT.glob("ml_models_comparison_*.csv")), reverse=True)
+            if not comp_files:
+                return []
+            
+            latest_file = comp_files[0]
+            df = pd.read_csv(latest_file)
+            
+            # Filter by symbol
+            df = df[df["symbol"] == symbol]
+            if df.empty:
+                return []
+                
+            # Split by timeframe (mode_suffix)
+            df_1h = df[df["mode_suffix"] == "1h"].sort_values("total_pnl_pct", ascending=False)
+            df_15m = df[df["mode_suffix"] == "15m"].sort_values("total_pnl_pct", ascending=False)
+            
+            candidates = []
+            
+            top_1h = df_1h.head(3).to_dict('records')
+            top_15m = df_15m.head(3).to_dict('records')
+            
+            if not top_1h or not top_15m:
+                return []
+                
+            def make_cand(h_row, m_row, label):
+                 return {
+                    "name": label,
+                    "model_1h": str(h_row["model_path"]),
+                    "model_15m": str(m_row["model_path"]),
+                    "pnl_1h": h_row["total_pnl_pct"],
+                    "pnl_15m": m_row["total_pnl_pct"],
+                    "total_pnl": h_row["total_pnl_pct"] + m_row["total_pnl_pct"]
+                }
+
+            # Combo 1: Best of both
+            candidates.append(make_cand(top_1h[0], top_15m[0], f"Best Combo"))
+            
+            # Combo 2: Best 1h + 2nd 15m
+            if len(top_15m) > 1:
+                 candidates.append(make_cand(top_1h[0], top_15m[1], f"Alt Combo 1"))
+            
+            # Combo 3: 2nd 1h + Best 15m
+            if len(top_1h) > 1:
+                 candidates.append(make_cand(top_1h[1], top_15m[0], f"Alt Combo 2"))
+                
+            return candidates
+            
+        except Exception as e:
+            logger.error(f"Error getting MTF candidates: {e}")
+            return []
+
     @app.get("/api/models/{symbol}", dependencies=[Depends(verify_api_key)])
     def get_models_for_symbol(symbol: str):
         symbol = symbol.upper()
@@ -503,6 +591,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=501, detail="Model manager not available")
         models = model_manager.find_models_for_symbol(symbol)
         results = model_manager.get_model_test_results(symbol)
+        
+        # Get MTF candidates
+        mtf_candidates = _get_mtf_candidates(symbol)
         
         # Determine current models
         current_1h = None
@@ -581,7 +672,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "mode": mode,
             "current_single": current_single,
             "current_1h": current_1h,
-            "current_15m": current_15m
+            "current_15m": current_15m,
+            "mtf_candidates": mtf_candidates
         }
 
     class ApplyModelBody(BaseModel):
