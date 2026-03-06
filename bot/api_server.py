@@ -1107,7 +1107,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             # Bybit V5 API: category=linear for USDT perps
             # kline returns list of [startTime, open, high, low, close, volume, turnover]
             # startTime in ms
-            resp = bybit_client.get_kline(category="linear", symbol=symbol, interval=mapped_interval, limit=limit)
+            resp = bybit_client.get_kline(symbol=symbol, interval=mapped_interval, limit=limit)
             
             if resp.get("retCode") != 0:
                 raise HTTPException(status_code=400, detail=f"Bybit error: {resp.get('retMsg')}")

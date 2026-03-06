@@ -2798,6 +2798,22 @@ class TradingLoop:
                         )
                         
                         if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
+                            # Обновляем количество в локальной позиции, чтобы корректно считать PnL при полном закрытии
+                            try:
+                                with self.state.lock:
+                                    local_pos = self.state.get_open_position(symbol)
+                                    if local_pos:
+                                        # Уменьшаем размер позиции
+                                        new_qty = local_pos.qty - close_qty
+                                        # Если округление привело к 0 или меньше (чего быть не должно при partial close), ставим минимум
+                                        if new_qty < 0: 
+                                            new_qty = 0
+                                        local_pos.qty = new_qty
+                                        self.state.save()
+                                        logger.info(f"Updated local position size for {symbol} after partial close: {new_qty}")
+                            except Exception as e_update:
+                                logger.error(f"Error updating local position size: {e_update}")
+
                             await self.notifier.high(
                                 f"💰 ЧАСТИЧНОЕ ЗАКРЫТИЕ\n{symbol} | {close_pct*100}%\nПрогресс к TP: {progress_pct*100:.1f}%"
                             )
@@ -2846,77 +2862,71 @@ class TradingLoop:
                         if result and isinstance(result, dict):
                             pnl_list = result.get("list", [])
                             if pnl_list and len(pnl_list) > 0:
-                                # Ищем последнюю закрытую позицию для этого символа
-                                # Сортируем по времени создания (createdTime), чтобы взять самую свежую
+                                # Ищем ВСЕ закрытые позиции для этого символа, которые относятся к нашей сделке
+                                # Сортируем по времени создания (createdTime), чтобы взять самые свежие
                                 try:
                                     pnl_list.sort(key=lambda x: int(x.get("createdTime", 0)), reverse=True)
                                 except:
                                     pass
                                     
+                                found_pnl = False
+                                accumulated_pnl = 0.0
+                                accumulated_fee = 0.0
+                                last_exit_price = 0.0
+                                last_exit_time = 0
+                                
+                                # Преобразуем entry_time в timestamp ms для фильтрации
+                                try:
+                                    entry_dt = datetime.fromisoformat(local_pos.entry_time)
+                                    entry_ts = int(entry_dt.timestamp() * 1000)
+                                except:
+                                    entry_ts = 0
+                                
                                 for pnl_item in pnl_list:
                                     if pnl_item and isinstance(pnl_item, dict):
                                         pnl_symbol = pnl_item.get("symbol", "")
                                         pnl_side = pnl_item.get("side", "")
-                                        # Проверяем, что это наша позиция (тот же символ и сторона)
-                                        if pnl_symbol == symbol and pnl_side == local_pos.side:
-                                            # Получаем точные данные из API
-                                            avg_exit_price = float(pnl_item.get("avgExitPrice", 0))
-                                            closed_pnl_value = float(pnl_item.get("closedPnl", 0))
+                                        created_time = int(pnl_item.get("createdTime", 0))
+                                        
+                                        # Проверяем, что это наша позиция (тот же символ, сторона и создана ПОСЛЕ открытия)
+                                        if pnl_symbol == symbol and pnl_side == local_pos.side and created_time > entry_ts:
+                                            # Накапливаем PnL и комиссии
+                                            closed_pnl_val = float(pnl_item.get("closedPnl", 0))
+                                            accumulated_pnl += closed_pnl_val
                                             
-                                            # Пытаемся вычислить реальную комиссию
-                                            qty_val = float(pnl_item.get("qty", local_pos.qty))
-                                            entry_price_val = float(pnl_item.get("avgEntryPrice", local_pos.entry_price))
+                                            # Вычисляем комиссию для этой части
+                                            qty_val = float(pnl_item.get("qty", 0))
+                                            entry_price_val = float(pnl_item.get("avgEntryPrice", 0))
+                                            exit_price_val = float(pnl_item.get("avgExitPrice", 0))
                                             
-                                            if avg_exit_price > 0:
-                                                exit_price = avg_exit_price
+                                            if exit_price_val > 0:
+                                                if last_exit_time < created_time:
+                                                    last_exit_price = exit_price_val
+                                                    last_exit_time = created_time
                                                 
-                                                # Используем closedPnl из API как основной источник
-                                                pnl_usd = closed_pnl_value
-                                                
-                                                # Рассчитываем Gross PnL (без комиссий) для определения комиссии
+                                                # Gross PnL
                                                 if pnl_side == "Buy":
-                                                    gross_pnl = (avg_exit_price - entry_price_val) * qty_val
+                                                    gross_pnl = (exit_price_val - entry_price_val) * qty_val
                                                 else:
-                                                    gross_pnl = (entry_price_val - avg_exit_price) * qty_val
-                                                    
-                                                # Комиссия = Gross PnL - Net PnL (closedPnl)
-                                                real_fee = gross_pnl - closed_pnl_value
-                                                total_fee_usd = real_fee
+                                                    gross_pnl = (entry_price_val - exit_price_val) * qty_val
                                                 
-                                                # Пытаемся получить разбивку комиссий через историю исполнений
-                                                closing_fee = 0.0
-                                                opening_fee_approx = 0.0
-                                                closing_order_id = pnl_item.get("orderId")
-                                                
-                                                if closing_order_id:
-                                                    try:
-                                                        # Получаем исполнения для закрывающего ордера
-                                                        exec_resp = await asyncio.to_thread(
-                                                            self.bybit.get_execution_list,
-                                                            symbol=symbol,
-                                                            order_id=closing_order_id
-                                                        )
-                                                        if exec_resp and isinstance(exec_resp, dict) and exec_resp.get("retCode") == 0:
-                                                            exec_result = exec_resp.get("result", {})
-                                                            exec_list = exec_result.get("list", []) if isinstance(exec_result, dict) else []
-                                                            
-                                                            for exc in exec_list:
-                                                                if isinstance(exc, dict):
-                                                                    closing_fee += float(exc.get("execFee", 0))
-                                                            
-                                                            # Вычисляем примерную комиссию за открытие (+ фандинг)
-                                                            opening_fee_approx = total_fee_usd - closing_fee
-                                                            logger.info(f"Fee breakdown for {symbol}: Closing=${closing_fee:.4f}, Opening+Funding=${opening_fee_approx:.4f}, Total=${total_fee_usd:.4f}")
-                                                    except Exception as e:
-                                                        logger.warning(f"Error fetching closing executions for {symbol}: {e}")
-
-                                                # Рассчитываем процент PnL на основе closedPnl
-                                                margin = (entry_price_val * qty_val) / self.settings.leverage
-                                                if margin > 0:
-                                                    pnl_pct = (pnl_usd / margin) * 100
-                                                    
-                                                logger.info(f"Found closed PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, real_fee={real_fee:.4f}")
-                                                break
+                                                # Fee = Gross - Net
+                                                accumulated_fee += (gross_pnl - closed_pnl_val)
+                                                found_pnl = True
+                                
+                                if found_pnl:
+                                    exit_price = last_exit_price
+                                    pnl_usd = accumulated_pnl
+                                    total_fee_usd = accumulated_fee
+                                    
+                                    # Рассчитываем процент PnL от начальной маржи
+                                    margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                                    if margin > 0:
+                                        pnl_pct = (pnl_usd / margin) * 100
+                                        
+                                    logger.info(f"Found aggregated PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, total_fee={total_fee_usd:.4f}")
+                                    break
+                                
                                 if exit_price is not None:
                                     break
                 except Exception as e:

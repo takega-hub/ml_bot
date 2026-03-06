@@ -1218,6 +1218,8 @@ def run_exact_backtest(
                     else:
                         print(f"⚠️  Модель BTCUSDT не найдена, проверка направления отключена")
             except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
                 logger.warning(f"[run_exact_backtest] Ошибка подготовки BTCUSDT: {e}, проверка направления отключена")
                 btc_strategy = None
                 btc_df_with_features = None
