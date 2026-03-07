@@ -290,18 +290,18 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         return _get_dashboard_data(state, bybit_client, settings)
 
     @app.post("/api/start", dependencies=[Depends(verify_api_key)])
-    def post_start():
+    async def post_start():
         state.set_running(True)
         if tg_bot:
-            asyncio.create_task(tg_bot.send_notification("🟢 Bot started via Mobile App"))
+            await tg_bot.send_notification("🟢 Bot started via Mobile App")
         state.add_notification("Bot started via Mobile App", "success")
         return {"ok": True, "is_running": True}
 
     @app.post("/api/stop", dependencies=[Depends(verify_api_key)])
-    def post_stop():
+    async def post_stop():
         state.set_running(False)
         if tg_bot:
-            asyncio.create_task(tg_bot.send_notification("🔴 Bot stopped via Mobile App"))
+            await tg_bot.send_notification("🔴 Bot stopped via Mobile App")
         state.add_notification("Bot stopped via Mobile App", "warning")
         return {"ok": True, "is_running": False}
 
@@ -1545,7 +1545,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         type: str = "balanced" # aggressive, conservative, balanced
 
     @app.post("/api/ai/research/start", dependencies=[Depends(verify_api_key)])
-    def post_start_research(body: ResearchBody):
+    async def post_start_research(body: ResearchBody):
         """Запускает эксперимент (Research Agent)."""
         symbol = body.symbol.upper()
         try:
@@ -1556,7 +1556,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                  raise HTTPException(status_code=500, detail=error_msg)
             
             if tg_bot:
-                 asyncio.create_task(tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}"))
+                 await tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}")
                  
             return res
         except HTTPException:
