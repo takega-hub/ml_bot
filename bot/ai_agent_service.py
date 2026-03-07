@@ -193,27 +193,55 @@ class AIAgentService:
 
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert algorithmic trading risk manager. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1000,
-                temperature=0.1
-            ))
             
-            content = response.choices[0].message.content
-            # Clean up potential markdown blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].strip()
+            # Simple retry mechanism
+            max_retries = 3
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": "You are an expert algorithmic trading risk manager. Output valid JSON only."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=1000,
+                        temperature=0.1
+                    ))
+                    
+                    content = response.choices[0].message.content
+                    # Clean up potential markdown blocks
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[1].strip()
+                        
+                    result = json.loads(content)
+                    
+                    # Save successful analysis to state for caching
+                    state["last_analysis"] = result
+                    self._save_risk_state(state)
+                    
+                    return result
+                    
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"AI Risk Analysis attempt {attempt+1} failed: {e}")
+                    await asyncio.sleep(1) # Wait a bit before retry
+            
+            # If all retries failed, try to return cached analysis
+            if "last_analysis" in state:
+                logger.info("Returning cached risk analysis due to API failure")
+                cached = state["last_analysis"]
+                # Append a note about cache
+                cached["analysis"] = f"[OFFLINE MODE] {cached.get('analysis', '')} (Cached data)"
+                return cached
                 
-            return json.loads(content)
+            raise last_exception
             
         except Exception as e:
-            logger.error(f"AI Risk Analysis failed: {e}")
+            logger.error(f"AI Risk Analysis failed after retries: {e}")
             return {
                 "analysis": f"Ошибка анализа: {str(e)}. Проверьте настройки прокси/VPN.",
                 "suggestions": [],
@@ -253,24 +281,37 @@ class AIAgentService:
 
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert crypto trader. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=500,
-                temperature=0.2
-            ))
             
-            content = response.choices[0].message.content
-             # Clean up potential markdown blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].strip()
-
-            return json.loads(content)
+            # Simple retry mechanism
+            max_retries = 3
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": "You are an expert crypto trader. Output valid JSON only."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=500,
+                        temperature=0.2
+                    ))
+                    
+                    content = response.choices[0].message.content
+                     # Clean up potential markdown blocks
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[1].strip()
+        
+                    return json.loads(content)
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"AI Market Analysis attempt {attempt+1} failed: {e}")
+                    await asyncio.sleep(1)
+            
+            raise last_exception
             
         except Exception as e:
             logger.error(f"AI Market Analysis failed: {e}")
