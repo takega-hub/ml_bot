@@ -536,6 +536,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
             active_mode = config.get("mode", "single") if config else "single"
             
+            # Если стратегия запущена прямо сейчас в trading_loop, возьмем режим оттуда
+            if trading_loop and getattr(trading_loop, "strategies", None):
+                strategy = trading_loop.strategies.get(symbol)
+                if strategy:
+                     if getattr(strategy, "predict_combined", None):
+                         active_mode = "mtf"
+                     else:
+                         active_mode = "single"
+
             # Single Info
             single_path = state.symbol_models.get(symbol)
             if config and config.get("mode") == "single":
@@ -552,6 +561,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             mtf_info = {"model_1h": None, "model_15m": None, "updated": None}
             m1h_path = config.get("model_1h_path") if config else None
             m15m_path = config.get("model_15m_path") if config else None
+            
+            # Если MTF активен в trading_loop, берем пути оттуда, так как они самые точные
+            if active_mode == "mtf" and trading_loop and getattr(trading_loop, "strategies", None):
+                strategy = trading_loop.strategies.get(symbol)
+                if strategy:
+                    m1h_path = getattr(strategy, "model_1h_path", m1h_path)
+                    m15m_path = getattr(strategy, "model_15m_path", m15m_path)
             
             if m1h_path and m15m_path:
                 p1h = Path(m1h_path)
