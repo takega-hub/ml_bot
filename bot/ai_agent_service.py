@@ -41,14 +41,7 @@ class AIAgentService:
         self.supabase_url = os.getenv("SUPABASE_URL")
         self.supabase_key = os.getenv("SUPABASE_KEY")
         
-        if HAS_SUPABASE and self.supabase_url and self.supabase_key:
-            try:
-                self.supabase = create_client(self.supabase_url, self.supabase_key)
-                logger.info("Supabase client initialized for chat history.")
-            except Exception as e:
-                logger.error(f"Failed to initialize Supabase: {e}")
-        else:
-            logger.warning(f"Supabase skipped: HAS_SUPABASE={HAS_SUPABASE}, URL={bool(self.supabase_url)}, KEY={bool(self.supabase_key)}")
+        self._init_supabase()
 
         # Debug logging for API Key (masked)
         if self.api_key:
@@ -70,6 +63,26 @@ class AIAgentService:
              logger.warning("AI Agent disabled: openai module missing")
         else:
             logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
+
+    def _init_supabase(self):
+        """Attempts to initialize Supabase client."""
+        if self.supabase:
+            return
+
+        # Reload env vars to be sure
+        self.supabase_url = self.supabase_url or os.getenv("SUPABASE_URL")
+        self.supabase_key = self.supabase_key or os.getenv("SUPABASE_KEY")
+
+        if HAS_SUPABASE and self.supabase_url and self.supabase_key:
+            try:
+                self.supabase = create_client(self.supabase_url, self.supabase_key)
+                logger.info("Supabase client initialized.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase: {e}")
+        else:
+             # Only log if we have partial config to avoid noise if user doesn't want supabase
+             if self.supabase_url or self.supabase_key:
+                 logger.warning(f"Supabase init skipped: HAS_SUPABASE={HAS_SUPABASE}, URL={bool(self.supabase_url)}, KEY={bool(self.supabase_key)}")
 
     def _load_risk_state(self) -> Dict[str, Any]:
         """Loads the last risk analysis state from file."""
@@ -366,6 +379,9 @@ class AIAgentService:
 
     async def _save_chat_message(self, role: str, content: str):
         """Saves a chat message to Supabase."""
+        if not self.supabase:
+            self._init_supabase()
+            
         if not self.supabase:
             logger.warning("Supabase client not initialized, skipping save.")
             return
