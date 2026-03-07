@@ -1398,53 +1398,53 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         return {"ok": True, "closed_positions": closed, "message": "Bot stopped and positions closed"}
 
     class ChatBody(BaseModel):
-    message: str
+        message: str
 
-@app.get("/api/ai/chat/history", dependencies=[Depends(verify_api_key)])
-async def get_chat_history(limit: int = 50):
-    """Возвращает историю чата."""
-    try:
-        history = await ai_agent._get_chat_history(limit)
-        return {"history": history}
-    except Exception as e:
-        logger.error(f"Chat history error: {e}")
-        return {"history": []}
+    @app.get("/api/ai/chat/history", dependencies=[Depends(verify_api_key)])
+    async def get_chat_history(limit: int = 50):
+        """Возвращает историю чата."""
+        try:
+            history = await ai_agent._get_chat_history(limit)
+            return {"history": history}
+        except Exception as e:
+            logger.error(f"Chat history error: {e}")
+            return {"history": []}
 
-@app.post("/api/ai/chat", dependencies=[Depends(verify_api_key)])
-async def post_chat(body: ChatBody):
-    """
-    Эндпоинт для чата с AI-агентом.
-    Агент получает доступ к логам, состоянию и настройкам.
-    """
-    try:
-        # Read last 20 lines of main log
-        log_lines = []
-        log_path = PROJECT_ROOT / "logs" / "bot.log"
-        if log_path.exists():
-            try:
-                # Efficiently read last lines
-                import collections
-                with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    log_lines = collections.deque(f, maxlen=20)
-                log_lines = list(log_lines)
-            except Exception:
-                pass
-        
-        # Collect context
-        context = {
-            "risk_settings": _risk_to_dict(settings.risk),
-            "active_positions": len(state.active_positions),
-            "open_orders": len(state.open_orders),
-            "recent_trades": [t.to_dict() for t in state.trades[-5:]],
-            "bot_status": "RUNNING" if state.is_running else "STOPPED",
-            "last_notification": state.notifications[-1] if state.notifications else "None"
-        }
-        
-        response = await ai_agent.chat_with_user(body.message, context, log_lines)
-        return {"response": response}
-    except Exception as e:
-        logger.error(f"Chat error: {e}", exc_info=True)
-        return {"response": f"Error processing request: {str(e)}"}
+    @app.post("/api/ai/chat", dependencies=[Depends(verify_api_key)])
+    async def post_chat(body: ChatBody):
+        """
+        Эндпоинт для чата с AI-агентом.
+        Агент получает доступ к логам, состоянию и настройкам.
+        """
+        try:
+            # Read last 20 lines of main log
+            log_lines = []
+            log_path = PROJECT_ROOT / "logs" / "bot.log"
+            if log_path.exists():
+                try:
+                    # Efficiently read last lines
+                    import collections
+                    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        log_lines = collections.deque(f, maxlen=20)
+                    log_lines = list(log_lines)
+                except Exception:
+                    pass
+            
+            # Collect context
+            context = {
+                "risk_settings": _risk_to_dict(settings.risk),
+                "active_positions": len(state.active_positions),
+                "open_orders": len(state.open_orders),
+                "recent_trades": [t.to_dict() for t in state.trades[-5:]],
+                "bot_status": "RUNNING" if state.is_running else "STOPPED",
+                "last_notification": state.notifications[-1] if state.notifications else "None"
+            }
+            
+            response = await ai_agent.chat_with_user(body.message, context, log_lines)
+            return {"response": response}
+        except Exception as e:
+            logger.error(f"Chat error: {e}", exc_info=True)
+            return {"response": f"Error processing request: {str(e)}"}
 
 # --- AI Agent Endpoints ---
     def _parse_trades_from_log(limit: int = 50) -> List[Dict[str, Any]]:
