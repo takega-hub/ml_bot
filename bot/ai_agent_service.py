@@ -296,6 +296,7 @@ class AIAgentService:
             script_path = project_root / "retrain_ml_optimized.py"
             
             if not script_path.exists():
+                 logger.error(f"Experiment script not found: {script_path}")
                  return {"ok": False, "error": f"Script not found: {script_path.name}"}
             
             # Define parameters based on type
@@ -315,13 +316,17 @@ class AIAgentService:
             
             cmd = [sys.executable, str(script_path), "--symbol", symbol, "--model-suffix", suffix] + params
             
+            logger.info(f"Starting experiment: {' '.join(cmd)}")
+            
             # Run in background
             process = subprocess.Popen(
                 cmd,
                 cwd=str(project_root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                encoding='utf-8', # Ensure encoding is set
+                errors='replace'
             )
             
             return {
@@ -334,5 +339,5 @@ class AIAgentService:
             }
             
         except Exception as e:
-            logger.error(f"Failed to start experiment: {e}")
+            logger.error(f"Failed to start experiment: {e}", exc_info=True)
             return {"ok": False, "error": str(e)}

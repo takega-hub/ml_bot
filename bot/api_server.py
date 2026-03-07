@@ -1548,14 +1548,22 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     def post_start_research(body: ResearchBody):
         """Запускает эксперимент (Research Agent)."""
         symbol = body.symbol.upper()
-        res = ai_agent.start_research_experiment(symbol, body.type)
-        if not res.get("ok"):
-             raise HTTPException(status_code=500, detail=res.get("error"))
-        
-        if tg_bot:
-             asyncio.create_task(tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}"))
-             
-        return res
+        try:
+            res = ai_agent.start_research_experiment(symbol, body.type)
+            if not res.get("ok"):
+                 error_msg = res.get("error", "Unknown error")
+                 logger.error(f"Research start failed for {symbol}: {error_msg}")
+                 raise HTTPException(status_code=500, detail=error_msg)
+            
+            if tg_bot:
+                 asyncio.create_task(tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}"))
+                 
+            return res
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Research endpoint error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
     def get_research_status():
