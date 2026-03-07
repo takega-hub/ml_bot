@@ -47,6 +47,8 @@ class AIAgentService:
                 logger.info("Supabase client initialized for chat history.")
             except Exception as e:
                 logger.error(f"Failed to initialize Supabase: {e}")
+        else:
+            logger.warning(f"Supabase skipped: HAS_SUPABASE={HAS_SUPABASE}, URL={bool(self.supabase_url)}, KEY={bool(self.supabase_key)}")
 
         # Debug logging for API Key (masked)
         if self.api_key:
@@ -365,8 +367,10 @@ class AIAgentService:
     async def _save_chat_message(self, role: str, content: str):
         """Saves a chat message to Supabase."""
         if not self.supabase:
+            logger.warning("Supabase client not initialized, skipping save.")
             return
 
+        logger.info(f"Saving chat message to Supabase: {role} - {content[:20]}...")
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: 
@@ -374,8 +378,9 @@ class AIAgentService:
                 .insert({"role": role, "content": content})
                 .execute()
             )
+            logger.info("Chat message saved successfully.")
         except Exception as e:
-            logger.warning(f"Failed to save chat message: {e}")
+            logger.error(f"Failed to save chat message: {e}", exc_info=True)
 
     async def chat_with_user(self, message: str, context: Dict[str, Any], logs: List[str]) -> str:
         """
