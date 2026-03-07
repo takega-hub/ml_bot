@@ -478,6 +478,11 @@ class AIAgentService:
             data_15m = self._load_recent_candles(symbol, "15m", limit=15)
             data_1h = self._load_recent_candles(symbol, "1h", limit=15)
             market_context = f"\n=== Market Data for {symbol} (CSV History) ===\n{data_15m}\n{data_1h}\n"
+        else:
+            # If no symbol found but user asks about market/candles, give a hint
+            keywords = ["СВЕЧ", "CANDLE", "MARKET", "РЫНОК", "ЦЕНА", "PRICE", "ПРОГНОЗ", "FORECAST", "ANALYSIS", "АНАЛИЗ"]
+            if any(k in message.upper() for k in keywords):
+                market_context = "\n[SYSTEM NOTE: User asked about market/candles but didn't provide a symbol. Tell them you can analyze it if they provide a pair like BTCUSDT.]\n"
         
         log_text = "".join(logs)
         context_str = json.dumps(context, indent=2, default=str)
@@ -485,6 +490,9 @@ class AIAgentService:
         prompt = f"""
         Ты — умный ассистент торгового бота.
         Твоя цель: помогать пользователю понимать, что происходит с ботом, анализировать логи и давать советы.
+        
+        ВАЖНО: У тебя ЕСТЬ доступ к историческим данным свечей (CSV), если пользователь укажет конкретную торговую пару (например, BTCUSDT).
+        Если пользователь спрашивает, есть ли у тебя доступ к данным свечей, отвечай: "Да, я могу загрузить и проанализировать данные свечей, если вы укажете конкретную пару (например, BTCUSDT)".
         
         Контекст бота:
         {context_str}
