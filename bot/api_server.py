@@ -455,6 +455,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     @app.put("/api/risk", dependencies=[Depends(verify_api_key)])
     def put_risk(body: Dict[str, Any] = Body(...)):
+        # Capture old settings for history tracking
+        old_settings = _risk_to_dict(settings.risk)
+        
         risk = settings.risk
         for key, val in body.items():
             if hasattr(risk, key):
@@ -466,10 +469,29 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     if val >= 1:
                         val = val / 100.0
                 setattr(risk, key, val)
+        
+        # Capture new settings
+        new_settings = _risk_to_dict(risk)
+        
         risk_file = PROJECT_ROOT / "risk_settings.json"
         with open(risk_file, "w", encoding="utf-8") as f:
-            json.dump(_risk_to_dict(risk), f, indent=2, ensure_ascii=False)
-        return {"ok": True, "risk": _risk_to_dict(risk)}
+            json.dump(new_settings, f, indent=2, ensure_ascii=False)
+            
+        # Notify AI Agent about changes
+        try:
+             # Get total trade count to track observation period
+             total_trades = len(state.trades)
+             # Pass old and new settings to record history
+             ai_agent.on_risk_settings_updated(total_trades, old_settings, new_settings)
+        except Exception as e:
+             logger.error(f"Failed to notify AI agent about risk update: {e}")
+             
+        return {"ok": True, "risk": new_settings}
+
+    @app.get("/api/ai/risk_history", dependencies=[Depends(verify_api_key)])
+    def get_ai_risk_history():
+        """Returns the history of risk setting changes."""
+        return {"history": ai_agent.get_risk_history()}
 
     # --- ML settings (read + write) ---
     def _ml_to_dict(m):

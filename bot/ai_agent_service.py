@@ -50,6 +50,69 @@ class AIAgentService:
         else:
             logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
 
+    def _load_risk_state(self) -> Dict[str, Any]:
+        """Loads the last risk analysis state from file."""
+        state_path = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
+        if state_path.exists():
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load risk state: {e}")
+        return {}
+
+    def _save_risk_state(self, state: Dict[str, Any]):
+        """Saves the risk analysis state to file."""
+        state_path = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
+        try:
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save risk state: {e}")
+
+    def get_risk_history(self) -> List[Dict[str, Any]]:
+        """Returns the history of risk setting changes."""
+        state = self._load_risk_state()
+        history = state.get("history", [])
+        # Sort by timestamp descending (newest first)
+        return sorted(history, key=lambda x: x.get("timestamp", ""), reverse=True)
+
+    def on_risk_settings_updated(self, current_trades_count: int, old_settings: Dict[str, Any] = None, new_settings: Dict[str, Any] = None):
+        """Called when risk settings are updated by user."""
+        from datetime import datetime
+        state = self._load_risk_state()
+        
+        # Update last update info
+        state["last_update_trade_count"] = current_trades_count
+        state["last_update_time"] = datetime.now().isoformat()
+        state["status"] = "monitoring"
+        
+        # Record history
+        if old_settings and new_settings:
+            changes = {}
+            for k, v in new_settings.items():
+                if k in old_settings and old_settings[k] != v:
+                    changes[k] = {"old": old_settings[k], "new": v}
+            
+            if changes:
+                history_entry = {
+                    "timestamp": state["last_update_time"],
+                    "trade_count": current_trades_count,
+                    "changes": changes,
+                    "full_snapshot": new_settings
+                }
+                
+                if "history" not in state:
+                    state["history"] = []
+                
+                # Keep last 20 changes
+                state["history"].append(history_entry)
+                if len(state["history"]) > 20:
+                    state["history"] = state["history"][-20:]
+                    
+        self._save_risk_state(state)
+        logger.info(f"AI Risk Agent: Entered monitoring mode at trade count {current_trades_count}. Changes recorded: {len(changes) if 'changes' in locals() else 0}")
+
     async def analyze_risk_settings(self, trades: List[Dict[str, Any]], current_risk: Dict[str, Any]) -> Dict[str, Any]:
         """
         Анализирует историю сделок и текущие настройки риска.
@@ -57,6 +120,26 @@ class AIAgentService:
         """
         if not self.client:
             return {"error": "AI Agent not configured"}
+
+        # Check monitoring status
+        state = self._load_risk_state()
+        last_count = state.get("last_update_trade_count", 0)
+        current_count = len(trades)
+        
+        # Minimum trades required to evaluate new settings
+        MIN_TRADES_TO_EVALUATE = 10 
+        
+        trades_diff = current_count - last_count
+        
+        if trades_diff < MIN_TRADES_TO_EVALUATE and state.get("status") == "monitoring":
+            remaining = MIN_TRADES_TO_EVALUATE - trades_diff
+            return {
+                "analysis": f"Настройки были недавно изменены. Агент наблюдает за результатами. Необходимо еще {remaining} сделок для нового анализа.",
+                "suggestions": [],
+                "risk_score": 85, # Neutral score while waiting
+                "status": "monitoring",
+                "progress": trades_diff / MIN_TRADES_TO_EVALUATE
+            }
 
         # Prepare context
         recent_trades = trades[-50:] if len(trades) > 50 else trades
@@ -70,6 +153,14 @@ class AIAgentService:
                 "duration": t.get("duration_minutes", 0)
             })
             
+        # Prepare history context
+        history_context = ""
+        if "history" in state and state["history"]:
+            history_context = "История изменений настроек (последние 5):\n"
+            for entry in state["history"][-5:]:
+                changes_str = ", ".join([f"{k}: {v['old']} -> {v['new']}" for k, v in entry["changes"].items()])
+                history_context += f"- Trade #{entry['trade_count']}: {changes_str}\n"
+        
         prompt = f"""
         Ты — профессиональный риск-менеджер в алгоритмическом трейдинге.
         
@@ -79,12 +170,14 @@ class AIAgentService:
         Текущие настройки риска (JSON):
         {json.dumps(current_risk, indent=2)}
         
+        {history_context}
+        
         История сделок (JSON, последние 50):
         {json.dumps(trades_summary, indent=2)}
         
         Ответь строго в формате JSON:
         {{
-            "analysis": "Твое текстовое резюме анализа (макс 100 слов).",
+            "analysis": "Твое текстовое резюме анализа (макс 100 слов). Учитывай историю изменений, если она есть.",
             "suggestions": [
                 {{
                     "setting_key": "stop_loss_pct",
