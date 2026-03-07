@@ -3,9 +3,24 @@ import json
 import logging
 import asyncio
 from typing import Dict, Any, List, Optional
-from openai import OpenAI
+from pathlib import Path
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+# Explicitly load .env to ensure keys are available
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=True)
+else:
+    logger.warning(f".env file not found at {env_path}")
+
+try:
+    from openai import OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+    logger.warning("OpenAI library not installed. AI Agent features will be disabled. Run 'pip install openai'")
 
 class AIAgentService:
     def __init__(self, api_key: str = None, model: str = "anthropic/claude-3.5-sonnet"):
@@ -14,7 +29,14 @@ class AIAgentService:
         self.base_url = "https://openrouter.ai/api/v1"
         self.client = None
         
+        # Debug logging for API Key (masked)
         if self.api_key:
+            masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}"
+            logger.info(f"AI Agent: API Key found ({masked_key})")
+        else:
+            logger.warning("AI Agent: API Key NOT found in environment or arguments")
+
+        if self.api_key and HAS_OPENAI:
             try:
                 self.client = OpenAI(
                     base_url=self.base_url,
@@ -23,6 +45,8 @@ class AIAgentService:
                 logger.info(f"AI Agent initialized with model: {self.model}")
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI client: {e}")
+        elif not HAS_OPENAI:
+             logger.warning("AI Agent disabled: openai module missing")
         else:
             logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
 
@@ -97,14 +121,23 @@ class AIAgentService:
             
         except Exception as e:
             logger.error(f"AI Risk Analysis failed: {e}")
-            return {"error": str(e)}
+            return {
+                "analysis": f"Ошибка анализа: {str(e)}. Проверьте настройки прокси/VPN.",
+                "suggestions": [],
+                "risk_score": 0
+            }
 
     async def analyze_market_sentiment(self, symbol: str, kline_data: List[Dict[str, Any]], indicators: Dict[str, float]) -> Dict[str, Any]:
         """
         Анализирует рыночные данные и дает комментарий по ситуации.
         """
         if not self.client:
-            return {"error": "AI Agent not configured"}
+            return {
+                "trend": "neutral",
+                "volatility": "normal",
+                "advice": "AI Agent not configured (OpenAI/OpenRouter key missing).",
+                "confidence": 0
+            }
             
         prompt = f"""
         Ты — AI трейдер. Проанализируй рынок {symbol} на основе свечей и индикаторов.
@@ -148,7 +181,12 @@ class AIAgentService:
             
         except Exception as e:
             logger.error(f"AI Market Analysis failed: {e}")
-            return {"error": str(e)}
+            return {
+                "trend": "neutral",
+                "volatility": "normal",
+                "advice": f"Ошибка анализа: {str(e)}",
+                "confidence": 0
+            }
 
     def start_research_experiment(self, symbol: str, experiment_type: str) -> Dict[str, Any]:
         """
