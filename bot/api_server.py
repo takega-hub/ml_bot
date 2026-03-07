@@ -1376,19 +1376,70 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         return {"ok": True, "closed_positions": closed, "message": "Bot stopped and positions closed"}
 
     # --- AI Agent Endpoints ---
+    def _parse_trades_from_log(limit: int = 50) -> List[Dict[str, Any]]:
+        """Parses trades.log for historical trade data."""
+        log_path = PROJECT_ROOT / "logs" / "trades.log"
+        if not log_path.exists():
+            return []
+            
+        trades = []
+        import re
+        # Regex for TRADE CLOSE lines:
+        # 2026-02-18 14:06:25 - trades - INFO - TRADE CLOSE: BNBUSDT | Exit: 611.0 | PnL: $-0.16 (-3.31%) | Reason: SL
+        close_pattern = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*TRADE CLOSE: (\w+) \| Exit: ([\d.]+) \| PnL: \$([-?\d.]+) \(([-?\d.]+)%\) \| Reason: (.*)")
+        
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                # Read from end efficiently would be better, but for <10MB file readlines is fine
+                lines = f.readlines()
+                
+            for line in reversed(lines):
+                if len(trades) >= limit:
+                    break
+                match = close_pattern.search(line)
+                if match:
+                    timestamp, symbol, exit_price, pnl_usd, pnl_pct, reason = match.groups()
+                    trades.append({
+                        "symbol": symbol,
+                        "pnl_usd": float(pnl_usd),
+                        "pnl_pct": float(pnl_pct),
+                        "exit_reason": reason.strip(),
+                        "exit_time": timestamp,
+                        "status": "closed",
+                        "side": "Unknown" # Side is in OPEN log, simplified here
+                    })
+        except Exception as e:
+            logger.error(f"Error parsing trades.log: {e}")
+            
+        return trades
+
     @app.get("/api/ai/analyze_risks", dependencies=[Depends(verify_api_key)])
     async def get_ai_risk_analysis():
         """
         AI анализирует последние 50 сделок и предлагает изменения в risk_settings.
         """
-        closed_trades = [t for t in state.trades if t.status == "closed"]
-        if not closed_trades:
-            return {"analysis": "Нет закрытых сделок для анализа.", "suggestions": [], "risk_score": 100}
-            
-        # Convert trade objects to dicts
         from dataclasses import asdict
-        trades_data = [asdict(t) for t in closed_trades]
+
+        # 1. Try to get from memory state first
+        closed_trades = [t for t in state.trades if t.status == "closed"]
         
+        # 2. If memory is empty or low, try to parse from logs
+        if len(closed_trades) < 5:
+             logger.info("Few trades in memory, parsing trades.log for AI analysis...")
+             log_trades = _parse_trades_from_log(limit=50)
+             if log_trades:
+                 if not closed_trades:
+                     trades_data = log_trades
+                 else:
+                     trades_data = [asdict(t) for t in closed_trades] + log_trades
+             else:
+                 trades_data = [asdict(t) for t in closed_trades]
+        else:
+             trades_data = [asdict(t) for t in closed_trades]
+
+        if not trades_data:
+            return {"analysis": "Нет закрытых сделок для анализа (ни в памяти, ни в логах).", "suggestions": [], "risk_score": 100}
+            
         current_risk = _risk_to_dict(settings.risk)
         
         result = await ai_agent.analyze_risk_settings(trades_data, current_risk)
@@ -1426,22 +1477,36 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             # For simplicity, let's just pass raw OHLCV to AI, it's good at it.
             # But adding SMA/RSI helps.
             import pandas as pd
-            import pandas_ta as ta
+            try:
+                import pandas_ta as ta
+                has_ta = True
+            except ImportError:
+                has_ta = False
+                logger.warning("pandas_ta not installed, skipping indicators")
             
             df = pd.DataFrame(ohlcv)
             # Calculate simple indicators
-            if len(df) > 14:
-                df['rsi'] = ta.rsi(df['close'], length=14)
-                df['sma_20'] = ta.sma(df['close'], length=20)
-                df['sma_50'] = ta.sma(df['close'], length=50)
-                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            if has_ta and len(df) > 50:
+                try:
+                    df['rsi'] = ta.rsi(df['close'], length=14)
+                    df['sma_20'] = ta.sma(df['close'], length=20)
+                    df['sma_50'] = ta.sma(df['close'], length=50)
+                    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+                except Exception as e:
+                     logger.warning(f"Error calculating indicators: {e}")
             
             latest = df.iloc[-1]
+            
+            def _safe_val(s, key):
+                v = s.get(key, 0)
+                if pd.isna(v): return 0.0
+                return float(v)
+
             indicators = {
-                "rsi": float(latest.get('rsi', 0)),
-                "sma_20": float(latest.get('sma_20', 0)),
-                "sma_50": float(latest.get('sma_50', 0)),
-                "atr": float(latest.get('atr', 0)),
+                "rsi": _safe_val(latest, 'rsi'),
+                "sma_20": _safe_val(latest, 'sma_20'),
+                "sma_50": _safe_val(latest, 'sma_50'),
+                "atr": _safe_val(latest, 'atr'),
                 "close_price": float(latest['close'])
             }
             

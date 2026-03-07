@@ -199,18 +199,28 @@ class AIAgentService:
             from pathlib import Path
             
             project_root = Path(__file__).resolve().parent.parent
-            script_path = project_root / "train_model.py"
+            # Use the optimized retraining script
+            script_path = project_root / "retrain_ml_optimized.py"
+            
+            if not script_path.exists():
+                 return {"ok": False, "error": f"Script not found: {script_path.name}"}
             
             # Define parameters based on type
             params = []
             suffix = f"_{experiment_type}_exp"
             
+            # Map types to supported arguments
             if experiment_type == 'aggressive':
-                params = ["--lookback", "60", "--atr-period", "10"] # Shorter memory, faster reaction
+                # 15m interval, standard optimized logic
+                params = ["--interval", "15m"] 
             elif experiment_type == 'conservative':
-                params = ["--lookback", "180", "--atr-period", "21"] # Longer memory, slower reaction
+                # 1h interval for more stable signals
+                params = ["--interval", "1h"]
+            else:
+                # Balanced - default 15m
+                params = ["--interval", "15m"]
             
-            cmd = [sys.executable, str(script_path), "--symbol", symbol, "--suffix", suffix] + params
+            cmd = [sys.executable, str(script_path), "--symbol", symbol, "--model-suffix", suffix] + params
             
             # Run in background
             process = subprocess.Popen(
@@ -227,7 +237,7 @@ class AIAgentService:
                 "symbol": symbol, 
                 "type": experiment_type,
                 "model_suffix": suffix,
-                "message": f"Experiment {experiment_type} started for {symbol}"
+                "message": f"Experiment {experiment_type} started for {symbol} (PID: {process.pid})"
             }
             
         except Exception as e:
