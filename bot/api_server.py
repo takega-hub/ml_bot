@@ -538,13 +538,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     def _get_mtf_candidates(symbol: str) -> List[Dict[str, Any]]:
         try:
             import pandas as pd
-            # Find latest comparison file
+            # Find latest comparison files
             comp_files = sorted(list(PROJECT_ROOT.glob("ml_models_comparison_*.csv")), reverse=True)
             if not comp_files:
                 return []
             
-            latest_file = comp_files[0]
-            df = pd.read_csv(latest_file)
+            # Iterate through files to find one that contains the symbol
+            df = None
+            for file_path in comp_files:
+                try:
+                    temp_df = pd.read_csv(file_path)
+                    if symbol in temp_df["symbol"].values:
+                        df = temp_df
+                        # Found the latest file containing this symbol
+                        break
+                except Exception:
+                    continue
+            
+            if df is None or df.empty:
+                return []
             
             # Filter by symbol
             df = df[df["symbol"] == symbol]
@@ -564,25 +576,35 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 return []
                 
             def make_cand(h_row, m_row, label):
+                 h_path = str(h_row["model_path"])
+                 m_path = str(m_row["model_path"])
+                 
+                 # Check existence
+                 if not Path(h_path).exists() or not Path(m_path).exists():
+                     return None
+                     
                  return {
                     "name": label,
-                    "model_1h": str(h_row["model_path"]),
-                    "model_15m": str(m_row["model_path"]),
+                    "model_1h": h_path,
+                    "model_15m": m_path,
                     "pnl_1h": h_row["total_pnl_pct"],
                     "pnl_15m": m_row["total_pnl_pct"],
                     "total_pnl": h_row["total_pnl_pct"] + m_row["total_pnl_pct"]
                 }
 
             # Combo 1: Best of both
-            candidates.append(make_cand(top_1h[0], top_15m[0], f"Best Combo"))
+            c1 = make_cand(top_1h[0], top_15m[0], f"Best Combo")
+            if c1: candidates.append(c1)
             
             # Combo 2: Best 1h + 2nd 15m
             if len(top_15m) > 1:
-                 candidates.append(make_cand(top_1h[0], top_15m[1], f"Alt Combo 1"))
+                 c2 = make_cand(top_1h[0], top_15m[1], f"Alt Combo 1")
+                 if c2: candidates.append(c2)
             
             # Combo 3: 2nd 1h + Best 15m
             if len(top_1h) > 1:
-                 candidates.append(make_cand(top_1h[1], top_15m[0], f"Alt Combo 2"))
+                 c3 = make_cand(top_1h[1], top_15m[0], f"Alt Combo 2")
+                 if c3: candidates.append(c3)
                 
             return candidates
             
@@ -646,6 +668,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         real_stats[t.model_name]["wins"] += 1
 
         list_models = []
+        models_1h = []
+        models_15m = []
+
         for i, mp in enumerate(models):
             mp_str = str(mp)
             m_name = Path(mp).stem
@@ -661,7 +686,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "total_trades": r_stats["count"]
             }
 
-            list_models.append({
+            entry = {
                 "index": i,
                 "path": mp_str,
                 "name": m_name,
@@ -670,17 +695,45 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "is_active_15m": mp_str == current_15m,
                 "test": res_test,
                 "real": res_real,
-            })
+            }
+            list_models.append(entry)
+            
+            if "_1h" in m_name or "1h" in m_name:
+                models_1h.append(entry)
+            elif "_15m" in m_name or "15m" in m_name:
+                models_15m.append(entry)
             
         return {
             "symbol": symbol, 
-            "models": list_models, 
+            "models": list_models,
+            "models_1h": models_1h,
+            "models_15m": models_15m,
             "mode": mode,
             "current_single": current_single,
             "current_1h": current_1h,
             "current_15m": current_15m,
             "mtf_candidates": mtf_candidates
         }
+
+    @app.post("/api/models/{symbol}/apply_best", dependencies=[Depends(verify_api_key)])
+    def post_apply_best_mtf(symbol: str):
+        symbol = symbol.upper()
+        candidates = _get_mtf_candidates(symbol)
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No MTF candidates found")
+            
+        best = candidates[0] # First one is "Best Combo"
+        
+        config = {
+            "mode": "mtf",
+            "model_1h_path": best["model_1h"],
+            "model_15m_path": best["model_15m"]
+        }
+        
+        state.set_strategy_config(symbol, config)
+        logger.info(f"Applied Best MTF for {symbol}: {best['name']}")
+        
+        return {"ok": True, "applied": best}
 
     class ApplyModelBody(BaseModel):
         model_path: Optional[str] = None
@@ -945,6 +998,98 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
         background_tasks.add_task(_run_retrain_task)
         return {"ok": True, "symbol": sym, "message": "Retrain started in background"}
+
+    # --- Optimization ---
+    class OptimizeBody(BaseModel):
+        symbols: Optional[List[str]] = None
+        days: int = 30
+        skip_training: bool = False
+        skip_comparison: bool = False
+        skip_mtf: bool = False
+
+    @app.post("/api/optimization/run", dependencies=[Depends(verify_api_key)])
+    def post_optimize(body: OptimizeBody, background_tasks: BackgroundTasks):
+        """Запуск полной оптимизации стратегий."""
+        script = PROJECT_ROOT / "auto_strategy_optimizer.py"
+        if not script.exists():
+            raise HTTPException(status_code=501, detail="auto_strategy_optimizer.py not found")
+            
+        def _run_optimizer_task():
+             try:
+                 syms = ",".join(body.symbols) if body.symbols else ""
+                 if tg_bot:
+                     asyncio.create_task(tg_bot.send_notification(f"🚀 Optimization started via Mobile App..."))
+                 state.add_notification(f"Started strategy optimization", "info")
+                 
+                 cmd = [sys.executable, str(script), "--days", str(body.days)]
+                 if syms:
+                     cmd.extend(["--symbols", syms])
+                 if body.skip_training:
+                     cmd.append("--skip-training")
+                 if body.skip_comparison:
+                     cmd.append("--skip-comparison")
+                 if body.skip_mtf:
+                     cmd.append("--skip-mtf-testing")
+                 
+                 # Run synchronously (blocking thread)
+                 result = subprocess.run(
+                     cmd,
+                     cwd=str(PROJECT_ROOT),
+                     capture_output=True,
+                     text=True,
+                     encoding='utf-8',
+                     errors='replace'
+                 )
+                 
+                 if result.returncode == 0:
+                     logger.info(f"Optimization finished successfully")
+                     if tg_bot:
+                         asyncio.create_task(tg_bot.send_notification(f"✅ Strategy optimization completed successfully."))
+                     state.add_notification(f"Optimization completed", "success")
+                 else:
+                     logger.error(f"Optimization failed: {result.stderr}")
+                     if tg_bot:
+                         err_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                         asyncio.create_task(tg_bot.send_notification(f"❌ Optimization failed.\nError: {err_msg}"))
+                     state.add_notification(f"Optimization failed", "error")
+             except Exception as e:
+                 logger.error(f"Optimization exception: {e}")
+                 state.add_notification(f"Optimization error", "error")
+
+        background_tasks.add_task(_run_optimizer_task)
+        return {"ok": True, "message": "Optimization started in background"}
+
+    @app.get("/api/optimization/latest", dependencies=[Depends(verify_api_key)])
+    def get_latest_optimization():
+        """Возвращает последний отчет об оптимизации."""
+        opt_dir = PROJECT_ROOT / "optimization_results"
+        if not opt_dir.exists():
+             return {"found": False}
+        
+        files = sorted(opt_dir.glob("best_strategies_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+             return {"found": False}
+             
+        try:
+            with open(files[0], "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {"found": True, "data": data, "filename": files[0].name, "timestamp": files[0].stat().st_mtime}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/optimization/chart", dependencies=[Depends(verify_api_key)])
+    def get_optimization_chart():
+        """Возвращает последний график сравнения."""
+        from fastapi.responses import FileResponse
+        opt_dir = PROJECT_ROOT / "optimization_results"
+        if not opt_dir.exists():
+             raise HTTPException(status_code=404, detail="No optimization results found")
+        
+        files = sorted(opt_dir.glob("comparison_chart_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not files:
+             raise HTTPException(status_code=404, detail="No chart found")
+             
+        return FileResponse(files[0])
 
     # --- History & stats ---
     @app.get("/api/stats", dependencies=[Depends(verify_api_key)])

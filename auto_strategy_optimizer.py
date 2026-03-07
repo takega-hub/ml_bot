@@ -133,6 +133,7 @@ class StrategyOptimizer:
         self.comparison_results: Dict[str, Optional[str]] = {}  # symbol -> csv_path
         self.mtf_results: Dict[str, Optional[pd.DataFrame]] = {}  # symbol -> DataFrame
         self.best_strategies: Dict[str, Dict[str, Any]] = {}
+        self.comparison_data: Dict[str, Dict[str, float]] = {}  # symbol -> {single_pnl: float, mtf_pnl: float}
         
         # Ошибки
         self.errors: List[Dict[str, Any]] = []
@@ -563,10 +564,17 @@ class StrategyOptimizer:
             best_strategy = None
             best_score = float('-inf')
             
+            # Данные для сравнения
+            mtf_pnl = 0.0
+            single_pnl = 0.0
+            
             # 1. Проверяем MTF комбинации
             if symbol in self.mtf_results and self.mtf_results[symbol] is not None:
                 df_mtf = self.mtf_results[symbol]
                 if not df_mtf.empty:
+                    # Лучшая MTF по PnL (для графика)
+                    mtf_pnl = df_mtf.iloc[0]['total_pnl_pct']
+                    
                     # Выбираем лучшую MTF комбинацию
                     for _, row in df_mtf.iterrows():
                         metrics = {
@@ -606,6 +614,7 @@ class StrategyOptimizer:
                         # Сортируем по total_pnl_pct
                         symbol_15m = symbol_15m.sort_values('total_pnl_pct', ascending=False)
                         best_single = symbol_15m.iloc[0]
+                        single_pnl = best_single.get('total_pnl_pct', 0)
                         
                         single_metrics = {
                             'total_pnl_pct': best_single.get('total_pnl_pct', 0),
@@ -633,7 +642,55 @@ class StrategyOptimizer:
                           f"(score: {best_score:.2f}, PnL: {best_strategy['metrics'].get('total_pnl_pct', 0):.2f}%)")
             else:
                 logger.warning(f"[SELECTION] {symbol}: Не удалось выбрать стратегию")
+                
+            # Сохраняем данные для графика
+            self.comparison_data[symbol] = {
+                'single_pnl': single_pnl,
+                'mtf_pnl': mtf_pnl
+            }
     
+    def generate_comparison_chart(self, output_file: Path):
+        """Generates a bar chart comparing Best Single vs Best MTF strategies per symbol"""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            if not self.comparison_data:
+                logger.warning("[CHART] Нет данных для построения графика сравнения")
+                return
+
+            symbols = sorted(list(self.comparison_data.keys()))
+            single_pnls = [self.comparison_data[s]['single_pnl'] for s in symbols]
+            mtf_pnls = [self.comparison_data[s]['mtf_pnl'] for s in symbols]
+            
+            x = np.arange(len(symbols))
+            width = 0.35
+            
+            plt.figure(figsize=(12, 6))
+            fig, ax = plt.subplots(figsize=(12, 6))
+            rects1 = ax.bar(x - width/2, single_pnls, width, label='Single (15m)', color='skyblue')
+            rects2 = ax.bar(x + width/2, mtf_pnls, width, label='MTF (1h+15m)', color='orange')
+            
+            ax.set_ylabel('Total PnL %')
+            ax.set_title('Comparison of Best Single vs MTF Strategies')
+            ax.set_xticks(x)
+            ax.set_xticklabels(symbols)
+            ax.legend()
+            
+            ax.bar_label(rects1, padding=3, fmt='%.1f%%')
+            ax.bar_label(rects2, padding=3, fmt='%.1f%%')
+            
+            fig.tight_layout()
+            plt.savefig(output_file)
+            plt.close()
+            
+            logger.info(f"[CHART] График сравнения сохранен в {output_file}")
+            
+        except ImportError:
+            logger.warning("[CHART] matplotlib не установлен, график не создан")
+        except Exception as e:
+            logger.error(f"[CHART] Ошибка создания графика: {e}")
+
     def save_best_strategies(self) -> Path:
         """Сохраняет лучшие стратегии в JSON файл"""
         output_data = {
@@ -731,6 +788,10 @@ class StrategyOptimizer:
         # Сохранение результатов
         logger.info("\n[СОХРАНЕНИЕ] Сохранение результатов...")
         strategy_file = self.save_best_strategies()
+        
+        # Генерируем график сравнения
+        chart_file = self.output_dir / f"comparison_chart_{self.timestamp}.png"
+        self.generate_comparison_chart(chart_file)
         
         # Отчет
         end_time = datetime.now()
