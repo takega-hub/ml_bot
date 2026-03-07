@@ -239,6 +239,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         logger.error(f"[Mobile API] create_app: ошибка импорта FastAPI: {e}")
         raise ImportError("Установите fastapi и uvicorn: pip install fastapi uvicorn") from e
 
+    # Инициализация AI Agent
+    from bot.ai_agent_service import AIAgentService
+    ai_agent = AIAgentService()
+
     logger.info("[Mobile API] create_app: создание app и middleware...")
     app = FastAPI(title="ML Trading Bot API", version="2.0.0")
     app.add_middleware(
@@ -1370,6 +1374,108 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 except Exception as e:
                     logger.error(f"Emergency close {symbol}: {e}")
         return {"ok": True, "closed_positions": closed, "message": "Bot stopped and positions closed"}
+
+    # --- AI Agent Endpoints ---
+    @app.get("/api/ai/analyze_risks", dependencies=[Depends(verify_api_key)])
+    async def get_ai_risk_analysis():
+        """
+        AI анализирует последние 50 сделок и предлагает изменения в risk_settings.
+        """
+        closed_trades = [t for t in state.trades if t.status == "closed"]
+        if not closed_trades:
+            return {"analysis": "Нет закрытых сделок для анализа.", "suggestions": [], "risk_score": 100}
+            
+        # Convert trade objects to dicts
+        from dataclasses import asdict
+        trades_data = [asdict(t) for t in closed_trades]
+        
+        current_risk = _risk_to_dict(settings.risk)
+        
+        result = await ai_agent.analyze_risk_settings(trades_data, current_risk)
+        return result
+
+    @app.get("/api/ai/market_insight", dependencies=[Depends(verify_api_key)])
+    async def get_ai_market_insight(symbol: str, interval: str = "60"):
+        """
+        AI дает комментарий по рынку на основе свечей и индикаторов.
+        """
+        symbol = symbol.upper()
+        if not bybit_client:
+             raise HTTPException(status_code=501, detail="Exchange client not available")
+             
+        try:
+            # 1. Get Klines
+            kline_resp = bybit_client.get_kline(symbol=symbol, interval=interval, limit=100)
+            if kline_resp.get("retCode") != 0:
+                 raise HTTPException(status_code=400, detail="Failed to get kline data")
+                 
+            klines = kline_resp.get("result", {}).get("list", [])
+            # Convert to OHLCV dicts (sorted old -> new)
+            ohlcv = []
+            for k in reversed(klines): # Bybit returns new -> old
+                ohlcv.append({
+                    "time": int(k[0]),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5])
+                })
+                
+            # 2. Calculate Basic Indicators (using pandas_ta if available or simple math)
+            # For simplicity, let's just pass raw OHLCV to AI, it's good at it.
+            # But adding SMA/RSI helps.
+            import pandas as pd
+            import pandas_ta as ta
+            
+            df = pd.DataFrame(ohlcv)
+            # Calculate simple indicators
+            if len(df) > 14:
+                df['rsi'] = ta.rsi(df['close'], length=14)
+                df['sma_20'] = ta.sma(df['close'], length=20)
+                df['sma_50'] = ta.sma(df['close'], length=50)
+                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            
+            latest = df.iloc[-1]
+            indicators = {
+                "rsi": float(latest.get('rsi', 0)),
+                "sma_20": float(latest.get('sma_20', 0)),
+                "sma_50": float(latest.get('sma_50', 0)),
+                "atr": float(latest.get('atr', 0)),
+                "close_price": float(latest['close'])
+            }
+            
+            # 3. Ask AI
+            insight = await ai_agent.analyze_market_sentiment(symbol, ohlcv, indicators)
+            return insight
+            
+        except Exception as e:
+            logger.error(f"AI Market Insight error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    class ResearchBody(BaseModel):
+        symbol: str
+        type: str = "balanced" # aggressive, conservative, balanced
+
+    @app.post("/api/ai/research/start", dependencies=[Depends(verify_api_key)])
+    def post_start_research(body: ResearchBody):
+        """Запускает эксперимент (Research Agent)."""
+        symbol = body.symbol.upper()
+        res = ai_agent.start_research_experiment(symbol, body.type)
+        if not res.get("ok"):
+             raise HTTPException(status_code=500, detail=res.get("error"))
+        
+        if tg_bot:
+             asyncio.create_task(tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}"))
+             
+        return res
+
+    @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
+    def get_research_status():
+        """Возвращает список активных экспериментов (можно реализовать через PID check)."""
+        # Для простоты пока возвращаем заглушку или сканируем процессы
+        # В реальном проекте лучше хранить состояние экспериментов в БД или файле
+        return {"experiments": []}
 
     return app
 
