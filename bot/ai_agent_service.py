@@ -398,6 +398,54 @@ class AIAgentService:
         except Exception as e:
             logger.error(f"Failed to save chat message: {e}", exc_info=True)
 
+    def _load_recent_candles(self, symbol: str, interval: str = "15m", limit: int = 24) -> str:
+        """Loads recent candle data from CSV in ml_data directory."""
+        try:
+            # Map interval to filename format
+            # Filename example: ADAUSDT_15_cache.csv
+            interval_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+            file_interval = interval_map.get(interval, "15")
+            
+            project_root = Path(__file__).resolve().parent.parent
+            ml_data_dir = project_root / "ml_data"
+            
+            # Try cache file first
+            cache_file = ml_data_dir / f"{symbol}_{file_interval}_cache.csv"
+            
+            target_file = None
+            if cache_file.exists():
+                target_file = cache_file
+            else:
+                # Try to find any file matching pattern
+                files = list(ml_data_dir.glob(f"{symbol}_{file_interval}_*.csv"))
+                if files:
+                    # Sort by modification time, newest first
+                    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    target_file = files[0]
+            
+            if not target_file:
+                return f"No historical data found for {symbol} ({interval})"
+                
+            # Read last N lines
+            lines = []
+            with open(target_file, "r", encoding="utf-8") as f:
+                # Read header
+                header = f.readline().strip()
+                # Read all lines
+                all_lines = f.readlines()
+                
+            last_lines = all_lines[-limit:] if len(all_lines) > limit else all_lines
+            
+            data_str = f"Market Data ({symbol} {interval}, last {len(last_lines)} candles):\n"
+            data_str += header + "\n"
+            data_str += "".join(last_lines)
+            
+            return data_str
+            
+        except Exception as e:
+            logger.error(f"Error loading candles for {symbol}: {e}")
+            return f"Error loading data: {str(e)}"
+
     async def chat_with_user(self, message: str, context: Dict[str, Any], logs: List[str]) -> str:
         """
         Handles chat interaction with the user.
@@ -419,6 +467,18 @@ class AIAgentService:
             for msg in history:
                 history_str += f"{msg['role'].upper()}: {msg['content']}\n"
         
+        # Check for symbol in message (simple regex)
+        import re
+        symbol_match = re.search(r'\b([A-Z0-9]+USDT)\b', message.upper())
+        market_context = ""
+        
+        if symbol_match:
+            symbol = symbol_match.group(1)
+            # Load 15m and 1h data
+            data_15m = self._load_recent_candles(symbol, "15m", limit=15)
+            data_1h = self._load_recent_candles(symbol, "1h", limit=15)
+            market_context = f"\n=== Market Data for {symbol} (CSV History) ===\n{data_15m}\n{data_1h}\n"
+        
         log_text = "".join(logs)
         context_str = json.dumps(context, indent=2, default=str)
         
@@ -432,12 +492,16 @@ class AIAgentService:
         Последние логи:
         {log_text}
         
+        {market_context}
+        
         {history_str}
         
         Вопрос пользователя:
         {message}
         
-        Отвечай кратко, по делу и на русском языке. Если видишь ошибку в логах, объясни её простыми словами и предложи решение.
+        Отвечай кратко, по делу и на русском языке. 
+        Если пользователь спрашивает о рынке или прогнозе по конкретной паре, используй предоставленные исторические данные (Market Data) для анализа тренда и волатильности.
+        Если видишь ошибку в логах, объясни её простыми словами и предложи решение.
         """
         
         try:
@@ -448,7 +512,7 @@ class AIAgentService:
                     {"role": "system", "content": "You are a helpful trading bot assistant."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=500,
+                max_tokens=800,
                 temperature=0.3
             ))
             

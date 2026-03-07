@@ -1404,10 +1404,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     async def get_chat_history(limit: int = 50):
         """Возвращает историю чата."""
         try:
+            logger.info(f"Fetching chat history (limit={limit})...")
             history = await ai_agent._get_chat_history(limit)
+            logger.info(f"Chat history fetched: {len(history)} messages")
             return {"history": history}
         except Exception as e:
-            logger.error(f"Chat history error: {e}")
+            logger.error(f"Chat history error: {e}", exc_info=True)
             return {"history": []}
 
     @app.post("/api/ai/chat", dependencies=[Depends(verify_api_key)])
