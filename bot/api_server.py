@@ -1431,13 +1431,28 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     pass
             
             # Collect context
+            from dataclasses import asdict
+            active_positions_count = len([t for t in state.trades if t.status == "open"])
+            
+            # BotState does not track open orders directly in this version
+            open_orders_count = 0 
+            
+            recent_trades_data = []
+            for t in state.trades[-5:]:
+                try:
+                    # Use asdict for dataclasses
+                    recent_trades_data.append(asdict(t))
+                except Exception:
+                    # Fallback if asdict fails or it's not a dataclass
+                    recent_trades_data.append(str(t))
+
             context = {
                 "risk_settings": _risk_to_dict(settings.risk),
-                "active_positions": len(state.active_positions),
-                "open_orders": len(state.open_orders),
-                "recent_trades": [t.to_dict() for t in state.trades[-5:]],
+                "active_positions": active_positions_count,
+                "open_orders": open_orders_count,
+                "recent_trades": recent_trades_data,
                 "bot_status": "RUNNING" if state.is_running else "STOPPED",
-                "last_notification": state.notifications[-1] if state.notifications else "None"
+                "last_notification": asdict(state.notifications[-1]) if state.notifications else "None"
             }
             
             response = await ai_agent.chat_with_user(body.message, context, log_lines)
