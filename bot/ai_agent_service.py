@@ -22,6 +22,13 @@ except ImportError:
     HAS_OPENAI = False
     logger.warning("OpenAI library not installed. AI Agent features will be disabled. Run 'pip install openai'")
 
+try:
+    from supabase import create_client, Client
+    HAS_SUPABASE = True
+except ImportError:
+    HAS_SUPABASE = False
+    logger.warning("Supabase library not installed. Chat history will not be saved. Run 'pip install supabase'")
+
 class AIAgentService:
     def __init__(self, api_key: str = None, model: str = "anthropic/claude-3.5-sonnet"):
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
@@ -29,6 +36,18 @@ class AIAgentService:
         self.base_url = "https://openrouter.ai/api/v1"
         self.client = None
         
+        # Supabase setup
+        self.supabase: Optional[Client] = None
+        self.supabase_url = os.getenv("SUPABASE_URL")
+        self.supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if HAS_SUPABASE and self.supabase_url and self.supabase_key:
+            try:
+                self.supabase = create_client(self.supabase_url, self.supabase_key)
+                logger.info("Supabase client initialized for chat history.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase: {e}")
+
         # Debug logging for API Key (masked)
         if self.api_key:
             masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}"
@@ -321,6 +340,106 @@ class AIAgentService:
                 "advice": f"Ошибка анализа: {str(e)}",
                 "confidence": 0
             }
+
+    async def _get_chat_history(self, limit: int = 10) -> List[Dict[str, str]]:
+        """Retrieves chat history from Supabase."""
+        if not self.supabase:
+            return []
+        
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: 
+                self.supabase.table("chat_messages")
+                .select("role, content")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            # Reverse to chronological order
+            data = response.data
+            return data[::-1] if data else []
+        except Exception as e:
+            logger.warning(f"Failed to fetch chat history: {e}")
+            return []
+
+    async def _save_chat_message(self, role: str, content: str):
+        """Saves a chat message to Supabase."""
+        if not self.supabase:
+            return
+
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: 
+                self.supabase.table("chat_messages")
+                .insert({"role": role, "content": content})
+                .execute()
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save chat message: {e}")
+
+    async def chat_with_user(self, message: str, context: Dict[str, Any], logs: List[str]) -> str:
+        """
+        Handles chat interaction with the user.
+        """
+        if not self.client:
+            return "AI Agent is not configured (API Key missing)."
+
+        # 1. Save user message (fire and forget task to speed up response, or await if consistency needed)
+        # We await it to ensure order if messages come fast
+        await self._save_chat_message("user", message)
+
+        # 2. Get history
+        history = await self._get_chat_history(limit=10)
+        
+        # Format history for prompt
+        history_str = ""
+        if history:
+            history_str = "История диалога:\n"
+            for msg in history:
+                history_str += f"{msg['role'].upper()}: {msg['content']}\n"
+        
+        log_text = "".join(logs)
+        context_str = json.dumps(context, indent=2, default=str)
+        
+        prompt = f"""
+        Ты — умный ассистент торгового бота.
+        Твоя цель: помогать пользователю понимать, что происходит с ботом, анализировать логи и давать советы.
+        
+        Контекст бота:
+        {context_str}
+        
+        Последние логи:
+        {log_text}
+        
+        {history_str}
+        
+        Вопрос пользователя:
+        {message}
+        
+        Отвечай кратко, по делу и на русском языке. Если видишь ошибку в логах, объясни её простыми словами и предложи решение.
+        """
+        
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful trading bot assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
+                temperature=0.3
+            ))
+            
+            ai_response = response.choices[0].message.content
+            
+            # 3. Save AI response
+            await self._save_chat_message("assistant", ai_response)
+            
+            return ai_response
+        except Exception as e:
+            logger.error(f"Chat failed: {e}")
+            return f"Error: {str(e)}"
 
     def start_research_experiment(self, symbol: str, experiment_type: str) -> Dict[str, Any]:
         """
