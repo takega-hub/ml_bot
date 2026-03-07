@@ -527,12 +527,48 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     # --- Models ---
     @app.get("/api/models", dependencies=[Depends(verify_api_key)])
     def get_models_list():
-        """Текущие модели по активным парам."""
+        """Текущие модели по активным парам с деталями стратегий."""
         out = []
+        from datetime import datetime
+        
         for symbol in state.active_symbols:
-            path = state.symbol_models.get(symbol)
-            name = Path(path).stem if path and Path(path).exists() else None
-            out.append({"symbol": symbol, "model_path": path, "model_name": name})
+            # Get config
+            config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
+            active_mode = config.get("mode", "single") if config else "single"
+            
+            # Single Info
+            single_path = state.symbol_models.get(symbol)
+            if config and config.get("mode") == "single":
+                single_path = config.get("model_path") or single_path
+            
+            single_info = {"name": None, "updated": None}
+            if single_path:
+                p = Path(single_path)
+                if p.exists():
+                    single_info["name"] = p.stem
+                    single_info["updated"] = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
+            
+            # MTF Info
+            mtf_info = {"model_1h": None, "model_15m": None, "updated": None}
+            m1h_path = config.get("model_1h_path") if config else None
+            m15m_path = config.get("model_15m_path") if config else None
+            
+            if m1h_path and m15m_path:
+                p1h = Path(m1h_path)
+                p15m = Path(m15m_path)
+                if p1h.exists() and p15m.exists():
+                    mtf_info["model_1h"] = p1h.stem
+                    mtf_info["model_15m"] = p15m.stem
+                    # Use latest update time
+                    ts = max(p1h.stat().st_mtime, p15m.stat().st_mtime)
+                    mtf_info["updated"] = datetime.fromtimestamp(ts).isoformat()
+
+            out.append({
+                "symbol": symbol,
+                "active_mode": active_mode,
+                "single": single_info,
+                "mtf": mtf_info
+            })
         return {"symbols": out}
 
     def _get_mtf_candidates(symbol: str) -> List[Dict[str, Any]]:
