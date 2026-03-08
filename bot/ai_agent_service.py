@@ -446,6 +446,70 @@ class AIAgentService:
             logger.error(f"Error loading candles for {symbol}: {e}")
             return f"Error loading data: {str(e)}"
 
+    def _get_models_info(self) -> str:
+        """
+        Collects information about available ML models and their performance.
+        """
+        try:
+            project_root = Path(__file__).resolve().parent.parent
+            models_dir = project_root / "ml_models"
+            
+            info = "=== ML Models Information ===\n"
+            
+            # 1. List available model files
+            if models_dir.exists():
+                model_files = list(models_dir.glob("*.pkl"))
+                info += f"Available Model Files ({len(model_files)}):\n"
+                for mf in model_files[:10]: # Limit to 10 to avoid huge prompt
+                    info += f"- {mf.name}\n"
+                if len(model_files) > 10:
+                    info += f"... and {len(model_files) - 10} more.\n"
+            else:
+                info += "Models directory (ml_models) not found.\n"
+            
+            # 2. Get active models from runtime state
+            state_path = project_root / "runtime_state.json"
+            if state_path.exists():
+                try:
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        state = json.load(f)
+                        active_models = state.get("symbol_models", {})
+                        if active_models:
+                            info += "\nActive Models (Currently Used):\n"
+                            for sym, model_path in active_models.items():
+                                info += f"- {sym}: {Path(model_path).name}\n"
+                except Exception as e:
+                    info += f"Error reading runtime state: {e}\n"
+            
+            # 3. Get performance metrics from analysis results
+            analysis_path = project_root / "analysis_results.json"
+            if analysis_path.exists():
+                try:
+                    with open(analysis_path, "r", encoding="utf-8") as f:
+                        analysis = json.load(f)
+                        recommendations = analysis.get("recommendations", {})
+                        
+                        info += "\nRecent Performance Analysis (Backtest/Live):\n"
+                        for sym, data in recommendations.items():
+                            best_mtf = data.get("best_mtf_actual", {})
+                            if best_mtf:
+                                pnl = best_mtf.get("pnl", 0)
+                                wr = best_mtf.get("wr", 0)
+                                info += f"- {sym}: Best MTF Model -> PnL: {pnl:.2f}%, WinRate: {wr:.1f}%\n"
+                                info += f"  (Model 1H: {best_mtf.get('model_1h')}, Model 15M: {best_mtf.get('model_15m')})\n"
+                            
+                            # Also check single models if MTF not available or for context
+                            best_single = data.get("best_single_15m", {})
+                            if best_single:
+                                info += f"  (Best Single 15m: {best_single.get('model')} -> PnL: {best_single.get('pnl',0):.2f}%, WR: {best_single.get('wr',0):.1f}%)\n"
+                except Exception as e:
+                    info += f"Error reading analysis results: {e}\n"
+            
+            return info + "\n"
+        except Exception as e:
+            logger.error(f"Error getting models info: {e}")
+            return "Error retrieving models information.\n"
+
     async def chat_with_user(self, message: str, context: Dict[str, Any], logs: List[str]) -> str:
         """
         Handles chat interaction with the user.
@@ -487,12 +551,18 @@ class AIAgentService:
         log_text = "".join(logs)
         context_str = json.dumps(context, indent=2, default=str)
         
+        # Get models info
+        models_info = self._get_models_info()
+
         prompt = f"""
         Ты — умный ассистент торгового бота.
         Твоя цель: помогать пользователю понимать, что происходит с ботом, анализировать логи и давать советы.
         
         ВАЖНО: У тебя ЕСТЬ доступ к историческим данным свечей (CSV), если пользователь укажет конкретную торговую пару (например, BTCUSDT).
         Если пользователь спрашивает, есть ли у тебя доступ к данным свечей, отвечай: "Да, я могу загрузить и проанализировать данные свечей, если вы укажете конкретную пару (например, BTCUSDT)".
+        
+        ТАКЖЕ ВАЖНО: У тебя есть информация о ML моделях и их эффективности.
+        {models_info}
         
         Контекст бота:
         {context_str}
@@ -557,15 +627,18 @@ class AIAgentService:
             suffix = f"_{experiment_type}_exp"
             
             # Map types to supported arguments
+            # ВАЖНО: Всегда добавляем --no-mtf, так как мы отказались от MTF-фичей в моделях
+            base_params = ["--no-mtf"]
+            
             if experiment_type == 'aggressive':
                 # 15m interval, standard optimized logic
-                params = ["--interval", "15m"] 
+                params = base_params + ["--interval", "15m"] 
             elif experiment_type == 'conservative':
                 # 1h interval for more stable signals
-                params = ["--interval", "1h"]
+                params = base_params + ["--interval", "1h"]
             else:
                 # Balanced - default 15m
-                params = ["--interval", "15m"]
+                params = base_params + ["--interval", "15m"]
             
             cmd = [sys.executable, str(script_path), "--symbol", symbol, "--model-suffix", suffix] + params
             

@@ -138,12 +138,12 @@ def main():
     parser.add_argument(
         "--mtf", 
         action="store_true", 
-        help="Использовать MTF фичи (1h, 4h) - по умолчанию включено"
+        help="Использовать MTF фичи (1h, 4h) - ВНИМАНИЕ: не рекомендуется"
     )
     parser.add_argument(
         "--no-mtf", 
         action="store_true", 
-        help="НЕ использовать MTF фичи (только 15m)"
+        help="НЕ использовать MTF фичи (только 15m) - по умолчанию включено"
     )
     parser.add_argument(
         "--use-optimized-weights",
@@ -201,12 +201,12 @@ def main():
         safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h)")
     else:
         # Проверяем переменную окружения, если флаги не указаны
-        ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "1")
+        ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
         ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
         if ml_mtf_enabled:
-            safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h) [по умолчанию]")
+            safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h) [из переменной окружения]")
         else:
-            safe_print("📌 Режим: БЕЗ MTF фичей (только 15m) [из переменной окружения]")
+            safe_print("📌 Режим: БЕЗ MTF фичей (только 15m) [по умолчанию]")
     
     # Формируем суффикс для имени файла модели
     if ml_mtf_enabled:

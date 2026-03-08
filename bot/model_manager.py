@@ -29,8 +29,12 @@ class ModelManager:
         print(f"[model_manager] Starting training for {symbol}...")
         
         # Определяем, использовать ли MTF фичи
-        if use_mtf is None:
-            use_mtf = False
+        # ВАЖНО: По требованию пользователя (Turn #20) мы ОТКЛЮЧАЕМ MTF-фичи для всех моделей.
+        # MTF-стратегии реализуются через комбинацию отдельных моделей (1h + 15m), а не через фичи.
+        if use_mtf:
+            print(f"[model_manager] WARNING: use_mtf=True passed for {symbol}, but MTF features are deprecated. Forcing --no-mtf.")
+        
+        use_mtf = False # Force disable
         
         # Вызываем существующий оптимизированный скрипт обучения
         # Мы используем subprocess для изоляции процесса обучения
@@ -39,11 +43,8 @@ class ModelManager:
             python_exe = sys.executable
             cmd = [python_exe, "retrain_ml_optimized.py", "--symbol", symbol]
             
-            # Добавляем параметр MTF
-            if use_mtf:
-                cmd.append("--mtf")
-            else:
-                cmd.append("--no-mtf")
+            # Добавляем параметр MTF (всегда --no-mtf)
+            cmd.append("--no-mtf")
             
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             print(f"[model_manager] Training output: {result.stdout[-500:]}") # Последние 500 символов
