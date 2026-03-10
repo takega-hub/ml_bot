@@ -363,15 +363,25 @@ class TradingLoop:
             # КРИТИЧНО: is_symbol_in_cooldown() может вызывать save() (запись в файл)
             # Оборачиваем в to_thread() чтобы не блокировать event loop
             # Добавляем таймаут, чтобы избежать зависания
-            logger.info(f"[{symbol}] Checking cooldown...")
-            try:
-                in_cooldown = await asyncio.wait_for(
-                    asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol),
-                    timeout=5.0  # Таймаут 5 секунд
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"[{symbol}] Cooldown check timed out, assuming no cooldown")
+            
+            # Проверяем, включен ли глобальный флаг enable_loss_cooldown
+            if not self.settings.risk.enable_loss_cooldown:
+                # Если защита отключена, но символ в списке - удаляем его принудительно
+                # (делаем это один раз, чтобы очистить состояние)
+                if self.state.cooldowns.get(symbol):
+                    logger.info(f"[{symbol}] Cooldown found but disabled in settings. Removing.")
+                    self.state.remove_cooldown(symbol)
                 in_cooldown = False
+            else:
+                logger.info(f"[{symbol}] Checking cooldown...")
+                try:
+                    in_cooldown = await asyncio.wait_for(
+                        asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol),
+                        timeout=5.0  # Таймаут 5 секунд
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[{symbol}] Cooldown check timed out, assuming no cooldown")
+                    in_cooldown = False
             
             if in_cooldown:
                 logger.info(f"[{symbol}] In cooldown, returning")
@@ -2923,6 +2933,11 @@ class TradingLoop:
                                     margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
                                     if margin > 0:
                                         pnl_pct = (pnl_usd / margin) * 100
+                                    
+                                    # ВАЖНО: Мы уже получили чистый PnL (Net PnL) из поля closedPnl биржи.
+                                    # В него уже включены все комиссии (open, close, funding).
+                                    # accumulated_fee содержит сумму всех этих издержек.
+                                    # Нам НЕ нужно вычитать total_fee_usd из pnl_usd повторно.
                                         
                                     logger.info(f"Found aggregated PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, total_fee={total_fee_usd:.4f}")
                                     break
@@ -3004,32 +3019,34 @@ class TradingLoop:
                 logger.warning(f"Could not determine exit price for {symbol}, using entry_price: {exit_price}")
             
             # Рассчитываем PnL
-            # Используем правильную формулу с учетом плеча
-            # PnL% = ((exit_price - entry_price) / entry_price) * leverage * 100 для LONG
-            # PnL% = ((entry_price - exit_price) / entry_price) * leverage * 100 для SHORT
-            leverage = self.settings.leverage
+            # ВАЖНО: Мы уже получили pnl_usd и pnl_pct из агрегированных данных closedPnl (если они были найдены)
+            # Если pnl_usd == 0 (данные не найдены), тогда считаем вручную
             
-            if local_pos.side == "Buy":
-                price_diff_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price)
-                pnl_pct = price_diff_pct * leverage * 100
-            else:  # Sell
-                price_diff_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price)
-                pnl_pct = price_diff_pct * leverage * 100
-            
-            # PnL в USD = (процент PnL / 100) * маржа
-            # Маржа = entry_price * qty / leverage
-            margin = (local_pos.entry_price * local_pos.qty) / leverage
-            pnl_usd = (pnl_pct / 100) * margin
+            if pnl_usd == 0 and exit_price is not None:
+                leverage = self.settings.leverage
+                
+                if local_pos.side == "Buy":
+                    price_diff_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price)
+                    pnl_pct = price_diff_pct * leverage * 100
+                else:  # Sell
+                    price_diff_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price)
+                    pnl_pct = price_diff_pct * leverage * 100
+                
+                # PnL в USD = (процент PnL / 100) * маржа
+                # Маржа = entry_price * qty / leverage
+                margin = (local_pos.entry_price * local_pos.qty) / leverage
+                pnl_usd = (pnl_pct / 100) * margin
 
-            # Учитываем комиссию биржи
-            fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
-            if fee_usd > 0:
-                pnl_usd -= fee_usd
-                if margin > 0:
-                    pnl_pct = (pnl_usd / margin) * 100
-                logger.info(
-                    f"Applied fees for {symbol}: fee_usd={fee_usd:.4f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%"
-                )
+                # Учитываем комиссию биржи (если считаем вручную)
+                fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
+                if fee_usd > 0:
+                    pnl_usd -= fee_usd
+                    total_fee_usd = fee_usd # Записываем расчетную комиссию
+                    if margin > 0:
+                        pnl_pct = (pnl_usd / margin) * 100
+                    logger.info(
+                        f"Applied fees for {symbol}: fee_usd={fee_usd:.4f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%"
+                    )
             
             logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.2f}%, pnl_usd={pnl_usd:.2f}")
             

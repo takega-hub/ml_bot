@@ -606,43 +606,46 @@ class AIAgentService:
 
     def start_research_experiment(self, symbol: str, experiment_type: str) -> Dict[str, Any]:
         """
-        Запускает эксперимент по обучению модели с новыми параметрами.
+        Starts a research experiment (Training + Backtest)
         experiment_type: 'aggressive' | 'conservative' | 'balanced'
         """
         try:
             import sys
             import subprocess
             from pathlib import Path
+            import uuid
             
             project_root = Path(__file__).resolve().parent.parent
-            # Use the optimized retraining script
-            script_path = project_root / "retrain_ml_optimized.py"
+            # Use the new research runner script
+            script_path = project_root / "run_research.py"
             
             if not script_path.exists():
-                 logger.error(f"Experiment script not found: {script_path}")
+                 logger.error(f"Research script not found: {script_path}")
                  return {"ok": False, "error": f"Script not found: {script_path.name}"}
+            
+            experiment_id = f"exp_{int(asyncio.get_event_loop().time())}_{str(uuid.uuid4())[:8]}"
             
             # Define parameters based on type
             params = []
-            suffix = f"_{experiment_type}_exp"
             
             # Map types to supported arguments
-            # ВАЖНО: Всегда добавляем --no-mtf, так как мы отказались от MTF-фичей в моделях
-            base_params = ["--no-mtf"]
-            
             if experiment_type == 'aggressive':
-                # 15m interval, standard optimized logic
-                params = base_params + ["--interval", "15m"] 
+                params = ["--interval", "15m", "--no-mtf"] 
             elif experiment_type == 'conservative':
-                # 1h interval for more stable signals
-                params = base_params + ["--interval", "1h"]
+                # Conservative uses 1h models
+                params = ["--interval", "1h", "--no-mtf"]
             else:
                 # Balanced - default 15m
-                params = base_params + ["--interval", "15m"]
+                params = ["--interval", "15m", "--no-mtf"]
             
-            cmd = [sys.executable, str(script_path), "--symbol", symbol, "--model-suffix", suffix] + params
+            cmd = [
+                sys.executable, str(script_path), 
+                "--symbol", symbol, 
+                "--type", experiment_type,
+                "--experiment-id", experiment_id
+            ] + params
             
-            logger.info(f"Starting experiment: {' '.join(cmd)}")
+            logger.info(f"Starting research experiment: {' '.join(cmd)}")
             
             # Run in background
             process = subprocess.Popen(
@@ -651,19 +654,39 @@ class AIAgentService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                encoding='utf-8', # Ensure encoding is set
+                encoding='utf-8',
                 errors='replace'
             )
             
             return {
                 "ok": True, 
                 "pid": process.pid, 
+                "experiment_id": experiment_id,
                 "symbol": symbol, 
                 "type": experiment_type,
-                "model_suffix": suffix,
-                "message": f"Experiment {experiment_type} started for {symbol} (PID: {process.pid})"
+                "message": f"Experiment {experiment_type} started for {symbol}"
             }
             
         except Exception as e:
             logger.error(f"Failed to start experiment: {e}", exc_info=True)
             return {"ok": False, "error": str(e)}
+
+    def get_research_experiments(self) -> List[Dict[str, Any]]:
+        """Returns list of experiments from experiments.json"""
+        try:
+            file_path = Path(__file__).resolve().parent.parent / "experiments.json"
+            if not file_path.exists():
+                return []
+            
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            # Convert dict to list and sort by created_at desc
+            experiments = list(data.values())
+            experiments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            return experiments
+            
+        except Exception as e:
+            logger.error(f"Failed to get experiments: {e}")
+            return []
+

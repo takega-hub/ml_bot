@@ -452,13 +452,19 @@ class BotState:
     
     def set_cooldown(self, symbol: str, consecutive_losses: int, reason: str):
         """Устанавливает cooldown для символа на основе количества убытков подряд"""
-        # Определяем длительность cooldown
+        # Определяем длительность cooldown (смягченная логика)
         if consecutive_losses == 1:
-            cooldown_duration = timedelta(minutes=30)
+            # 1 убыток: нет кулдауна или минимальный
+            cooldown_duration = timedelta(minutes=5)
         elif consecutive_losses == 2:
+            # 2 убытка: 30 минут (было 2 часа)
+            cooldown_duration = timedelta(minutes=30)
+        elif consecutive_losses == 3:
+            # 3 убытка: 2 часа
             cooldown_duration = timedelta(hours=2)
-        else:  # 3 и больше
-            cooldown_duration = timedelta(hours=24)
+        else:  # 4 и больше
+            # 4 убытка: 6 часов (было 24 часа)
+            cooldown_duration = timedelta(hours=6)
         
         cooldown_until = datetime.now() + cooldown_duration
         

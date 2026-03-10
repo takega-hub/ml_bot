@@ -9,6 +9,8 @@ import logging
 import os
 import subprocess
 import sys
+import urllib.request
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Any, List, Dict
 
@@ -256,6 +258,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     api_key = (os.getenv("MOBILE_API_KEY") or "").strip()
     if not api_key:
         api_key = os.getenv("ALLOWED_USER_ID", "").strip()  # fallback: Telegram user id как ключ
+
+    def _send_telegram_sync(text: str):
+        if not tg_bot or not tg_bot.settings.telegram_token or not tg_bot.settings.allowed_user_id:
+            return
+        try:
+            url = f"https://api.telegram.org/bot{tg_bot.settings.telegram_token}/sendMessage"
+            data = {
+                "chat_id": tg_bot.settings.allowed_user_id,
+                "text": text
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(data).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req) as response:
+                pass
+        except Exception as e:
+            logger.error(f"Failed to send telegram notification sync: {e}")
 
     def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
         if not api_key:
@@ -875,7 +896,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         def _run_test():
             try:
                 if tg_bot:
-                    asyncio.create_task(tg_bot.send_notification(f"🧪 Started testing model {model_path} for {symbol}..."))
+                    _send_telegram_sync(f"🧪 Started testing model {model_path} for {symbol}...")
                 state.add_notification(f"Started testing {symbol}", "info")
                 logger.info(f"Starting background test for {symbol} model {model_path}")
                 results = model_manager.test_model(model_path, symbol, days=body.days)
@@ -884,12 +905,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     logger.info(f"Test finished for {symbol}")
                     pnl = results.get('total_pnl_pct', 0)
                     if tg_bot:
-                        asyncio.create_task(tg_bot.send_notification(f"✅ Testing finished for {symbol}\nPnL: {pnl:.2f}%"))
+                        _send_telegram_sync(f"✅ Testing finished for {symbol}\nPnL: {pnl:.2f}%")
                     state.add_notification(f"Testing finished for {symbol}. PnL: {pnl:.2f}%", "success")
             except Exception as e:
                 logger.error(f"Error in background test for {symbol}: {e}")
                 if tg_bot:
-                    asyncio.create_task(tg_bot.send_notification(f"❌ Testing failed for {symbol}: {e}"))
+                    _send_telegram_sync(f"❌ Testing failed for {symbol}: {e}")
                 state.add_notification(f"Testing failed for {symbol}", "error")
 
         background_tasks.add_task(_run_test)
@@ -911,12 +932,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         # Run in background
         def _run_test_all():
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                # Loop removed, using sync telegram
                 
                 test_type = "Single Strategy" if body.mode == "single" else "MTF Strategy"
                 if tg_bot:
-                    loop.run_until_complete(tg_bot.send_notification(f"🧪 Started {test_type} test for {symbol}..."))
+                    _send_telegram_sync(f"🧪 Started {test_type} test for {symbol}...")
                 state.add_notification(f"Started {test_type} test for {symbol}", "info")
                 logger.info(f"Starting {test_type} test for {symbol}...")
                 
@@ -1010,20 +1030,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 logger.info(f"{test_type} finished for {symbol}. {selected_info}")
                 
                 if tg_bot:
-                    loop.run_until_complete(tg_bot.send_notification(f"✅ {test_type} finished for {symbol}.\n{selected_info}"))
+                    _send_telegram_sync(f"✅ {test_type} finished for {symbol}.\n{selected_info}")
                 state.add_notification(f"{test_type} finished for {symbol}", "success")
                 
-                loop.close()
             except Exception as e:
                 logger.error(f"Error in {test_type} for {symbol}: {e}")
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    if tg_bot:
-                        loop.run_until_complete(tg_bot.send_notification(f"❌ Testing failed for {symbol}: {e}"))
-                    loop.close()
-                except:
-                    pass
+                if tg_bot:
+                    _send_telegram_sync(f"❌ Testing failed for {symbol}: {e}")
                 state.add_notification(f"Testing failed for {symbol}", "error")
 
         background_tasks.add_task(_run_test_all)
@@ -1044,7 +1057,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         def _run_retrain_task():
              try:
                  if tg_bot:
-                     asyncio.create_task(tg_bot.send_notification(f"🔄 Retraining started for {sym} via Mobile App..."))
+                     _send_telegram_sync(f"🔄 Retraining started for {sym} via Mobile App...")
                  state.add_notification(f"Started retraining {sym}", "info")
                  
                  # Run synchronously (blocking thread)
@@ -1060,18 +1073,18 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                  if result.returncode == 0:
                      logger.info(f"Retrain finished for {sym}")
                      if tg_bot:
-                         asyncio.create_task(tg_bot.send_notification(f"✅ Retraining finished for {sym} successfully."))
+                         _send_telegram_sync(f"✅ Retraining finished for {sym} successfully.")
                      state.add_notification(f"Retraining finished for {sym}", "success")
                  else:
                      logger.error(f"Retrain failed for {sym}: {result.stderr}")
                      if tg_bot:
                          err_msg = result.stderr[:200] if result.stderr else "Unknown error"
-                         asyncio.create_task(tg_bot.send_notification(f"❌ Retraining failed for {sym}.\nError: {err_msg}"))
+                         _send_telegram_sync(f"❌ Retraining failed for {sym}.\nError: {err_msg}")
                      state.add_notification(f"Retraining failed for {sym}", "error")
              except Exception as e:
                  logger.error(f"Retrain exception: {e}")
                  if tg_bot:
-                     asyncio.create_task(tg_bot.send_notification(f"❌ Retraining error for {sym}: {e}"))
+                     _send_telegram_sync(f"❌ Retraining error for {sym}: {e}")
                  state.add_notification(f"Retraining error for {sym}", "error")
 
         background_tasks.add_task(_run_retrain_task)
@@ -1096,7 +1109,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
              try:
                  syms = ",".join(body.symbols) if body.symbols else ""
                  if tg_bot:
-                     asyncio.create_task(tg_bot.send_notification(f"🚀 Optimization started via Mobile App..."))
+                     _send_telegram_sync(f"🚀 Optimization started via Mobile App...")
                  state.add_notification(f"Started strategy optimization", "info")
                  
                  cmd = [sys.executable, str(script), "--days", str(body.days)]
@@ -1122,13 +1135,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                  if result.returncode == 0:
                      logger.info(f"Optimization finished successfully")
                      if tg_bot:
-                         asyncio.create_task(tg_bot.send_notification(f"✅ Strategy optimization completed successfully."))
+                         _send_telegram_sync(f"✅ Strategy optimization completed successfully.")
                      state.add_notification(f"Optimization completed", "success")
                  else:
                      logger.error(f"Optimization failed: {result.stderr}")
                      if tg_bot:
                          err_msg = result.stderr[:200] if result.stderr else "Unknown error"
-                         asyncio.create_task(tg_bot.send_notification(f"❌ Optimization failed.\nError: {err_msg}"))
+                         _send_telegram_sync(f"❌ Optimization failed.\nError: {err_msg}")
                      state.add_notification(f"Optimization failed", "error")
              except Exception as e:
                  logger.error(f"Optimization exception: {e}")
@@ -1297,7 +1310,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 if resp.get("retCode") == 0:
                     closed = True
                     if tg_bot:
-                        asyncio.create_task(tg_bot.send_notification(f"⚠️ Position {sym} closed manually via Mobile App"))
+                        _send_telegram_sync(f"⚠️ Position {sym} closed manually via Mobile App")
                 else:
                     raise HTTPException(status_code=400, detail=f"Failed to close: {resp.get('retMsg')}")
             
@@ -1374,7 +1387,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         """Остановить бота и закрыть все позиции."""
         state.set_running(False)
         if tg_bot:
-            asyncio.create_task(tg_bot.send_notification("🚨 EMERGENCY STOP triggered via Mobile App! All positions closed."))
+            _send_telegram_sync("🚨 EMERGENCY STOP triggered via Mobile App! All positions closed.")
         closed = []
         if bybit_client:
             for symbol in state.active_symbols:
@@ -1633,10 +1646,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
     def get_research_status():
-        """Возвращает список активных экспериментов (можно реализовать через PID check)."""
-        # Для простоты пока возвращаем заглушку или сканируем процессы
-        # В реальном проекте лучше хранить состояние экспериментов в БД или файле
-        return {"experiments": []}
+        """Возвращает список активных и прошлых экспериментов."""
+        experiments = ai_agent.get_research_experiments()
+        return {"experiments": experiments}
 
     return app
 
