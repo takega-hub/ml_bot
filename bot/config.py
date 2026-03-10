@@ -221,7 +221,8 @@ class RiskParams:
     early_exit_min_profit_pct: float = 0.003  # Минимальная прибыль через early_exit_minutes (0.3%)
 
     # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
-    fee_rate: float = 0.0006
+    # Обновлено до 0.001 (0.1%) так как многие пары имеют такую комиссию (Taker)
+    fee_rate: float = 0.001
 
     # Категоризация горизонта позиции по TP/SL
     mid_term_tp_pct: float = 0.025  # 2.5% от цены

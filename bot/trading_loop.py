@@ -2852,19 +2852,18 @@ class TradingLoop:
             
             # Метод 1: Пытаемся получить из закрытых позиций (closed PnL) - самый точный источник
             # Делаем несколько попыток с небольшой задержкой, так как данные могут появиться не сразу
+            # НЕ передаем endTime, чтобы избежать проблем с рассинхроном времени (ПК отстает от сервера)
             total_fee_usd = 0.0
             
             for attempt in range(3):
                 try:
                     if attempt > 0:
-                        await asyncio.sleep(1.5) # Ждем 1.5 секунды перед повторной попыткой
+                        await asyncio.sleep(2.0) # Увеличиваем паузу до 2 сек
                     
                     closed_pnl = await asyncio.to_thread(
                         self.bybit.get_closed_pnl,
                         symbol=symbol,
-                        start_time=start_time,
-                        end_time=end_time,
-                        limit=50  # Увеличиваем лимит
+                        limit=50  # Берем последние 50 записей (Bybit отдает от новых к старым)
                     )
                     
                     if closed_pnl and isinstance(closed_pnl, dict) and closed_pnl.get("retCode") == 0:
@@ -2873,7 +2872,7 @@ class TradingLoop:
                             pnl_list = result.get("list", [])
                             if pnl_list and len(pnl_list) > 0:
                                 # Ищем ВСЕ закрытые позиции для этого символа, которые относятся к нашей сделке
-                                # Сортируем по времени создания (createdTime), чтобы взять самые свежие
+                                # Сортируем по времени создания (createdTime), чтобы взять самые свежие (API и так это делает, но для надежности)
                                 try:
                                     pnl_list.sort(key=lambda x: int(x.get("createdTime", 0)), reverse=True)
                                 except:
@@ -2886,11 +2885,13 @@ class TradingLoop:
                                 last_exit_time = 0
                                 
                                 # Преобразуем entry_time в timestamp ms для фильтрации
+                                # Добавляем буфер 1 час (3600000 мс) на случай, если часы ПК спешат вперед относительно сервера
                                 try:
                                     entry_dt = datetime.fromisoformat(local_pos.entry_time)
                                     entry_ts = int(entry_dt.timestamp() * 1000)
+                                    entry_ts_with_buffer = entry_ts - 3600000 
                                 except:
-                                    entry_ts = 0
+                                    entry_ts_with_buffer = 0
                                 
                                 for pnl_item in pnl_list:
                                     if pnl_item and isinstance(pnl_item, dict):
@@ -2898,8 +2899,8 @@ class TradingLoop:
                                         pnl_side = pnl_item.get("side", "")
                                         created_time = int(pnl_item.get("createdTime", 0))
                                         
-                                        # Проверяем, что это наша позиция (тот же символ, сторона и создана ПОСЛЕ открытия)
-                                        if pnl_symbol == symbol and pnl_side == local_pos.side and created_time > entry_ts:
+                                        # Проверяем, что это наша позиция (тот же символ, сторона и создана ПОСЛЕ открытия с учетом буфера)
+                                        if pnl_symbol == symbol and pnl_side == local_pos.side and created_time > entry_ts_with_buffer:
                                             # Накапливаем PnL и комиссии
                                             closed_pnl_val = float(pnl_item.get("closedPnl", 0))
                                             accumulated_pnl += closed_pnl_val
@@ -2923,6 +2924,10 @@ class TradingLoop:
                                                 # Fee = Gross - Net
                                                 accumulated_fee += (gross_pnl - closed_pnl_val)
                                                 found_pnl = True
+                                        elif pnl_symbol == symbol and created_time < entry_ts_with_buffer:
+                                            # Если дошли до записей старее буфера открытия, останавливаемся (так как список отсортирован)
+                                            # Это предотвращает захват старых сделок
+                                            break
                                 
                                 if found_pnl:
                                     exit_price = last_exit_price
