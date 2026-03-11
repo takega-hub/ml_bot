@@ -2895,6 +2895,9 @@ class TradingLoop:
                                 
                                 for pnl_item in pnl_list:
                                     if pnl_item and isinstance(pnl_item, dict):
+                                        # Логируем все ключи для отладки
+                                        logger.info(f"PnL item keys: {list(pnl_item.keys())}")
+                                        
                                         pnl_symbol = pnl_item.get("symbol", "")
                                         pnl_side = pnl_item.get("side", "")
                                         created_time = int(pnl_item.get("createdTime", 0))
@@ -2905,7 +2908,18 @@ class TradingLoop:
                                             closed_pnl_val = float(pnl_item.get("closedPnl", 0))
                                             accumulated_pnl += closed_pnl_val
                                             
-                                            # Вычисляем комиссию для этой части
+                                            # Извлекаем точные комиссии и funding из API
+                                            open_fee = float(pnl_item.get("openFee", 0))
+                                            close_fee = float(pnl_item.get("closeFee", 0))
+                                            # Пробуем несколько возможных ключей для funding fee
+                                            funding_fee = 0.0
+                                            for key in ["sumFundingFee", "fundingFee", "totalFundingFee"]:
+                                                if key in pnl_item:
+                                                    funding_fee = float(pnl_item.get(key, 0))
+                                                    break
+                                            total_fee_from_api = open_fee + close_fee + funding_fee
+                                            
+                                            # Вычисляем комиссию для этой части (альтернативный расчет)
                                             qty_val = float(pnl_item.get("qty", 0))
                                             entry_price_val = float(pnl_item.get("avgEntryPrice", 0))
                                             exit_price_val = float(pnl_item.get("avgExitPrice", 0))
@@ -2915,14 +2929,19 @@ class TradingLoop:
                                                     last_exit_price = exit_price_val
                                                     last_exit_time = created_time
                                                 
-                                                # Gross PnL
+                                                # Gross PnL (Position P&L)
                                                 if pnl_side == "Buy":
                                                     gross_pnl = (exit_price_val - entry_price_val) * qty_val
                                                 else:
                                                     gross_pnl = (entry_price_val - exit_price_val) * qty_val
                                                 
-                                                # Fee = Gross - Net
-                                                accumulated_fee += (gross_pnl - closed_pnl_val)
+                                                # Fee = Gross - Net (должно совпадать с total_fee_from_api)
+                                                calculated_fee = gross_pnl - closed_pnl_val
+                                                accumulated_fee += calculated_fee
+                                                
+                                                # Логируем детали для отладки
+                                                logger.info(f"PnL item: closedPnl={closed_pnl_val:.4f}, openFee={open_fee:.4f}, closeFee={close_fee:.4f}, funding={funding_fee:.4f}, total_fee_api={total_fee_from_api:.4f}, calculated_fee={calculated_fee:.4f}")
+                                                
                                                 found_pnl = True
                                         elif pnl_symbol == symbol and created_time < entry_ts_with_buffer:
                                             # Если дошли до записей старее буфера открытия, останавливаемся (так как список отсортирован)

@@ -1646,9 +1646,187 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
     def get_research_status():
-        """Возвращает список активных и прошлых экспериментов."""
+        """Возвращает список активных и прошлых экспериментов с сравнением с текущей стратегией."""
+        from datetime import datetime, timedelta
+        
         experiments = ai_agent.get_research_experiments()
+        
+        # Добавляем информацию о текущей стратегии и сравнение для каждого эксперимента
+        for experiment in experiments:
+            symbol = experiment.get("symbol")
+            if not symbol:
+                continue
+                
+            # Получаем текущую стратегию для символа
+            current_strategy = None
+            if trading_loop and getattr(trading_loop, "strategies", None):
+                current_strategy = trading_loop.strategies.get(symbol)
+            
+            # Получаем текущие модели из конфигурации
+            current_models = {}
+            if hasattr(state, "get_strategy_config"):
+                config = state.get_strategy_config(symbol)
+                if config:
+                    if config.get("mode") == "mtf":
+                        current_models = {
+                            "1h": config.get("model_1h_path"),
+                            "15m": config.get("model_15m_path")
+                        }
+                    else:
+                        current_models = {
+                            "single": config.get("model_path")
+                        }
+            
+            # Собираем метрики текущей стратегии из реальных сделок за последнюю неделю
+            current_metrics = {}
+            if hasattr(state, "trades"):
+                week_ago = datetime.now() - timedelta(days=7)
+                week_trades = []
+                for trade in state.trades:
+                    if trade.symbol == symbol and trade.status == "closed" and trade.exit_time:
+                        try:
+                            exit_dt = datetime.fromisoformat(trade.exit_time)
+                            if exit_dt >= week_ago:
+                                week_trades.append(trade)
+                        except (ValueError, TypeError):
+                            pass
+                
+                if week_trades:
+                    total_pnl = sum(t.pnl_usd for t in week_trades)
+                    total_pnl_pct = sum(t.pnl_pct for t in week_trades if hasattr(t, 'pnl_pct')) if hasattr(week_trades[0], 'pnl_pct') else 0
+                    winning_trades = [t for t in week_trades if t.pnl_usd > 0]
+                    win_rate = (len(winning_trades) / len(week_trades) * 100) if week_trades else 0
+                    
+                    current_metrics = {
+                        "total_pnl": total_pnl,
+                        "total_pnl_pct": total_pnl_pct,
+                        "win_rate": win_rate,
+                        "total_trades": len(week_trades),
+                        "winning_trades": len(winning_trades),
+                        "losing_trades": len(week_trades) - len(winning_trades)
+                    }
+            
+            # Сравниваем с результатами эксперимента
+            experiment_results = experiment.get("results", {})
+            experiment_metrics = experiment_results.get("metrics", {})
+            # Если experiment_metrics пустые, используем experiment_results напрямую
+            if not experiment_metrics:
+                experiment_metrics = experiment_results
+            
+            # Добавляем информацию о текущей стратегии в эксперимент
+            experiment["current_strategy"] = {
+                "has_strategy": current_strategy is not None,
+                "models": current_models,
+                "metrics": current_metrics
+            }
+            
+            # Рекомендация: если эксперимент лучше текущей стратегии, предлагаем замену
+            experiment_pnl = experiment_metrics.get("total_pnl_pct", 0)
+            experiment_winrate = experiment_metrics.get("win_rate", 0)
+            current_pnl = current_metrics.get("total_pnl_pct", 0)
+            current_winrate = current_metrics.get("win_rate", 0)
+            
+            # Простая логика рекомендации (можно улучшить)
+            recommendation = "keep_current"
+            if experiment_pnl > current_pnl + 2 and experiment_winrate > current_winrate + 5:
+                recommendation = "replace"
+            elif experiment_pnl > current_pnl + 5:
+                recommendation = "replace"
+            elif experiment_pnl < current_pnl - 5:
+                recommendation = "discard"
+            
+            experiment["recommendation"] = recommendation
+            experiment["comparison"] = {
+                "experiment_pnl": experiment_pnl,
+                "experiment_winrate": experiment_winrate,
+                "current_pnl": current_pnl,
+                "current_winrate": current_winrate,
+                "improvement_pnl": experiment_pnl - current_pnl,
+                "improvement_winrate": experiment_winrate - current_winrate
+            }
+        
         return {"experiments": experiments}
+
+    class ApplyExperimentBody(BaseModel):
+        experiment_id: str
+
+    @app.post("/api/ai/research/apply", dependencies=[Depends(verify_api_key)])
+    def post_apply_experiment(body: ApplyExperimentBody):
+        """Применяет экспериментальную стратегию (заменяет текущую)."""
+        from datetime import datetime
+        try:
+            # Получаем эксперимент
+            experiments = ai_agent.get_research_experiments()
+            experiment = None
+            for exp in experiments:
+                if exp.get("id") == body.experiment_id:
+                    experiment = exp
+                    break
+            
+            if not experiment:
+                raise HTTPException(status_code=404, detail="Experiment not found")
+            
+            symbol = experiment.get("symbol")
+            if not symbol:
+                raise HTTPException(status_code=400, detail="Experiment missing symbol")
+            
+            # Получаем модели из эксперимента
+            results = experiment.get("results", {})
+            models = results.get("models", {})
+            model_15m_path = models.get("15m")
+            model_1h_path = models.get("1h")
+            
+            if not model_15m_path and not model_1h_path:
+                raise HTTPException(status_code=400, detail="Experiment has no models")
+            
+            # Применяем стратегию
+            if model_1h_path and model_15m_path:
+                # MTF стратегия
+                config = {
+                    "mode": "mtf",
+                    "model_1h_path": model_1h_path,
+                    "model_15m_path": model_15m_path
+                }
+                state.set_strategy_config(symbol, config)
+                logger.info(f"Applied MTF experiment {body.experiment_id} for {symbol}: 1h={model_1h_path}, 15m={model_15m_path}")
+            else:
+                # Single стратегия (используем 15m модель, если есть)
+                model_path = model_15m_path or model_1h_path
+                if not model_path:
+                    raise HTTPException(status_code=400, detail="No valid model path found")
+                
+                if not model_manager:
+                    raise HTTPException(status_code=501, detail="Model manager not available")
+                
+                model_manager.apply_model(symbol, model_path)
+                state.symbol_models[symbol] = model_path
+                config = {"mode": "single", "model_path": model_path}
+                state.set_strategy_config(symbol, config)
+                logger.info(f"Applied single experiment {body.experiment_id} for {symbol}: model={model_path}")
+            
+            # Обновляем эксперимент с пометкой о применении
+            experiment["applied"] = True
+            experiment["applied_at"] = datetime.now().isoformat()
+            
+            # Сохраняем обновленный эксперимент
+            file_path = Path(__file__).resolve().parent.parent / "experiments.json"
+            if file_path.exists():
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                data[body.experiment_id] = experiment
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, default=str)
+            
+            if tg_bot:
+                asyncio.create_task(tg_bot.send_notification(f"🔄 Experiment applied for {symbol}"))
+            
+            return {"ok": True, "symbol": symbol, "experiment_id": body.experiment_id}
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to apply experiment: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     return app
 
