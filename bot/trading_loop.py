@@ -60,7 +60,7 @@ class TradingLoop:
                 },
                 "risk": {
                     "base_order_usd": self.settings.risk.base_order_usd,
-                    "max_position_size_usd": self.settings.risk.max_position_size_usd,
+                    "max_position_usd": self.settings.risk.max_position_usd,
                     "max_daily_loss_usd": self.settings.risk.max_daily_loss_usd,
                     "max_daily_trades": self.settings.risk.max_daily_trades,
                     "reverse_min_confidence": self.settings.risk.reverse_min_confidence,
