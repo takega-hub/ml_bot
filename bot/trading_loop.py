@@ -47,6 +47,22 @@ class TradingLoop:
         
         # Paper trading manager for online testing of experimental models
         # Pass bot settings for realistic simulation
+        # Get real balance from Bybit client
+        current_balance = 10000.0  # Default balance
+        try:
+            if self.bybit:
+                balance_info = self.bybit.get_wallet_balance()
+                if balance_info.get("retCode") == 0:
+                    result = balance_info.get("result", {})
+                    list_data = result.get("list", [])
+                    if list_data:
+                        wallet = list_data[0].get("coin", [])
+                        usdt = next((c for c in wallet if c.get("coin") == "USDT"), None)
+                        if usdt:
+                            current_balance = float(usdt.get("walletBalance", 10000.0))
+        except Exception as e:
+            logger.error(f"Failed to get balance from Bybit: {e}")
+        
         bot_settings = {
             "settings": {
                 "strategy": {
@@ -63,7 +79,7 @@ class TradingLoop:
                     "max_position_usd": self.settings.risk.max_position_usd,
                     "reverse_min_confidence": self.settings.risk.reverse_min_confidence,
                 },
-                "current_balance": self.state.balance if hasattr(self.state, 'balance') else 10000.0,
+                "current_balance": current_balance,
                 "is_running": self.state.is_running if hasattr(self.state, 'is_running') else False,
             }
         }
