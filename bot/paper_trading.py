@@ -79,17 +79,18 @@ class PaperMetrics:
 class PaperBroker:
     """Virtual broker for paper trading."""
     
-    def __init__(self, initial_balance: float = 10000.0, commission: float = 0.0006, slippage_bps: float = 0.0):
+    def __init__(self, initial_balance: float = 10000.0, commission: float = 0.0006, slippage_bps: float = 0.0, base_order_usd: float = 100.0):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.commission = commission
         self.slippage_bps = slippage_bps
+        self.base_order_usd = base_order_usd
         self.position: Optional[PaperTrade] = None
         self.trades: List[PaperTrade] = []
         
-    def calculate_quantity(self, entry_price: float, base_order_usd: float = 100.0) -> float:
+    def calculate_quantity(self, entry_price: float) -> float:
         """Calculate position quantity based on base order size."""
-        return base_order_usd / entry_price
+        return self.base_order_usd / entry_price
     
     def apply_slippage(self, price: float, is_entry: bool = True) -> float:
         """Apply slippage to price."""
@@ -110,7 +111,7 @@ class PaperBroker:
         # Apply slippage to entry price
         entry_price = self.apply_slippage(current_price, is_entry=True)
         
-        # Calculate quantity
+        # Calculate quantity using base order size
         quantity = self.calculate_quantity(entry_price)
         
         # Calculate commission
@@ -323,11 +324,12 @@ class PaperBroker:
 class PaperSession:
     """Paper trading session for a specific experiment."""
     
-    def __init__(self, experiment_id: str, symbol: str, strategy, broker: PaperBroker):
+    def __init__(self, experiment_id: str, symbol: str, strategy, broker: PaperBroker, bot_settings: Optional[Dict[str, Any]] = None):
         self.experiment_id = experiment_id
         self.symbol = symbol
         self.strategy = strategy
         self.broker = broker
+        self.bot_settings = bot_settings or {}
         self.is_active = False
         self.start_time = None
         self.end_time = None
@@ -348,6 +350,12 @@ class PaperSession:
     def process_bar(self, row: pd.Series, df: pd.DataFrame, current_price: float, high: float, low: float, candle_timestamp: datetime):
         """Process a new bar and generate signals."""
         if not self.is_active:
+            return
+            
+        # Check if session has been running for more than 7 days
+        if self.start_time and (datetime.now() - self.start_time).days >= 7:
+            logger.info(f"Session {self.experiment_id} has been running for 7 days. Stopping session.")
+            self.stop()
             return
             
         # Check for exit first
@@ -377,16 +385,23 @@ class PaperSession:
                     )
                 else:
                     # Single timeframe strategy
+                    # Use real bot settings for realistic simulation
+                    leverage = self.bot_settings.get('leverage', 1.0)
+                    target_profit_pct_margin = self.bot_settings.get('target_profit_pct_margin', 0.01)
+                    max_loss_pct_margin = self.bot_settings.get('max_loss_pct_margin', 0.01)
+                    stop_loss_pct = self.bot_settings.get('stop_loss_pct', 0.02)
+                    take_profit_pct = self.bot_settings.get('take_profit_pct', 0.04)
+                    
                     signal = self.strategy.generate_signal(
                         row=row,
                         df=df,
                         has_position=None,
                         current_price=current_price,
-                        leverage=1.0,
-                        target_profit_pct_margin=0.01,
-                        max_loss_pct_margin=0.01,
-                        stop_loss_pct=0.02,
-                        take_profit_pct=0.04,
+                        leverage=leverage,
+                        target_profit_pct_margin=target_profit_pct_margin,
+                        max_loss_pct_margin=max_loss_pct_margin,
+                        stop_loss_pct=stop_loss_pct,
+                        take_profit_pct=take_profit_pct,
                     )
                     
                 if signal and signal.action != Action.HOLD:
@@ -431,9 +446,14 @@ class PaperSession:
 class PaperTradingManager:
     """Manager for paper trading sessions."""
     
-    def __init__(self):
+    def __init__(self, bot_settings: Optional[Dict[str, Any]] = None):
         self.sessions: Dict[str, PaperSession] = {}
         self.experiments_file = Path("experiments.json")
+        self.bot_settings = bot_settings or {}
+        
+    def update_settings(self, bot_settings: Dict[str, Any]):
+        """Update bot settings for realistic simulation."""
+        self.bot_settings = bot_settings
         
     def load_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         """Load experiment data from experiments.json."""
@@ -529,13 +549,24 @@ class PaperTradingManager:
         if not strategy:
             return None
             
-        # Create broker and session
-        broker = PaperBroker()
+        # Extract settings from bot settings
+        risk_settings = self.bot_settings.get('settings', {}).get('risk', {})
+        initial_balance = risk_settings.get('base_order_usd', 10000.0) * 100  # Scale up for realistic balance
+        base_order_usd = risk_settings.get('base_order_usd', 100.0)
+        
+        # Create broker with real settings
+        broker = PaperBroker(
+            initial_balance=initial_balance,
+            base_order_usd=base_order_usd
+        )
+        
+        # Create session with bot settings
         session = PaperSession(
             experiment_id=experiment_id,
             symbol=experiment_data.get('symbol', 'UNKNOWN'),
             strategy=strategy,
-            broker=broker
+            broker=broker,
+            bot_settings=self.bot_settings
         )
         
         # Store session

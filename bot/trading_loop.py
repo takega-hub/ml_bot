@@ -46,7 +46,29 @@ class TradingLoop:
         self.pending_pullback_signals: Dict[str, List[Dict]] = {}
         
         # Paper trading manager for online testing of experimental models
-        self.paper_trading_manager = PaperTradingManager()
+        # Pass bot settings for realistic simulation
+        bot_settings = {
+            "settings": {
+                "strategy": {
+                    "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
+                    "model_path": self.settings.ml_strategy.model_path,
+                    "model_1h_path": self.settings.ml_strategy.model_1h_path,
+                    "model_15m_path": self.settings.ml_strategy.model_15m_path,
+                    "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
+                    "min_signal_strength": self.settings.ml_strategy.min_signal_strength,
+                },
+                "risk": {
+                    "base_order_usd": self.settings.risk.base_order_usd,
+                    "max_position_size_usd": self.settings.risk.max_position_size_usd,
+                    "max_daily_loss_usd": self.settings.risk.max_daily_loss_usd,
+                    "max_daily_trades": self.settings.risk.max_daily_trades,
+                    "reverse_min_confidence": self.settings.risk.reverse_min_confidence,
+                },
+                "current_balance": self.state.balance if hasattr(self.state, 'balance') else 10000.0,
+                "is_running": self.state.is_running if hasattr(self.state, 'is_running') else False,
+            }
+        }
+        self.paper_trading_manager = PaperTradingManager(bot_settings)
         
         # Валидация моделей при старте
         if self.settings.ml_strategy.use_mtf_strategy:

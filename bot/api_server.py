@@ -2174,6 +2174,172 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             except:
                 pass
 
+    # Get bot settings and current strategy for realistic simulation
+    @app.get("/api/bot/settings", dependencies=[Depends(verify_api_key)])
+    def get_bot_settings():
+        """Get current bot settings for realistic paper trading simulation."""
+        if not trading_loop:
+            raise HTTPException(status_code=501, detail="Trading loop not available")
+        
+        try:
+            settings = trading_loop.settings
+            state = trading_loop.state
+            
+            # Get current strategy configuration
+            strategy_config = {}
+            if hasattr(settings, 'ml_strategy'):
+                strategy_config = {
+                    "use_mtf_strategy": settings.ml_strategy.use_mtf_strategy,
+                    "model_path": settings.ml_strategy.model_path,
+                    "model_1h_path": settings.ml_strategy.model_1h_path,
+                    "model_15m_path": settings.ml_strategy.model_15m_path,
+                    "confidence_threshold": settings.ml_strategy.confidence_threshold,
+                    "min_signal_strength": settings.ml_strategy.min_signal_strength,
+                }
+            
+            # Get risk management settings
+            risk_config = {}
+            if hasattr(settings, 'risk'):
+                risk_config = {
+                    "base_order_usd": settings.risk.base_order_usd,
+                    "max_position_size_usd": settings.risk.max_position_size_usd,
+                    "max_daily_loss_usd": settings.risk.max_daily_loss_usd,
+                    "max_daily_trades": settings.risk.max_daily_trades,
+                    "reverse_min_confidence": settings.risk.reverse_min_confidence,
+                }
+            
+            # Get current balance and positions
+            current_balance = state.balance if hasattr(state, 'balance') else 10000.0
+            current_positions = []
+            if hasattr(state, 'positions'):
+                for pos in state.positions:
+                    current_positions.append({
+                        "symbol": pos.symbol,
+                        "side": pos.side,
+                        "size": pos.size,
+                        "entry_price": pos.entry_price,
+                        "unrealized_pnl": pos.unrealized_pnl,
+                    })
+            
+            return {
+                "ok": True,
+                "settings": {
+                    "strategy": strategy_config,
+                    "risk": risk_config,
+                    "current_balance": current_balance,
+                    "current_positions": current_positions,
+                    "is_running": state.is_running if hasattr(state, 'is_running') else False,
+                }
+            }
+        except Exception as e:
+            logger.error(f"Failed to get bot settings: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Get real-time trading data for comparison
+    @app.post("/api/bot/update_settings", dependencies=[Depends(verify_api_key)])
+    async def update_bot_settings():
+        """Update bot settings in paper trading manager."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not trading_loop:
+            raise HTTPException(status_code=501, detail="Trading loop not available")
+        
+        try:
+            # Get current settings from trading loop
+            settings = trading_loop.settings
+            state = trading_loop.state
+            
+            bot_settings = {
+                "settings": {
+                    "strategy": {
+                        "use_mtf_strategy": settings.ml_strategy.use_mtf_strategy,
+                        "model_path": settings.ml_strategy.model_path,
+                        "model_1h_path": settings.ml_strategy.model_1h_path,
+                        "model_15m_path": settings.ml_strategy.model_15m_path,
+                        "confidence_threshold": settings.ml_strategy.confidence_threshold,
+                        "min_signal_strength": settings.ml_strategy.min_signal_strength,
+                    },
+                    "risk": {
+                        "base_order_usd": settings.risk.base_order_usd,
+                        "max_position_size_usd": settings.risk.max_position_size_usd,
+                        "max_daily_loss_usd": settings.risk.max_daily_loss_usd,
+                        "max_daily_trades": settings.risk.max_daily_trades,
+                        "reverse_min_confidence": settings.risk.reverse_min_confidence,
+                    },
+                    "current_balance": state.balance if hasattr(state, 'balance') else 10000.0,
+                    "is_running": state.is_running if hasattr(state, 'is_running') else False,
+                }
+            }
+            
+            # Update paper trading manager settings
+            paper_trading_manager.update_settings(bot_settings)
+            
+            return {"ok": True, "message": "Settings updated successfully"}
+        except Exception as e:
+            logger.error(f"Failed to update settings: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/bot/realtime_data", dependencies=[Depends(verify_api_key)])
+    def get_realtime_data(symbol: str = None):
+        """Get real-time trading data for comparison with paper trading."""
+        if not trading_loop:
+            raise HTTPException(status_code=501, detail="Trading loop not available")
+        
+        try:
+            # Get recent trades for the symbol
+            recent_trades = []
+            if hasattr(trading_loop.state, 'trades'):
+                from datetime import datetime, timedelta
+                hour_ago = datetime.now() - timedelta(hours=1)
+                
+                for trade in trading_loop.state.trades:
+                    if symbol and trade.symbol != symbol:
+                        continue
+                    
+                    try:
+                        exit_time = datetime.fromisoformat(trade.exit_time) if trade.exit_time else None
+                        if exit_time and exit_time >= hour_ago:
+                            recent_trades.append({
+                                "symbol": trade.symbol,
+                                "action": trade.action,
+                                "entry_price": trade.entry_price,
+                                "exit_price": trade.exit_price,
+                                "pnl_usd": trade.pnl_usd,
+                                "pnl_percent": trade.pnl_percent,
+                                "entry_time": trade.entry_time,
+                                "exit_time": trade.exit_time,
+                            })
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Calculate equity curve for real trading
+            equity_curve = []
+            timestamps = []
+            if recent_trades:
+                equity = 10000.0  # Starting balance
+                equity_curve.append(equity)
+                timestamps.append(datetime.now().isoformat())
+                
+                for trade in recent_trades:
+                    equity += trade["pnl_usd"]
+                    equity_curve.append(equity)
+                    timestamps.append(trade.get("exit_time", datetime.now().isoformat()))
+            
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "recent_trades": recent_trades,
+                "equity_curve": equity_curve,
+                "timestamps": timestamps,
+                "total_trades": len(recent_trades),
+                "total_pnl": sum(t["pnl_usd"] for t in recent_trades),
+                "win_rate": (len([t for t in recent_trades if t["pnl_usd"] > 0]) / len(recent_trades) * 100) if recent_trades else 0,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get realtime data: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     return app
 
 
