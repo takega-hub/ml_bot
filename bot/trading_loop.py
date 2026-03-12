@@ -12,6 +12,7 @@ from bot.ml.strategy_ml import MLStrategy, build_ml_signals
 from bot.strategy import Action, Signal, Bias
 from bot.indicators import prepare_with_indicators
 from bot.notification_manager import NotificationManager, NotificationLevel
+from bot.paper_trading import PaperTradingManager
 
 if TYPE_CHECKING:
     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
@@ -43,6 +44,9 @@ class TradingLoop:
         # Ожидающие сигналы для входа по откату (pullback)
         # Структура: {symbol: [{'signal': Signal, 'signal_time': datetime, 'signal_high': float, 'signal_low': float, 'bars_waited': int}, ...]}
         self.pending_pullback_signals: Dict[str, List[Dict]] = {}
+        
+        # Paper trading manager for online testing of experimental models
+        self.paper_trading_manager = PaperTradingManager()
         
         # Валидация моделей при старте
         if self.settings.ml_strategy.use_mtf_strategy:
@@ -910,7 +914,27 @@ class TradingLoop:
             
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
-            # 4. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
+            # 4. Process paper trading for online testing of experimental models
+            # Pass the same data to paper trading manager
+            try:
+                # Extract high and low from the current row
+                high = float(row['high'])
+                low = float(row['low'])
+                
+                self.paper_trading_manager.on_bar(
+                    symbol=symbol,
+                    row=row,
+                    df=df,
+                    current_price=current_price,
+                    high=high,
+                    low=low,
+                    candle_timestamp=candle_timestamp
+                )
+                logger.debug(f"[{symbol}] ✅ Paper trading manager processed bar")
+            except Exception as e:
+                logger.error(f"[{symbol}] Error processing paper trading: {e}")
+
+            # 5. Логируем сигнал в историю (только если уверенность >= reverse_min_confidence)
             # Это гарантирует, что в истории отображаются только сигналы с достаточной уверенностью
             min_confidence_for_history = self.settings.risk.reverse_min_confidence
             if signal.action != Action.HOLD:
@@ -936,7 +960,7 @@ class TradingLoop:
             
             logger.info(f"[{symbol}] ✅ Signal processing completed, returning from process_symbol")
 
-            # 5. Исполнение сделок
+            # 6. Исполнение сделок
             # ВАЖНО: Проверяем уверенность перед открытием позиции
             # Для MTF стратегии используем специфичные пороги, для обычной - общий порог
             strategy = self.strategies.get(symbol)

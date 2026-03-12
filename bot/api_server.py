@@ -244,6 +244,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     # Инициализация AI Agent
     from bot.ai_agent_service import AIAgentService
     ai_agent = AIAgentService()
+    
+    # Get paper trading manager from trading loop
+    paper_trading_manager = None
+    if trading_loop and hasattr(trading_loop, 'paper_trading_manager'):
+        paper_trading_manager = trading_loop.paper_trading_manager
 
     logger.info("[Mobile API] create_app: создание app и middleware...")
     app = FastAPI(title="ML Trading Bot API", version="2.0.0")
@@ -1744,6 +1749,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "improvement_pnl": experiment_pnl - current_pnl,
                 "improvement_winrate": experiment_winrate - current_winrate
             }
+            
+            # Add paper trading status if available
+            if paper_trading_manager:
+                paper_status = paper_trading_manager.get_session_status(experiment.get("id"))
+                if paper_status:
+                    experiment["paper_status"] = paper_status
+                    paper_metrics = paper_trading_manager.get_metrics(experiment.get("id"))
+                    if paper_metrics:
+                        experiment["paper_metrics"] = paper_metrics
         
         return {"experiments": experiments}
 
@@ -1826,6 +1840,287 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise
         except Exception as e:
             logger.error(f"Failed to apply experiment: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # --- Paper Trading Endpoints ---
+    class PaperStartBody(BaseModel):
+        experiment_id: str
+
+    @app.post("/api/paper/start", dependencies=[Depends(verify_api_key)])
+    async def post_paper_start(body: PaperStartBody):
+        """Start paper trading session for an experiment."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        try:
+            session = paper_trading_manager.start_session(body.experiment_id)
+            if not session:
+                raise HTTPException(status_code=404, detail=f"Failed to start paper trading session for experiment {body.experiment_id}")
+            
+            if tg_bot:
+                await tg_bot.send_notification(f"📊 Paper trading started for experiment {body.experiment_id}")
+            
+            return {"ok": True, "experiment_id": body.experiment_id, "symbol": session.symbol}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to start paper trading: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    class PaperStopBody(BaseModel):
+        experiment_id: str
+
+    @app.post("/api/paper/stop", dependencies=[Depends(verify_api_key)])
+    async def post_paper_stop(body: PaperStopBody):
+        """Stop paper trading session for an experiment."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        try:
+            success = paper_trading_manager.stop_session(body.experiment_id)
+            if not success:
+                raise HTTPException(status_code=404, detail=f"Paper trading session not found for experiment {body.experiment_id}")
+            
+            if tg_bot:
+                await tg_bot.send_notification(f"📊 Paper trading stopped for experiment {body.experiment_id}")
+            
+            return {"ok": True, "experiment_id": body.experiment_id}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to stop paper trading: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/status", dependencies=[Depends(verify_api_key)])
+    def get_paper_status():
+        """Get status of all active paper trading sessions."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        try:
+            sessions = paper_trading_manager.get_all_sessions_status()
+            return {"sessions": sessions}
+        except Exception as e:
+            logger.error(f"Failed to get paper trading status: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/trades", dependencies=[Depends(verify_api_key)])
+    def get_paper_trades(experiment_id: str = None, limit: int = 100):
+        """Get paper trading trades for a specific experiment."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not experiment_id:
+            raise HTTPException(status_code=400, detail="experiment_id parameter is required")
+        
+        try:
+            trades = paper_trading_manager.get_trades(experiment_id, limit)
+            return {"experiment_id": experiment_id, "trades": trades}
+        except Exception as e:
+            logger.error(f"Failed to get paper trading trades: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/metrics", dependencies=[Depends(verify_api_key)])
+    def get_paper_metrics(experiment_id: str = None):
+        """Get paper trading metrics for a specific experiment."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not experiment_id:
+            raise HTTPException(status_code=400, detail="experiment_id parameter is required")
+        
+        try:
+            metrics = paper_trading_manager.get_metrics(experiment_id)
+            if not metrics:
+                raise HTTPException(status_code=404, detail=f"Paper trading session not found for experiment {experiment_id}")
+            
+            return metrics
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get paper trading metrics: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/chart", dependencies=[Depends(verify_api_key)])
+    def get_paper_chart(experiment_id: str = None, days: int = 7):
+        """Get chart data for paper trading comparison."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not experiment_id:
+            raise HTTPException(status_code=400, detail="experiment_id parameter is required")
+        
+        try:
+            # Get paper trading metrics
+            paper_metrics = paper_trading_manager.get_metrics(experiment_id)
+            if not paper_metrics:
+                raise HTTPException(status_code=404, detail=f"Paper trading session not found for experiment {experiment_id}")
+            
+            # Get working model metrics from state
+            working_metrics = {}
+            if trading_loop and hasattr(trading_loop, 'state'):
+                state = trading_loop.state
+                symbol = paper_metrics.get('symbol')
+                if symbol and hasattr(state, 'trades'):
+                    from datetime import datetime, timedelta
+                    week_ago = datetime.now() - timedelta(days=days)
+                    week_trades = []
+                    for trade in state.trades:
+                        if trade.symbol == symbol and trade.status == "closed" and trade.exit_time:
+                            try:
+                                exit_dt = datetime.fromisoformat(trade.exit_time)
+                                if exit_dt >= week_ago:
+                                    week_trades.append(trade)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    if week_trades:
+                        # Calculate equity curve for working model
+                        equity = 10000.0  # Starting balance
+                        equity_curve = [equity]
+                        timestamps = [datetime.now()]
+                        
+                        for trade in week_trades:
+                            equity += trade.pnl_usd
+                            equity_curve.append(equity)
+                            timestamps.append(datetime.fromisoformat(trade.exit_time))
+                        
+                        working_metrics = {
+                            "equity_curve": equity_curve,
+                            "timestamps": [ts.isoformat() for ts in timestamps],
+                            "total_pnl": sum(t.pnl_usd for t in week_trades),
+                            "win_rate": (len([t for t in week_trades if t.pnl_usd > 0]) / len(week_trades) * 100) if week_trades else 0,
+                            "total_trades": len(week_trades)
+                        }
+            
+            # Prepare chart data
+            chart_data = {
+                "experiment_id": experiment_id,
+                "symbol": paper_metrics.get('symbol'),
+                "paper_trading": {
+                    "equity_curve": paper_metrics.get('metrics', {}).get('equity_curve', []),
+                    "timestamps": paper_metrics.get('metrics', {}).get('timestamps', []),
+                    "total_pnl": paper_metrics.get('metrics', {}).get('total_pnl', 0),
+                    "win_rate": paper_metrics.get('metrics', {}).get('win_rate', 0),
+                    "total_trades": paper_metrics.get('metrics', {}).get('total_trades', 0)
+                },
+                "working_model": working_metrics,
+                "comparison": {
+                    "paper_pnl": paper_metrics.get('metrics', {}).get('total_pnl', 0),
+                    "working_pnl": working_metrics.get('total_pnl', 0),
+                    "paper_winrate": paper_metrics.get('metrics', {}).get('win_rate', 0),
+                    "working_winrate": working_metrics.get('win_rate', 0),
+                    "improvement_pnl": paper_metrics.get('metrics', {}).get('total_pnl', 0) - working_metrics.get('total_pnl', 0),
+                    "improvement_winrate": paper_metrics.get('metrics', {}).get('win_rate', 0) - working_metrics.get('win_rate', 0)
+                }
+            }
+            
+            return chart_data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get chart data: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/final_stats", dependencies=[Depends(verify_api_key)])
+    def get_paper_final_stats(experiment_id: str = None):
+        """Get final statistics after paper trading tests."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not experiment_id:
+            raise HTTPException(status_code=400, detail="experiment_id parameter is required")
+        
+        try:
+            # Get paper trading metrics
+            paper_metrics = paper_trading_manager.get_metrics(experiment_id)
+            if not paper_metrics:
+                raise HTTPException(status_code=404, detail=f"Paper trading session not found for experiment {experiment_id}")
+            
+            # Get session status
+            session_status = paper_trading_manager.get_session_status(experiment_id)
+            
+            # Prepare final statistics
+            final_stats = {
+                "experiment_id": experiment_id,
+                "symbol": paper_metrics.get('symbol'),
+                "session_status": session_status,
+                "paper_trading_metrics": paper_metrics.get('metrics', {}),
+                "summary": {
+                    "total_trades": paper_metrics.get('metrics', {}).get('total_trades', 0),
+                    "win_rate": paper_metrics.get('metrics', {}).get('win_rate', 0),
+                    "total_pnl": paper_metrics.get('metrics', {}).get('total_pnl', 0),
+                    "total_pnl_pct": paper_metrics.get('metrics', {}).get('total_pnl_pct', 0),
+                    "profit_factor": paper_metrics.get('metrics', {}).get('profit_factor', 0),
+                    "max_drawdown_pct": paper_metrics.get('metrics', {}).get('max_drawdown_pct', 0),
+                    "sharpe_ratio": paper_metrics.get('metrics', {}).get('sharpe_ratio', 0),
+                    "avg_win": paper_metrics.get('metrics', {}).get('avg_win', 0),
+                    "avg_loss": paper_metrics.get('metrics', {}).get('avg_loss', 0),
+                    "consecutive_wins": paper_metrics.get('metrics', {}).get('consecutive_wins', 0),
+                    "consecutive_losses": paper_metrics.get('metrics', {}).get('consecutive_losses', 0),
+                    "largest_win": paper_metrics.get('metrics', {}).get('largest_win', 0),
+                    "largest_loss": paper_metrics.get('metrics', {}).get('largest_loss', 0),
+                },
+                "recommendation": "replace" if paper_metrics.get('metrics', {}).get('total_pnl', 0) > 0 else "discard"
+            }
+            
+            return final_stats
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get final statistics: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    class ReplaceModelBody(BaseModel):
+        experiment_id: str
+        symbol: str
+
+    @app.post("/api/paper/replace_model", dependencies=[Depends(verify_api_key)])
+    async def post_replace_model(body: ReplaceModelBody):
+        """Replace working model with experimental model."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        try:
+            # Load experiment data
+            experiment_data = paper_trading_manager.load_experiment(body.experiment_id)
+            if not experiment_data:
+                raise HTTPException(status_code=404, detail=f"Experiment {body.experiment_id} not found")
+            
+            # Get model paths
+            models = experiment_data.get('results', {}).get('models', {})
+            model_15m = models.get('15m')
+            model_1h = models.get('1h')
+            
+            if not model_15m and not model_1h:
+                raise HTTPException(status_code=400, detail="No valid models found in experiment")
+            
+            # Update the working model configuration
+            # This would typically involve updating the settings or state
+            # For now, we'll just return success and log the action
+            logger.info(f"Replacing model for {body.symbol} with experiment {body.experiment_id}")
+            logger.info(f"  15m model: {model_15m}")
+            logger.info(f"  1h model: {model_1h}")
+            
+            # In a real implementation, you would:
+            # 1. Update the trading loop's strategy
+            # 2. Save the new configuration
+            # 3. Restart the trading loop if needed
+            
+            if tg_bot:
+                await tg_bot.send_notification(f"🔄 Model replacement requested for {body.symbol} with experiment {body.experiment_id}")
+            
+            return {
+                "ok": True,
+                "experiment_id": body.experiment_id,
+                "symbol": body.symbol,
+                "models": models,
+                "message": "Model replacement requested. In a full implementation, this would update the working model configuration."
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to replace model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
