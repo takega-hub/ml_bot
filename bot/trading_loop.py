@@ -51,11 +51,12 @@ class TradingLoop:
             "settings": {
                 "strategy": {
                     "use_mtf_strategy": self.settings.ml_strategy.use_mtf_strategy,
-                    "model_path": self.settings.ml_strategy.model_path,
-                    "model_1h_path": self.settings.ml_strategy.model_1h_path,
-                    "model_15m_path": self.settings.ml_strategy.model_15m_path,
                     "confidence_threshold": self.settings.ml_strategy.confidence_threshold,
                     "min_signal_strength": self.settings.ml_strategy.min_signal_strength,
+                    "mtf_confidence_threshold_1h": self.settings.ml_strategy.mtf_confidence_threshold_1h,
+                    "mtf_confidence_threshold_15m": self.settings.ml_strategy.mtf_confidence_threshold_15m,
+                    "mtf_alignment_mode": self.settings.ml_strategy.mtf_alignment_mode,
+                    "mtf_require_alignment": self.settings.ml_strategy.mtf_require_alignment,
                 },
                 "risk": {
                     "base_order_usd": self.settings.risk.base_order_usd,
