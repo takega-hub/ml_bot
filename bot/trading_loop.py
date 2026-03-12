@@ -3024,7 +3024,7 @@ class TradingLoop:
                                     # accumulated_fee содержит сумму всех этих издержек.
                                     # Нам НЕ нужно вычитать total_fee_usd из pnl_usd повторно.
                                         
-                                    logger.info(f"Found aggregated PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, total_fee={total_fee_usd:.4f}")
+                                    logger.info(f"Found aggregated PnL data: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.6f}, pnl_pct={pnl_pct:.4f}%, total_fee={total_fee_usd:.4f}")
                                     break
                                 
                                 if exit_price is not None:
@@ -3107,8 +3107,12 @@ class TradingLoop:
             # ВАЖНО: Мы уже получили pnl_usd и pnl_pct из агрегированных данных closedPnl (если они были найдены)
             # Если pnl_usd == 0 (данные не найдены), тогда считаем вручную
             
+            logger.info(f"PnL calculation start: pnl_usd={pnl_usd}, pnl_pct={pnl_pct}, exit_price={exit_price}")
+            
             if pnl_usd == 0 and exit_price is not None:
                 leverage = self.settings.leverage
+                
+                logger.info(f"Manual PnL calculation for {symbol}: entry_price={local_pos.entry_price}, qty={local_pos.qty}, side={local_pos.side}, leverage={leverage}, exit_price={exit_price}")
                 
                 if local_pos.side == "Buy":
                     price_diff_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price)
@@ -3121,6 +3125,8 @@ class TradingLoop:
                 # Маржа = entry_price * qty / leverage
                 margin = (local_pos.entry_price * local_pos.qty) / leverage
                 pnl_usd = (pnl_pct / 100) * margin
+                
+                logger.info(f"Manual PnL: price_diff_pct={price_diff_pct:.8f}, pnl_pct_raw={pnl_pct:.8f}%, margin={margin:.6f}, pnl_usd_before_fee={pnl_usd:.6f}")
 
                 # Учитываем комиссию биржи (если считаем вручную)
                 fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
@@ -3130,10 +3136,10 @@ class TradingLoop:
                     if margin > 0:
                         pnl_pct = (pnl_usd / margin) * 100
                     logger.info(
-                        f"Applied fees for {symbol}: fee_usd={fee_usd:.4f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%"
+                        f"Applied fees for {symbol}: fee_usd={fee_usd:.4f}, pnl_usd={pnl_usd:.6f}, pnl_pct={pnl_pct:.4f}%"
                     )
             
-            logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.2f}%, pnl_usd={pnl_usd:.2f}")
+            logger.info(f"Calculated PnL for {symbol}: exit_price={exit_price:.2f}, pnl_pct={pnl_pct:.4f}%, pnl_usd={pnl_usd:.6f}")
             
             # Определяем причину закрытия
             exit_reason = "TP" if pnl_usd > 0 else "SL"
@@ -3172,10 +3178,10 @@ class TradingLoop:
                 f"{symbol} {local_pos.side}\n"
                 f"Вход: ${local_pos.entry_price:.2f}\n"
                 f"Выход: ${exit_price:.2f}\n"
-                f"PnL: {pnl_usd:+.2f} USD ({pnl_pct:+.2f}%)"
+                f"PnL: {pnl_usd:+.6f} USD ({pnl_pct:+.4f}%)"
             )
             
-            logger.info(f"Position {symbol} closed: PnL={pnl_usd:.2f} USD ({pnl_pct:.2f}%)")
+            logger.info(f"Position {symbol} closed: PnL={pnl_usd:.6f} USD ({pnl_pct:.4f}%)")
             
         except Exception as e:
             logger.error(f"Error handling closed position for {symbol}: {e}")

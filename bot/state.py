@@ -592,10 +592,10 @@ class BotState:
         Обновляет сделку при закрытии и проверяет необходимость cooldown.
         Также экспортирует закрытую сделку в Excel.
         """
-        logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.2f}, pnl_pct={pnl_pct:.2f}%, commission={commission:.2f}, exit_reason={exit_reason}")
+        logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.6f}, pnl_pct={pnl_pct:.4f}%, commission={commission:.4f}, exit_reason={exit_reason}")
         
         # Log to trades.log
-        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.2f} ({pnl_pct:.2f}%) | Fee: ${commission:.2f} | Reason: {exit_reason}")
+        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.6f} ({pnl_pct:.4f}%) | Fee: ${commission:.4f} | Reason: {exit_reason}")
         
         closed_trade = None
         with self.lock:
