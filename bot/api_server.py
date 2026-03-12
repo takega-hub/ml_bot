@@ -234,7 +234,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
     logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
-        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks, WebSocket, WebSocketDisconnect
+        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError as e:
@@ -2144,35 +2144,22 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             logger.error(f"Failed to replace model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # WebSocket endpoint for real-time chart updates
-    @app.websocket("/ws/paper/chart/{experiment_id}")
-    async def websocket_paper_chart(websocket: WebSocket, experiment_id: str):
-        """WebSocket endpoint for real-time paper trading chart updates."""
-        await websocket.accept()
-        
+    # REST API endpoint for real-time chart updates
+    @app.get("/api/paper/realtime_chart/{experiment_id}", dependencies=[Depends(verify_api_key)])
+    async def get_paper_realtime_chart(experiment_id: str):
+        """Get real-time chart data for paper trading session."""
         if not paper_trading_manager:
-            await websocket.close(code=1011, reason="Paper trading manager not available")
-            return
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
         
         try:
-            while True:
-                # Get real-time chart data
-                chart_data = paper_trading_manager.get_realtime_chart_data(experiment_id)
-                
-                if chart_data:
-                    await websocket.send_json(chart_data)
-                
-                # Wait before sending next update (1 second interval)
-                await asyncio.sleep(1)
-                
-        except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected for experiment {experiment_id}")
+            chart_data = paper_trading_manager.get_realtime_chart_data(experiment_id)
+            if not chart_data:
+                raise HTTPException(status_code=404, detail=f"No chart data found for experiment {experiment_id}")
+            
+            return chart_data
         except Exception as e:
-            logger.error(f"WebSocket error for experiment {experiment_id}: {e}")
-            try:
-                await websocket.close(code=1011, reason=str(e))
-            except:
-                pass
+            logger.error(f"Failed to get realtime chart data: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     # Get bot settings and current strategy for realistic simulation
     @app.get("/api/bot/settings", dependencies=[Depends(verify_api_key)])
@@ -2190,11 +2177,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             if hasattr(settings, 'ml_strategy'):
                 strategy_config = {
                     "use_mtf_strategy": settings.ml_strategy.use_mtf_strategy,
-                    "model_path": settings.ml_strategy.model_path,
-                    "model_1h_path": settings.ml_strategy.model_1h_path,
-                    "model_15m_path": settings.ml_strategy.model_15m_path,
                     "confidence_threshold": settings.ml_strategy.confidence_threshold,
                     "min_signal_strength": settings.ml_strategy.min_signal_strength,
+                    "mtf_confidence_threshold_1h": settings.ml_strategy.mtf_confidence_threshold_1h,
+                    "mtf_confidence_threshold_15m": settings.ml_strategy.mtf_confidence_threshold_15m,
+                    "mtf_alignment_mode": settings.ml_strategy.mtf_alignment_mode,
+                    "mtf_require_alignment": settings.ml_strategy.mtf_require_alignment,
                 }
             
             # Get risk management settings
@@ -2252,11 +2240,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "settings": {
                     "strategy": {
                         "use_mtf_strategy": settings.ml_strategy.use_mtf_strategy,
-                        "model_path": settings.ml_strategy.model_path,
-                        "model_1h_path": settings.ml_strategy.model_1h_path,
-                        "model_15m_path": settings.ml_strategy.model_15m_path,
                         "confidence_threshold": settings.ml_strategy.confidence_threshold,
                         "min_signal_strength": settings.ml_strategy.min_signal_strength,
+                        "mtf_confidence_threshold_1h": settings.ml_strategy.mtf_confidence_threshold_1h,
+                        "mtf_confidence_threshold_15m": settings.ml_strategy.mtf_confidence_threshold_15m,
+                        "mtf_alignment_mode": settings.ml_strategy.mtf_alignment_mode,
+                        "mtf_require_alignment": settings.ml_strategy.mtf_require_alignment,
                     },
                     "risk": {
                         "base_order_usd": settings.risk.base_order_usd,
