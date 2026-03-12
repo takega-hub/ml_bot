@@ -2157,6 +2157,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 raise HTTPException(status_code=404, detail=f"No chart data found for experiment {experiment_id}")
             
             return chart_data
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get realtime chart data: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))

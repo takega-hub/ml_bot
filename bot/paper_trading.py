@@ -36,9 +36,52 @@ class PaperTrade:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     trailing: Optional[dict] = None
-    status: str = "open"  # "open", "closed", "cancelled"
+    status: str = "open"
     reason: str = ""
     indicators_info: Optional[dict] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "experiment_id": self.experiment_id,
+            "symbol": self.symbol,
+            "action": self.action.value,
+            "entry_price": self.entry_price,
+            "entry_time": self.entry_time.isoformat() if self.entry_time else None,
+            "exit_price": self.exit_price,
+            "exit_time": self.exit_time.isoformat() if self.exit_time else None,
+            "quantity": self.quantity,
+            "pnl": self.pnl,
+            "pnl_pct": self.pnl_pct,
+            "stop_loss": self.stop_loss,
+            "take_profit": self.take_profit,
+            "trailing": self.trailing,
+            "status": self.status,
+            "reason": self.reason,
+            "indicators_info": self.indicators_info,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PaperTrade":
+        return cls(
+            id=data["id"],
+            experiment_id=data.get("experiment_id", ""),
+            symbol=data.get("symbol", ""),
+            action=Action(data["action"]),
+            entry_price=float(data.get("entry_price", 0.0)),
+            entry_time=datetime.fromisoformat(data["entry_time"]),
+            exit_price=float(data["exit_price"]) if data.get("exit_price") is not None else None,
+            exit_time=datetime.fromisoformat(data["exit_time"]) if data.get("exit_time") else None,
+            quantity=float(data.get("quantity", 0.0)),
+            pnl=float(data.get("pnl", 0.0)),
+            pnl_pct=float(data.get("pnl_pct", 0.0)),
+            stop_loss=float(data["stop_loss"]) if data.get("stop_loss") is not None else None,
+            take_profit=float(data["take_profit"]) if data.get("take_profit") is not None else None,
+            trailing=data.get("trailing"),
+            status=data.get("status", "open"),
+            reason=data.get("reason", ""),
+            indicators_info=data.get("indicators_info"),
+        )
 
 
 @dataclass
@@ -78,8 +121,14 @@ class PaperMetrics:
 
 class PaperBroker:
     """Virtual broker for paper trading."""
-    
-    def __init__(self, initial_balance: float = 10000.0, commission: float = 0.0006, slippage_bps: float = 0.0, base_order_usd: float = 100.0):
+
+    def __init__(
+        self,
+        initial_balance: float = 10000.0,
+        commission: float = 0.0006,
+        slippage_bps: float = 0.0,
+        base_order_usd: float = 100.0,
+    ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.commission = commission
@@ -87,42 +136,40 @@ class PaperBroker:
         self.base_order_usd = base_order_usd
         self.position: Optional[PaperTrade] = None
         self.trades: List[PaperTrade] = []
-        
+
     def calculate_quantity(self, entry_price: float) -> float:
         """Calculate position quantity based on base order size."""
         return self.base_order_usd / entry_price
-    
+
     def apply_slippage(self, price: float, is_entry: bool = True) -> float:
         """Apply slippage to price."""
         if self.slippage_bps > 0:
             slippage_factor = self.slippage_bps / 10000
             if is_entry:
                 return price * (1 + slippage_factor)
-            else:
-                return price * (1 - slippage_factor)
+            return price * (1 - slippage_factor)
         return price
-    
-    def open_position(self, signal: Signal, current_price: float, candle_timestamp: datetime) -> Optional[PaperTrade]:
+
+    def open_position(
+        self,
+        signal: Signal,
+        current_price: float,
+        candle_timestamp: datetime,
+    ) -> Optional[PaperTrade]:
         """Open a virtual position based on signal."""
         if self.position is not None:
             logger.warning("Position already open, cannot open new position")
             return None
-            
-        # Apply slippage to entry price
+
         entry_price = self.apply_slippage(current_price, is_entry=True)
-        
-        # Calculate quantity using base order size
         quantity = self.calculate_quantity(entry_price)
-        
-        # Calculate commission
         commission_cost = entry_price * quantity * self.commission
-        
-        # Create trade
+
         trade_id = f"paper_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         trade = PaperTrade(
             id=trade_id,
-            experiment_id="",  # Will be set by manager
-            symbol="",  # Will be set by manager
+            experiment_id="",
+            symbol="",
             action=signal.action,
             entry_price=entry_price,
             entry_time=candle_timestamp,
@@ -131,28 +178,33 @@ class PaperBroker:
             take_profit=signal.take_profit,
             trailing=signal.trailing,
             reason=signal.reason,
-            indicators_info=signal.indicators_info
+            indicators_info=signal.indicators_info,
         )
-        
-        # Update balance (deduct commission)
+
         self.balance -= commission_cost
-        
         self.position = trade
         self.trades.append(trade)
-        
-        logger.info(f"Opened {signal.action.value} position at {entry_price:.2f}, quantity: {quantity:.4f}")
+
+        logger.info(
+            f"Opened {signal.action.value} position at {entry_price:.2f}, quantity: {quantity:.4f}"
+        )
         return trade
-    
-    def check_exit(self, current_price: float, high: float, low: float, candle_timestamp: datetime) -> Optional[PaperTrade]:
+
+    def check_exit(
+        self,
+        current_price: float,
+        high: float,
+        low: float,
+        candle_timestamp: datetime,
+    ) -> Optional[PaperTrade]:
         """Check if position should be closed based on TP/SL/trailing."""
         if self.position is None:
             return None
-            
+
         trade = self.position
         exit_price = None
         exit_reason = ""
-        
-        # Check stop loss
+
         if trade.stop_loss is not None:
             if trade.action == Action.LONG and low <= trade.stop_loss:
                 exit_price = trade.stop_loss
@@ -160,8 +212,7 @@ class PaperBroker:
             elif trade.action == Action.SHORT and high >= trade.stop_loss:
                 exit_price = trade.stop_loss
                 exit_reason = "stop_loss"
-        
-        # Check take profit
+
         if exit_price is None and trade.take_profit is not None:
             if trade.action == Action.LONG and high >= trade.take_profit:
                 exit_price = trade.take_profit
@@ -169,10 +220,9 @@ class PaperBroker:
             elif trade.action == Action.SHORT and low <= trade.take_profit:
                 exit_price = trade.take_profit
                 exit_reason = "take_profit"
-        
-        # Check trailing stop
+
         if exit_price is None and trade.trailing is not None:
-            trailing_stop = trade.trailing.get('stop_loss')
+            trailing_stop = trade.trailing.get("stop_loss")
             if trailing_stop is not None:
                 if trade.action == Action.LONG and low <= trailing_stop:
                     exit_price = trailing_stop
@@ -180,74 +230,77 @@ class PaperBroker:
                 elif trade.action == Action.SHORT and high >= trailing_stop:
                     exit_price = trailing_stop
                     exit_reason = "trailing_stop"
-        
-        # If no TP/SL hit, check if we should close at current price (for simulation)
-        # In real paper trading, we might want to hold until TP/SL
-        # For now, we'll only close on TP/SL
-        
+
         if exit_price is not None:
-            # Apply slippage to exit price
             exit_price = self.apply_slippage(exit_price, is_entry=False)
-            
-            # Calculate PnL
+
             if trade.action == Action.LONG:
                 pnl = (exit_price - trade.entry_price) * trade.quantity
-            else:  # SHORT
+            else:
                 pnl = (trade.entry_price - exit_price) * trade.quantity
-            
-            # Deduct commission
+
             commission_cost = exit_price * trade.quantity * self.commission
             pnl -= commission_cost
-            
-            # Update trade
+
             trade.exit_price = exit_price
             trade.exit_time = candle_timestamp
             trade.pnl = pnl
             trade.pnl_pct = (pnl / (trade.entry_price * trade.quantity)) * 100
             trade.status = "closed"
             trade.reason = exit_reason
-            
-            # Update balance
+
             self.balance += pnl
-            
-            # Clear position
             self.position = None
-            
-            logger.info(f"Closed position at {exit_price:.2f}, PnL: {pnl:.2f}, Reason: {exit_reason}")
+
+            logger.info(
+                f"Closed position at {exit_price:.2f}, PnL: {pnl:.2f}, Reason: {exit_reason}"
+            )
             return trade
-        
+
         return None
-    
+
     def get_metrics(self) -> Dict[str, Any]:
         """Calculate metrics from trades."""
         if not self.trades:
             return {}
-            
+
         closed_trades = [t for t in self.trades if t.status == "closed"]
         if not closed_trades:
             return {}
-            
+
         total_trades = len(closed_trades)
         winning_trades = sum(1 for t in closed_trades if t.pnl > 0)
         losing_trades = total_trades - winning_trades
-        
+
         total_pnl = sum(t.pnl for t in closed_trades)
         total_pnl_pct = sum(t.pnl_pct for t in closed_trades)
-        
         win_rate = winning_trades / total_trades if total_trades > 0 else 0
-        
-        avg_win = sum(t.pnl for t in closed_trades if t.pnl > 0) / winning_trades if winning_trades > 0 else 0
-        avg_loss = sum(t.pnl for t in closed_trades if t.pnl < 0) / losing_trades if losing_trades > 0 else 0
-        
-        profit_factor = abs(sum(t.pnl for t in closed_trades if t.pnl > 0) / sum(t.pnl for t in closed_trades if t.pnl < 0)) if losing_trades > 0 else float('inf')
-        
-        # Calculate drawdown and equity curve
+
+        avg_win = (
+            sum(t.pnl for t in closed_trades if t.pnl > 0) / winning_trades
+            if winning_trades > 0
+            else 0
+        )
+        avg_loss = (
+            sum(t.pnl for t in closed_trades if t.pnl < 0) / losing_trades
+            if losing_trades > 0
+            else 0
+        )
+        profit_factor = (
+            abs(
+                sum(t.pnl for t in closed_trades if t.pnl > 0)
+                / sum(t.pnl for t in closed_trades if t.pnl < 0)
+            )
+            if losing_trades > 0
+            else float("inf")
+        )
+
         equity = self.initial_balance
         max_equity = equity
         max_drawdown = 0
         equity_curve = [equity]
-        timestamps = [datetime.now()]  # Start with current time
-        
+        timestamps = [datetime.now()]
+
         for trade in closed_trades:
             equity += trade.pnl
             max_equity = max(max_equity, equity)
@@ -255,23 +308,24 @@ class PaperBroker:
             max_drawdown = max(max_drawdown, drawdown)
             equity_curve.append(equity)
             timestamps.append(trade.exit_time or datetime.now())
-        
+
         max_drawdown_pct = (max_drawdown / max_equity) * 100 if max_equity > 0 else 0
-        
-        # Calculate trade durations
-        durations = [(t.exit_time - t.entry_time).total_seconds() / 3600 for t in closed_trades if t.exit_time]
+
+        durations = [
+            (t.exit_time - t.entry_time).total_seconds() / 3600
+            for t in closed_trades
+            if t.exit_time
+        ]
         avg_duration = sum(durations) / len(durations) if durations else 0
-        
-        # Best/worst trades
+
         best_trade = max(closed_trades, key=lambda t: t.pnl) if closed_trades else None
         worst_trade = min(closed_trades, key=lambda t: t.pnl) if closed_trades else None
-        
-        # Consecutive wins/losses
+
         consecutive_wins = 0
         consecutive_losses = 0
         current_streak = 0
         streak_type = None
-        
+
         for trade in closed_trades:
             if trade.pnl > 0:
                 if streak_type == "win":
@@ -287,10 +341,18 @@ class PaperBroker:
                     current_streak = 1
                     streak_type = "loss"
                 consecutive_losses = max(consecutive_losses, current_streak)
-        
-        # Average confidence
-        avg_confidence = sum(t.indicators_info.get('confidence', 0) for t in closed_trades if t.indicators_info) / len(closed_trades) if closed_trades else 0
-        
+
+        avg_confidence = (
+            sum(
+                t.indicators_info.get("confidence", 0)
+                for t in closed_trades
+                if t.indicators_info
+            )
+            / len(closed_trades)
+            if closed_trades
+            else 0
+        )
+
         return {
             "total_trades": total_trades,
             "winning_trades": winning_trades,
@@ -314,84 +376,109 @@ class PaperBroker:
             "total_signals": len(closed_trades),
             "long_signals": sum(1 for t in closed_trades if t.action == Action.LONG),
             "short_signals": sum(1 for t in closed_trades if t.action == Action.SHORT),
-            "signals_with_tp_sl_pct": 100.0,  # All trades have TP/SL in this implementation
-            "avg_position_size_usd": 100.0,  # Default base order size
+            "signals_with_tp_sl_pct": 100.0,
+            "avg_position_size_usd": self.base_order_usd,
             "equity_curve": equity_curve,
-            "timestamps": [ts.isoformat() for ts in timestamps]
+            "timestamps": [ts.isoformat() for ts in timestamps],
         }
 
 
 class PaperSession:
     """Paper trading session for a specific experiment."""
-    
-    def __init__(self, experiment_id: str, symbol: str, strategy, broker: PaperBroker, bot_settings: Optional[Dict[str, Any]] = None):
+
+    def __init__(
+        self,
+        experiment_id: str,
+        symbol: str,
+        strategy,
+        broker: PaperBroker,
+        bot_settings: Optional[Dict[str, Any]] = None,
+    ):
         self.experiment_id = experiment_id
         self.symbol = symbol
         self.strategy = strategy
         self.broker = broker
         self.bot_settings = bot_settings or {}
         self.is_active = False
-        self.start_time = None
-        self.end_time = None
+        self.start_time: Optional[datetime] = None
+        self.end_time: Optional[datetime] = None
         self.metrics = PaperMetrics()
-        
-    def start(self):
-        """Start the paper trading session."""
+        self.last_bar_time: Optional[datetime] = None
+        self.last_error: Optional[str] = None
+        self.last_snapshot_at: Optional[datetime] = None
+        self.status_reason: str = "idle"
+
+    def start(self, preserve_start_time: bool = False):
         self.is_active = True
-        self.start_time = datetime.now()
+        if not preserve_start_time or self.start_time is None:
+            self.start_time = datetime.now()
+        self.end_time = None
+        self.status_reason = "active"
+        self.last_snapshot_at = datetime.now()
         logger.info(f"Started paper trading session for {self.experiment_id} on {self.symbol}")
-        
-    def stop(self):
-        """Stop the paper trading session."""
+
+    def stop(self, reason: str = "stopped"):
         self.is_active = False
         self.end_time = datetime.now()
-        logger.info(f"Stopped paper trading session for {self.experiment_id} on {self.symbol}")
-        
-    def process_bar(self, row: pd.Series, df: pd.DataFrame, current_price: float, high: float, low: float, candle_timestamp: datetime):
-        """Process a new bar and generate signals."""
+        self.status_reason = reason
+        self.last_snapshot_at = datetime.now()
+        logger.info(f"Stopped paper trading session for {self.experiment_id} on {self.symbol} ({reason})")
+
+    def process_bar(
+        self,
+        row: pd.Series,
+        df: pd.DataFrame,
+        current_price: float,
+        high: float,
+        low: float,
+        candle_timestamp: datetime,
+    ):
         if not self.is_active:
             return
-            
-        # Check if session has been running for more than 7 days
+
+        self.last_bar_time = candle_timestamp
+        self.last_error = None
+        self.last_snapshot_at = datetime.now()
+
         if self.start_time and (datetime.now() - self.start_time).days >= 7:
-            logger.info(f"Session {self.experiment_id} has been running for 7 days. Stopping session.")
-            self.stop()
+            logger.info(
+                f"Session {self.experiment_id} has been running for 7 days. Stopping session."
+            )
+            self.stop(reason="completed")
             return
-            
-        # Check for exit first
+
         exit_trade = self.broker.check_exit(current_price, high, low, candle_timestamp)
         if exit_trade:
             exit_trade.experiment_id = self.experiment_id
             exit_trade.symbol = self.symbol
             self._update_metrics()
-            
-        # Generate signal if no position
+
         if self.broker.position is None:
             try:
-                # Generate signal using the strategy
-                if hasattr(self.strategy, 'predict_combined'):
-                    # MTF strategy
+                if hasattr(self.strategy, "predict_combined"):
                     signal = self.strategy.generate_signal(
                         row=row,
                         df_15m=df,
-                        df_1h=None,  # Will be handled by strategy
+                        df_1h=None,
                         has_position=None,
                         current_price=current_price,
-                        leverage=1.0,  # Paper trading uses 1x leverage
+                        leverage=1.0,
                         target_profit_pct_margin=0.01,
                         max_loss_pct_margin=0.01,
                         stop_loss_pct=0.02,
                         take_profit_pct=0.04,
                     )
                 else:
-                    # Single timeframe strategy
-                    # Use real bot settings for realistic simulation
-                    leverage = self.bot_settings.get('leverage', 1.0)
-                    target_profit_pct_margin = self.bot_settings.get('target_profit_pct_margin', 0.01)
-                    max_loss_pct_margin = self.bot_settings.get('max_loss_pct_margin', 0.01)
-                    stop_loss_pct = self.bot_settings.get('stop_loss_pct', 0.02)
-                    take_profit_pct = self.bot_settings.get('take_profit_pct', 0.04)
-                    
+                    leverage = self.bot_settings.get("leverage", 1.0)
+                    target_profit_pct_margin = self.bot_settings.get(
+                        "target_profit_pct_margin", 0.01
+                    )
+                    max_loss_pct_margin = self.bot_settings.get(
+                        "max_loss_pct_margin", 0.01
+                    )
+                    stop_loss_pct = self.bot_settings.get("stop_loss_pct", 0.02)
+                    take_profit_pct = self.bot_settings.get("take_profit_pct", 0.04)
+
                     signal = self.strategy.generate_signal(
                         row=row,
                         df=df,
@@ -403,115 +490,340 @@ class PaperSession:
                         stop_loss_pct=stop_loss_pct,
                         take_profit_pct=take_profit_pct,
                     )
-                    
+
                 if signal and signal.action != Action.HOLD:
-                    # Open position
                     trade = self.broker.open_position(signal, current_price, candle_timestamp)
                     if trade:
                         trade.experiment_id = self.experiment_id
                         trade.symbol = self.symbol
                         self._update_metrics()
-                        
             except Exception as e:
+                self.last_error = str(e)
+                self.status_reason = "error"
+                self.last_snapshot_at = datetime.now()
                 logger.error(f"Error generating signal for {self.experiment_id}: {e}")
-                
+
     def _update_metrics(self):
-        """Update metrics from broker trades."""
         metrics_dict = self.broker.get_metrics()
         if metrics_dict:
             for key, value in metrics_dict.items():
                 if hasattr(self.metrics, key):
                     setattr(self.metrics, key, value)
-                    
-    def get_status(self) -> Dict[str, Any]:
-        """Get session status."""
+            self.last_snapshot_at = datetime.now()
+
+    def get_public_status(self) -> str:
+        if self.is_active:
+            return "active"
+        if self.status_reason == "completed":
+            return "completed"
+        if self.status_reason == "interrupted":
+            return "interrupted"
+        if self.status_reason == "error":
+            return "error"
+        return "stopped"
+
+    def get_chart_data(self) -> Dict[str, Any]:
+        broker = self.broker
+        equity_curve = [broker.initial_balance]
+        timestamps = [
+            (self.start_time or datetime.now()).isoformat()
+        ]
+
+        for trade in broker.trades:
+            if trade.status == "closed" and trade.exit_time:
+                equity_curve.append(equity_curve[-1] + trade.pnl)
+                timestamps.append(trade.exit_time.isoformat())
+
         return {
             "experiment_id": self.experiment_id,
             "symbol": self.symbol,
+            "equity_curve": equity_curve,
+            "timestamps": timestamps,
+            "current_balance": broker.balance,
+            "initial_balance": broker.initial_balance,
+            "total_trades": len(broker.trades),
+            "open_trades": len([t for t in broker.trades if t.status == "open"]),
+            "closed_trades": len([t for t in broker.trades if t.status == "closed"]),
+            "is_active": self.is_active,
+            "status": self.get_public_status(),
+            "last_bar_time": self.last_bar_time.isoformat() if self.last_bar_time else None,
+            "last_snapshot_at": self.last_snapshot_at.isoformat() if self.last_snapshot_at else None,
+            "last_error": self.last_error,
+            "status_reason": self.status_reason,
+        }
+
+    def get_metrics_payload(self) -> Dict[str, Any]:
+        return {
+            "experiment_id": self.experiment_id,
+            "symbol": self.symbol,
+            "metrics": self.metrics.__dict__,
+            "balance": self.broker.balance,
+            "initial_balance": self.broker.initial_balance,
+            "status": self.get_public_status(),
+            "last_bar_time": self.last_bar_time.isoformat() if self.last_bar_time else None,
+            "last_snapshot_at": self.last_snapshot_at.isoformat() if self.last_snapshot_at else None,
+            "last_error": self.last_error,
+            "status_reason": self.status_reason,
+        }
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "experiment_id": self.experiment_id,
+            "symbol": self.symbol,
+            "status": self.get_public_status(),
             "is_active": self.is_active,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "current_position": {
                 "action": self.broker.position.action.value if self.broker.position else None,
                 "entry_price": self.broker.position.entry_price if self.broker.position else None,
-                "entry_time": self.broker.position.entry_time.isoformat() if self.broker.position else None,
-            } if self.broker.position else None,
+                "entry_time": self.broker.position.entry_time.isoformat()
+                if self.broker.position and self.broker.position.entry_time
+                else None,
+            }
+            if self.broker.position
+            else None,
             "balance": self.broker.balance,
+            "initial_balance": self.broker.initial_balance,
+            "base_order_usd": self.broker.base_order_usd,
             "total_trades": len(self.broker.trades),
             "open_trades": len([t for t in self.broker.trades if t.status == "open"]),
             "closed_trades": len([t for t in self.broker.trades if t.status == "closed"]),
+            "last_bar_time": self.last_bar_time.isoformat() if self.last_bar_time else None,
+            "last_snapshot_at": self.last_snapshot_at.isoformat() if self.last_snapshot_at else None,
+            "last_error": self.last_error,
+            "status_reason": self.status_reason,
         }
+
+    def to_persisted_dict(self) -> Dict[str, Any]:
+        return {
+            "experiment_id": self.experiment_id,
+            "symbol": self.symbol,
+            "status": self.get_public_status(),
+            "status_reason": self.status_reason,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "last_bar_time": self.last_bar_time.isoformat() if self.last_bar_time else None,
+            "last_snapshot_at": self.last_snapshot_at.isoformat() if self.last_snapshot_at else None,
+            "last_error": self.last_error,
+            "broker": {
+                "initial_balance": self.broker.initial_balance,
+                "balance": self.broker.balance,
+                "commission": self.broker.commission,
+                "slippage_bps": self.broker.slippage_bps,
+                "base_order_usd": self.broker.base_order_usd,
+                "position": self.broker.position.to_dict() if self.broker.position else None,
+                "trades": [trade.to_dict() for trade in self.broker.trades],
+            },
+            "chart_data": self.get_chart_data(),
+            "metrics": self.get_metrics_payload(),
+        }
+
+    @classmethod
+    def from_persisted_dict(
+        cls,
+        data: Dict[str, Any],
+        strategy,
+        bot_settings: Optional[Dict[str, Any]] = None,
+    ) -> "PaperSession":
+        broker_data = data.get("broker", {})
+        broker = PaperBroker(
+            initial_balance=float(broker_data.get("initial_balance", 10000.0)),
+            commission=float(broker_data.get("commission", 0.0006)),
+            slippage_bps=float(broker_data.get("slippage_bps", 0.0)),
+            base_order_usd=float(broker_data.get("base_order_usd", 100.0)),
+        )
+        broker.balance = float(broker_data.get("balance", broker.initial_balance))
+        broker.trades = [PaperTrade.from_dict(t) for t in broker_data.get("trades", [])]
+        broker.position = (
+            PaperTrade.from_dict(broker_data["position"])
+            if broker_data.get("position")
+            else None
+        )
+
+        session = cls(
+            experiment_id=data["experiment_id"],
+            symbol=data.get("symbol", "UNKNOWN"),
+            strategy=strategy,
+            broker=broker,
+            bot_settings=bot_settings,
+        )
+        session.start_time = (
+            datetime.fromisoformat(data["start_time"]) if data.get("start_time") else None
+        )
+        session.end_time = (
+            datetime.fromisoformat(data["end_time"]) if data.get("end_time") else None
+        )
+        session.last_bar_time = (
+            datetime.fromisoformat(data["last_bar_time"])
+            if data.get("last_bar_time")
+            else None
+        )
+        session.last_snapshot_at = (
+            datetime.fromisoformat(data["last_snapshot_at"])
+            if data.get("last_snapshot_at")
+            else None
+        )
+        session.last_error = data.get("last_error")
+        session.status_reason = data.get("status_reason", data.get("status", "stopped"))
+        session.is_active = data.get("status") == "active"
+
+        metrics_payload = data.get("metrics", {}).get("metrics", {})
+        for key, value in metrics_payload.items():
+            if hasattr(session.metrics, key):
+                setattr(session.metrics, key, value)
+        if not metrics_payload:
+            session._update_metrics()
+        return session
 
 
 class PaperTradingManager:
     """Manager for paper trading sessions."""
-    
+
     def __init__(self, bot_settings: Optional[Dict[str, Any]] = None):
         self.sessions: Dict[str, PaperSession] = {}
         self.experiments_file = Path("experiments.json")
+        self.state_file = Path("paper_trading_state.json")
         self.bot_settings = bot_settings or {}
-        
+        self.persisted_sessions: Dict[str, Dict[str, Any]] = {}
+        self._load_state()
+        self.restore_sessions()
+
+    def _read_state(self) -> Dict[str, Any]:
+        if not self.state_file.exists():
+            return {"sessions": {}, "updated_at": None}
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.error(f"Failed to read paper trading state: {e}", exc_info=True)
+        return {"sessions": {}, "updated_at": None}
+
+    def _write_state(self):
+        payload = {
+            "updated_at": datetime.now().isoformat(),
+            "sessions": self.persisted_sessions,
+        }
+        tmp_file = self.state_file.with_suffix(".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        tmp_file.replace(self.state_file)
+
+    def _load_state(self):
+        data = self._read_state()
+        sessions = data.get("sessions", {})
+        self.persisted_sessions = sessions if isinstance(sessions, dict) else {}
+
+    def _persist_session(self, session: PaperSession):
+        self.persisted_sessions[session.experiment_id] = session.to_persisted_dict()
+        self._write_state()
+
+    def _mark_persisted_session(self, experiment_id: str, **updates: Any):
+        persisted = self.persisted_sessions.get(experiment_id)
+        if not persisted:
+            return
+        persisted.update(updates)
+        self.persisted_sessions[experiment_id] = persisted
+        self._write_state()
+
+    def restore_sessions(self):
+        restored: Dict[str, PaperSession] = {}
+        for experiment_id, data in list(self.persisted_sessions.items()):
+            status = data.get("status")
+            if status != "active":
+                continue
+            try:
+                experiment_data = self.load_experiment(experiment_id)
+                if not experiment_data:
+                    data["status"] = "interrupted"
+                    data["status_reason"] = "experiment_missing"
+                    data["last_error"] = "Experiment data not found during restore"
+                    continue
+                strategy = self.create_strategy(experiment_data)
+                if not strategy:
+                    data["status"] = "interrupted"
+                    data["status_reason"] = "strategy_restore_failed"
+                    data["last_error"] = "Strategy restore failed"
+                    continue
+                session = PaperSession.from_persisted_dict(
+                    data,
+                    strategy=strategy,
+                    bot_settings=self.bot_settings,
+                )
+                session.start(preserve_start_time=True)
+                restored[experiment_id] = session
+                self.persisted_sessions[experiment_id] = session.to_persisted_dict()
+            except Exception as e:
+                logger.error(
+                    f"Failed to restore paper trading session {experiment_id}: {e}",
+                    exc_info=True,
+                )
+                data["status"] = "interrupted"
+                data["status_reason"] = "restore_error"
+                data["last_error"] = str(e)
+        self.sessions.update(restored)
+        self._write_state()
+
     def update_settings(self, bot_settings: Dict[str, Any]):
-        """Update bot settings for realistic simulation."""
         self.bot_settings = bot_settings
-        
+        for session in self.sessions.values():
+            session.bot_settings = bot_settings
+        self._write_state()
+
     def load_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Load experiment data from experiments.json."""
         if not self.experiments_file.exists():
             logger.error(f"Experiments file not found: {self.experiments_file}")
             return None
-            
+
         try:
-            with open(self.experiments_file, 'r', encoding='utf-8') as f:
+            with open(self.experiments_file, "r", encoding="utf-8") as f:
                 experiments = json.load(f)
-                
+
             if experiment_id not in experiments:
                 logger.error(f"Experiment {experiment_id} not found in experiments.json")
                 return None
-                
+
             return experiments[experiment_id]
         except Exception as e:
             logger.error(f"Error loading experiment {experiment_id}: {e}")
             return None
-            
-    def create_strategy(self, experiment_data: Dict[str, Any]) -> Union[MLStrategy, MultiTimeframeMLStrategy, None]:
-        """Create strategy from experiment data."""
-        results = experiment_data.get('results', {})
-        models = results.get('models', {})
-        
-        model_15m = models.get('15m')
-        model_1h = models.get('1h')
-        
-        # Check if model files exist
+
+    def create_strategy(
+        self, experiment_data: Dict[str, Any]
+    ) -> Union[MLStrategy, MultiTimeframeMLStrategy, None]:
+        results = experiment_data.get("results", {})
+        models = results.get("models", {})
+
+        model_15m = models.get("15m")
+        model_1h = models.get("1h")
+
         if model_15m and not Path(model_15m).exists():
             logger.warning(f"15m model file not found: {model_15m}")
             model_15m = None
-            
+
         if model_1h and not Path(model_1h).exists():
             logger.warning(f"1h model file not found: {model_1h}")
             model_1h = None
-        
-        # If models don't exist, try to find alternative models
-        symbol = experiment_data.get('symbol')
+
+        symbol = experiment_data.get("symbol")
         if symbol:
             if not model_15m:
-                # Try to find any 15m model for this symbol
                 models_dir = Path("ml_models")
                 candidates_15m = list(models_dir.glob(f"*{symbol}*15*15m*.pkl"))
                 if candidates_15m:
                     model_15m = str(candidates_15m[0])
                     logger.info(f"Found alternative 15m model: {model_15m}")
-            
+
             if not model_1h:
-                # Try to find any 1h model for this symbol
                 models_dir = Path("ml_models")
                 candidates_1h = list(models_dir.glob(f"*{symbol}*60*1h*.pkl"))
                 if candidates_1h:
                     model_1h = str(candidates_1h[0])
                     logger.info(f"Found alternative 1h model: {model_1h}")
-        
+
         if model_1h and model_15m:
-            # MTF strategy
             logger.info(f"Creating MTF strategy with 1h: {model_1h}, 15m: {model_15m}")
             return MultiTimeframeMLStrategy(
                 model_1h_path=model_1h,
@@ -521,170 +833,195 @@ class PaperTradingManager:
                 require_alignment=True,
                 alignment_mode="strict",
             )
-        elif model_15m:
-            # Single timeframe strategy
+        if model_15m:
             logger.info(f"Creating single timeframe strategy with model: {model_15m}")
             return MLStrategy(
                 model_path=model_15m,
                 confidence_threshold=0.35,
                 min_signal_strength="умеренное",
             )
-        else:
-            logger.error(f"No valid models found for experiment {experiment_data.get('id')}")
-            return None
-            
+
+        logger.error(f"No valid models found for experiment {experiment_data.get('id')}")
+        return None
+
+    def _get_runtime_settings(self) -> Dict[str, Any]:
+        settings = self.bot_settings.get("settings", {})
+        risk_settings = settings.get("risk", {})
+        current_balance = float(settings.get("current_balance", 10000.0) or 10000.0)
+        base_order_usd = float(risk_settings.get("base_order_usd", 100.0) or 100.0)
+        return {
+            "current_balance": current_balance,
+            "base_order_usd": base_order_usd,
+        }
+
     def start_session(self, experiment_id: str) -> Optional[PaperSession]:
-        """Start a paper trading session for an experiment."""
         if experiment_id in self.sessions:
             logger.warning(f"Session for {experiment_id} already exists")
             return self.sessions[experiment_id]
-            
-        # Load experiment data
+
         experiment_data = self.load_experiment(experiment_id)
         if not experiment_data:
             return None
-            
-        # Create strategy
+
         strategy = self.create_strategy(experiment_data)
         if not strategy:
             return None
-            
-        # Extract settings from bot settings
-        risk_settings = self.bot_settings.get('settings', {}).get('risk', {})
-        initial_balance = risk_settings.get('base_order_usd', 10000.0) * 100  # Scale up for realistic balance
-        base_order_usd = risk_settings.get('base_order_usd', 100.0)
-        
-        # Create broker with real settings
+
+        runtime_settings = self._get_runtime_settings()
+        initial_balance = runtime_settings["current_balance"]
+        base_order_usd = runtime_settings["base_order_usd"]
+
         broker = PaperBroker(
             initial_balance=initial_balance,
-            base_order_usd=base_order_usd
+            base_order_usd=base_order_usd,
         )
-        
-        # Create session with bot settings
+
         session = PaperSession(
             experiment_id=experiment_id,
-            symbol=experiment_data.get('symbol', 'UNKNOWN'),
+            symbol=experiment_data.get("symbol", "UNKNOWN"),
             strategy=strategy,
             broker=broker,
-            bot_settings=self.bot_settings
+            bot_settings=self.bot_settings,
         )
-        
-        # Store session
+
         self.sessions[experiment_id] = session
         session.start()
-        
+        self._persist_session(session)
+
         logger.info(f"Started paper trading session for {experiment_id}")
         return session
-        
+
     def stop_session(self, experiment_id: str) -> bool:
-        """Stop a paper trading session."""
         if experiment_id not in self.sessions:
+            if experiment_id in self.persisted_sessions:
+                persisted = self.persisted_sessions[experiment_id]
+                persisted["status"] = "stopped"
+                persisted["status_reason"] = "stopped"
+                persisted["end_time"] = datetime.now().isoformat()
+                self._write_state()
+                return True
             logger.warning(f"Session for {experiment_id} not found")
             return False
-            
+
         session = self.sessions[experiment_id]
-        session.stop()
+        session.stop(reason="stopped")
+        self._persist_session(session)
         del self.sessions[experiment_id]
-        
+
         logger.info(f"Stopped paper trading session for {experiment_id}")
         return True
-        
+
+    def interrupt_all_active_sessions(self, reason: str = "interrupted"):
+        changed = False
+        for experiment_id, session in list(self.sessions.items()):
+            session.stop(reason=reason)
+            self._persist_session(session)
+            del self.sessions[experiment_id]
+            changed = True
+        if not changed:
+            for persisted in self.persisted_sessions.values():
+                if persisted.get("status") == "active":
+                    persisted["status"] = "interrupted"
+                    persisted["status_reason"] = reason
+                    persisted["end_time"] = datetime.now().isoformat()
+                    changed = True
+        if changed:
+            self._write_state()
+
     def get_session_status(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Get status of a paper trading session."""
-        if experiment_id not in self.sessions:
-            return None
-            
-        return self.sessions[experiment_id].get_status()
-        
+        if experiment_id in self.sessions:
+            return self.sessions[experiment_id].get_status()
+        persisted = self.persisted_sessions.get(experiment_id)
+        if persisted:
+            return persisted.get("metrics", {}) or persisted.get("chart_data", {}) or {
+                "experiment_id": experiment_id,
+                "status": persisted.get("status", "stopped"),
+                "symbol": persisted.get("symbol"),
+                "start_time": persisted.get("start_time"),
+                "end_time": persisted.get("end_time"),
+                "last_error": persisted.get("last_error"),
+                "status_reason": persisted.get("status_reason"),
+            }
+        return None
+
     def get_all_sessions_status(self) -> List[Dict[str, Any]]:
-        """Get status of all active sessions."""
-        return [session.get_status() for session in self.sessions.values()]
-        
-    def on_bar(self, symbol: str, row: pd.Series, df: pd.DataFrame, current_price: float, high: float, low: float, candle_timestamp: datetime):
-        """Process a new bar for all active sessions on this symbol."""
-        for session in self.sessions.values():
+        statuses: Dict[str, Dict[str, Any]] = {}
+        for experiment_id, persisted in self.persisted_sessions.items():
+            chart = persisted.get("chart_data", {})
+            statuses[experiment_id] = {
+                "experiment_id": experiment_id,
+                "symbol": persisted.get("symbol") or chart.get("symbol"),
+                "status": persisted.get("status", "stopped"),
+                "is_active": persisted.get("status") == "active",
+                "start_time": persisted.get("start_time"),
+                "end_time": persisted.get("end_time"),
+                "balance": chart.get("current_balance"),
+                "initial_balance": chart.get("initial_balance"),
+                "total_trades": chart.get("total_trades", 0),
+                "open_trades": chart.get("open_trades", 0),
+                "closed_trades": chart.get("closed_trades", 0),
+                "last_bar_time": persisted.get("last_bar_time"),
+                "last_snapshot_at": persisted.get("last_snapshot_at"),
+                "last_error": persisted.get("last_error"),
+                "status_reason": persisted.get("status_reason"),
+            }
+        for experiment_id, session in self.sessions.items():
+            statuses[experiment_id] = session.get_status()
+        return list(statuses.values())
+
+    def on_bar(
+        self,
+        symbol: str,
+        row: pd.Series,
+        df: pd.DataFrame,
+        current_price: float,
+        high: float,
+        low: float,
+        candle_timestamp: datetime,
+    ):
+        for session in list(self.sessions.values()):
             if session.symbol == symbol and session.is_active:
                 try:
                     session.process_bar(row, df, current_price, high, low, candle_timestamp)
+                    self._persist_session(session)
+                    if not session.is_active:
+                        del self.sessions[session.experiment_id]
                 except Exception as e:
-                    logger.error(f"Error processing bar for session {session.experiment_id}: {e}")
-                    
+                    session.last_error = str(e)
+                    session.stop(reason="error")
+                    self._persist_session(session)
+                    del self.sessions[session.experiment_id]
+                    logger.error(
+                        f"Error processing bar for session {session.experiment_id}: {e}",
+                        exc_info=True,
+                    )
+
     def get_trades(self, experiment_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get trades for a specific experiment."""
-        if experiment_id not in self.sessions:
-            return []
-            
-        session = self.sessions[experiment_id]
-        trades = session.broker.trades[-limit:] if limit else session.broker.trades
-        
-        return [{
-            "id": trade.id,
-            "experiment_id": trade.experiment_id,
-            "symbol": trade.symbol,
-            "action": trade.action.value,
-            "entry_price": trade.entry_price,
-            "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
-            "exit_price": trade.exit_price,
-            "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
-            "quantity": trade.quantity,
-            "pnl": trade.pnl,
-            "pnl_pct": trade.pnl_pct,
-            "status": trade.status,
-            "reason": trade.reason,
-        } for trade in trades]
-        
+        if experiment_id in self.sessions:
+            trades = self.sessions[experiment_id].broker.trades
+        else:
+            persisted = self.persisted_sessions.get(experiment_id, {})
+            trades = [
+                PaperTrade.from_dict(t)
+                for t in persisted.get("broker", {}).get("trades", [])
+            ]
+        trades = trades[-limit:] if limit else trades
+        return [trade.to_dict() for trade in trades]
+
     def get_metrics(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Get metrics for a specific experiment."""
-        if experiment_id not in self.sessions:
-            return None
-            
-        session = self.sessions[experiment_id]
-        return {
-            "experiment_id": experiment_id,
-            "symbol": session.symbol,
-            "metrics": session.metrics.__dict__,
-            "balance": session.broker.balance,
-            "initial_balance": session.broker.initial_balance,
-        }
-    
+        if experiment_id in self.sessions:
+            return self.sessions[experiment_id].get_metrics_payload()
+        persisted = self.persisted_sessions.get(experiment_id)
+        if persisted:
+            return persisted.get("metrics")
+        return None
+
     def get_realtime_chart_data(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Get real-time chart data for a specific experiment."""
-        if experiment_id not in self.sessions:
-            return None
-            
-        session = self.sessions[experiment_id]
-        broker = session.broker
-        
-        # Get current equity curve
-        equity_curve = []
-        timestamps = []
-        
-        # Start with initial balance
-        equity_curve.append(broker.initial_balance)
-        timestamps.append(datetime.now().isoformat())
-        
-        # Add closed trades
-        for trade in broker.trades:
-            if trade.status == "closed" and trade.exit_time:
-                equity_curve.append(equity_curve[-1] + trade.pnl)
-                timestamps.append(trade.exit_time.isoformat())
-        
-        # Add current position value if open
-        if broker.position:
-            current_value = equity_curve[-1]  # Start with last closed equity
-            # Add unrealized PnL based on current price
-            # This would need current market price, which we don't have here
-            # For now, we'll just use the last equity value
-        
-        return {
-            "experiment_id": experiment_id,
-            "symbol": session.symbol,
-            "equity_curve": equity_curve,
-            "timestamps": timestamps,
-            "current_balance": broker.balance,
-            "initial_balance": broker.initial_balance,
-            "total_trades": len(broker.trades),
-            "open_trades": len([t for t in broker.trades if t.status == "open"]),
-            "closed_trades": len([t for t in broker.trades if t.status == "closed"]),
-            "is_active": session.is_active,
-        }
+        if experiment_id in self.sessions:
+            chart_data = self.sessions[experiment_id].get_chart_data()
+            self._persist_session(self.sessions[experiment_id])
+            return chart_data
+        persisted = self.persisted_sessions.get(experiment_id)
+        if persisted:
+            return persisted.get("chart_data")
+        return None
