@@ -615,3 +615,45 @@ class PaperTradingManager:
             "balance": session.broker.balance,
             "initial_balance": session.broker.initial_balance,
         }
+    
+    def get_realtime_chart_data(self, experiment_id: str) -> Optional[Dict[str, Any]]:
+        """Get real-time chart data for a specific experiment."""
+        if experiment_id not in self.sessions:
+            return None
+            
+        session = self.sessions[experiment_id]
+        broker = session.broker
+        
+        # Get current equity curve
+        equity_curve = []
+        timestamps = []
+        
+        # Start with initial balance
+        equity_curve.append(broker.initial_balance)
+        timestamps.append(datetime.now().isoformat())
+        
+        # Add closed trades
+        for trade in broker.trades:
+            if trade.status == "closed" and trade.exit_time:
+                equity_curve.append(equity_curve[-1] + trade.pnl)
+                timestamps.append(trade.exit_time.isoformat())
+        
+        # Add current position value if open
+        if broker.position:
+            current_value = equity_curve[-1]  # Start with last closed equity
+            # Add unrealized PnL based on current price
+            # This would need current market price, which we don't have here
+            # For now, we'll just use the last equity value
+        
+        return {
+            "experiment_id": experiment_id,
+            "symbol": session.symbol,
+            "equity_curve": equity_curve,
+            "timestamps": timestamps,
+            "current_balance": broker.balance,
+            "initial_balance": broker.initial_balance,
+            "total_trades": len(broker.trades),
+            "open_trades": len([t for t in broker.trades if t.status == "open"]),
+            "closed_trades": len([t for t in broker.trades if t.status == "closed"]),
+            "is_active": session.is_active,
+        }

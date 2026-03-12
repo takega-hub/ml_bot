@@ -234,7 +234,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
     logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
-        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks
+        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError as e:
@@ -1765,7 +1765,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         experiment_id: str
 
     @app.post("/api/ai/research/apply", dependencies=[Depends(verify_api_key)])
-    def post_apply_experiment(body: ApplyExperimentBody):
+    async def post_apply_experiment(body: ApplyExperimentBody):
         """Применяет экспериментальную стратегию (заменяет текущую)."""
         from datetime import datetime
         try:
@@ -1832,7 +1832,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     json.dump(data, f, indent=2, default=str)
             
             if tg_bot:
-                asyncio.create_task(tg_bot.send_notification(f"🔄 Experiment applied for {symbol}"))
+                await tg_bot.send_notification(f"🔄 Experiment applied for {symbol}")
             
             return {"ok": True, "symbol": symbol, "experiment_id": body.experiment_id}
             
@@ -1939,6 +1939,27 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise
         except Exception as e:
             logger.error(f"Failed to get paper trading metrics: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/paper/realtime_chart", dependencies=[Depends(verify_api_key)])
+    def get_paper_realtime_chart(experiment_id: str = None):
+        """Get real-time chart data for paper trading."""
+        if not paper_trading_manager:
+            raise HTTPException(status_code=501, detail="Paper trading manager not available")
+        
+        if not experiment_id:
+            raise HTTPException(status_code=400, detail="experiment_id parameter is required")
+        
+        try:
+            chart_data = paper_trading_manager.get_realtime_chart_data(experiment_id)
+            if not chart_data:
+                raise HTTPException(status_code=404, detail=f"Paper trading session not found for experiment {experiment_id}")
+            
+            return chart_data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get real-time chart data: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/paper/chart", dependencies=[Depends(verify_api_key)])
@@ -2122,6 +2143,36 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception as e:
             logger.error(f"Failed to replace model: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+
+    # WebSocket endpoint for real-time chart updates
+    @app.websocket("/ws/paper/chart/{experiment_id}")
+    async def websocket_paper_chart(websocket: WebSocket, experiment_id: str):
+        """WebSocket endpoint for real-time paper trading chart updates."""
+        await websocket.accept()
+        
+        if not paper_trading_manager:
+            await websocket.close(code=1011, reason="Paper trading manager not available")
+            return
+        
+        try:
+            while True:
+                # Get real-time chart data
+                chart_data = paper_trading_manager.get_realtime_chart_data(experiment_id)
+                
+                if chart_data:
+                    await websocket.send_json(chart_data)
+                
+                # Wait before sending next update (1 second interval)
+                await asyncio.sleep(1)
+                
+        except WebSocketDisconnect:
+            logger.info(f"WebSocket disconnected for experiment {experiment_id}")
+        except Exception as e:
+            logger.error(f"WebSocket error for experiment {experiment_id}: {e}")
+            try:
+                await websocket.close(code=1011, reason=str(e))
+            except:
+                pass
 
     return app
 
