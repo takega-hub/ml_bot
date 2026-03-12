@@ -2203,8 +2203,6 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 risk_config = {
                     "base_order_usd": settings.risk.base_order_usd,
                     "max_position_usd": settings.risk.max_position_usd,
-                    "max_daily_loss_usd": settings.risk.max_daily_loss_usd,
-                    "max_daily_trades": settings.risk.max_daily_trades,
                     "reverse_min_confidence": settings.risk.reverse_min_confidence,
                 }
             
@@ -2263,8 +2261,6 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "risk": {
                         "base_order_usd": settings.risk.base_order_usd,
                         "max_position_usd": settings.risk.max_position_usd,
-                        "max_daily_loss_usd": settings.risk.max_daily_loss_usd,
-                        "max_daily_trades": settings.risk.max_daily_trades,
                         "reverse_min_confidence": settings.risk.reverse_min_confidence,
                     },
                     "current_balance": state.balance if hasattr(state, 'balance') else 10000.0,

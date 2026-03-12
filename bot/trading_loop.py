@@ -61,8 +61,6 @@ class TradingLoop:
                 "risk": {
                     "base_order_usd": self.settings.risk.base_order_usd,
                     "max_position_usd": self.settings.risk.max_position_usd,
-                    "max_daily_loss_usd": self.settings.risk.max_daily_loss_usd,
-                    "max_daily_trades": self.settings.risk.max_daily_trades,
                     "reverse_min_confidence": self.settings.risk.reverse_min_confidence,
                 },
                 "current_balance": self.state.balance if hasattr(self.state, 'balance') else 10000.0,
