@@ -23,36 +23,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger("research_runner")
 
+_FILE_LOCK = threading.Lock()
+
 def update_experiment_status(experiment_id: str, status: str, details: dict = None):
     """Updates the status of an experiment in experiments.json"""
     try:
-        file_path = Path("experiments.json")
-        data = {}
-        if file_path.exists():
-            with open(file_path, "r", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    pass
-        
-        if experiment_id not in data:
-            data[experiment_id] = {
-                "id": experiment_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
+        with _FILE_LOCK:
+            file_path = Path("experiments.json")
+            data = {}
+            if file_path.exists():
+                with open(file_path, "r", encoding="utf-8") as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        pass
             
-        data[experiment_id]["status"] = status
-        data[experiment_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
-        
-        if details:
-            for k, v in details.items():
-                data[experiment_id][k] = v
+            if experiment_id not in data:
+                data[experiment_id] = {
+                    "id": experiment_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
                 
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
+            data[experiment_id]["status"] = status
+            data[experiment_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+            
+            if details:
+                for k, v in details.items():
+                    data[experiment_id][k] = v
+                    
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
             
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
+
+def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
+    try:
+        with _FILE_LOCK:
+            file_path = Path("experiments.json")
+            data: Dict[str, Any] = {}
+            if file_path.exists():
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+
+            exp = data.get(experiment_id) if isinstance(data.get(experiment_id), dict) else {"id": experiment_id}
+            if "created_at" not in exp:
+                exp["created_at"] = datetime.now(timezone.utc).isoformat()
+            exp["updated_at"] = datetime.now(timezone.utc).isoformat()
+            for k, v in (fields or {}).items():
+                exp[k] = v
+            data[experiment_id] = exp
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        logger.error(f"Failed to patch experiment: {e}")
 
 def run_process_with_heartbeat(
     cmd,
@@ -168,11 +195,28 @@ def main():
             logger.error(f"Failed to read metadata file: {e}")
     update_experiment_status(experiment_id, "starting", details)
     
+    stop_hb = threading.Event()
+    current_phase: Dict[str, str] = {"status": "starting"}
+    hb_started = False
+
     try:
         artifacts_dir = Path("experiment_artifacts") / experiment_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         training_reports: Dict[str, Any] = {}
+        if not hb_started:
+            def _hb_loop():
+                while not stop_hb.is_set():
+                    patch_experiment(
+                        experiment_id,
+                        {
+                            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                            "runner_phase": current_phase.get("status"),
+                        },
+                    )
+                    stop_hb.wait(10)
+            threading.Thread(target=_hb_loop, daemon=True).start()
+            hb_started = True
 
         intervals = ["15m", "1h"]
         primary = (args.interval or "15m").strip().lower()
@@ -180,6 +224,7 @@ def main():
             intervals = ["1h", "15m"]
 
         # 1. Training Phase
+        current_phase["status"] = "training"
         logger.info("Phase 1: Training Models...")
         update_experiment_status(experiment_id, "training", {"progress": 10})
         
@@ -235,6 +280,7 @@ def main():
         update_experiment_status(experiment_id, "training", {"progress": 50, "last_log": "Training completed"})
         
         # 2. Backtesting Phase (Virtual Trading)
+        current_phase["status"] = "backtesting"
         logger.info("Phase 2: Virtual Trading (Backtest)...")
         update_experiment_status(experiment_id, "backtesting", {"progress": 60})
         
@@ -456,17 +502,19 @@ def main():
         update_experiment_status(experiment_id, "completed", {
             "progress": 100,
             "results": result_data,
-            "completed_at": datetime.now().isoformat()
+            "completed_at": datetime.now(timezone.utc).isoformat()
         })
         
         logger.info("Experiment completed successfully.")
+        stop_hb.set()
         
     except Exception as e:
         logger.error(f"Experiment failed: {e}", exc_info=True)
         update_experiment_status(experiment_id, "failed", {
             "error": str(e),
-            "failed_at": datetime.now().isoformat()
+            "failed_at": datetime.now(timezone.utc).isoformat()
         })
+        stop_hb.set()
         sys.exit(1)
 
 if __name__ == "__main__":

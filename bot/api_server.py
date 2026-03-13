@@ -1809,6 +1809,16 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception:
             alive = None
 
+        if alive is None and isinstance(runner_pid, int):
+            try:
+                import os
+                os.kill(runner_pid, 0)
+                alive = True
+            except Exception:
+                alive = False
+
+        stale = seconds_since is not None and seconds_since > 60 and exp.get("status") in {"starting", "training", "backtesting"}
+
         return {
             "experiment_id": experiment_id,
             "status": exp.get("status"),
@@ -1817,6 +1827,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "exit_code": exit_code,
             "heartbeat_at": heartbeat_at,
             "seconds_since_heartbeat": seconds_since,
+            "stale": stale,
+            "runner_phase": exp.get("runner_phase"),
         }
 
     @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])
