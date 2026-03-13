@@ -68,6 +68,13 @@ class AIAgentService:
             logger.warning("AI Agent disabled: requests module missing")
         else:
             logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
+        
+        if self.api_key and HAS_OPENAI:
+            try:
+                self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
+            except Exception as e:
+                self.client = None
+                logger.error(f"AI Agent: failed to initialize OpenAI client: {e}")
 
     def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int, temperature: float) -> str:
         if not self.api_key:
@@ -179,8 +186,20 @@ class AIAgentService:
         Анализирует историю сделок и текущие настройки риска.
         Предлагает оптимизации.
         """
-        if not self.client:
-            return {"error": "AI Agent not configured"}
+        if not self.api_key:
+            return {
+                "analysis": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
+                "suggestions": [],
+                "risk_score": 0,
+                "status": "unavailable",
+            }
+        if not HAS_REQUESTS:
+            return {
+                "analysis": "AI Agent недоступен: пакет requests не установлен в окружении.",
+                "suggestions": [],
+                "risk_score": 0,
+                "status": "unavailable",
+            }
 
         # Check monitoring status
         state = self._load_risk_state()
@@ -261,17 +280,17 @@ class AIAgentService:
             
             for attempt in range(max_retries):
                 try:
-                    response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": "You are an expert algorithmic trading risk manager. Output valid JSON only."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=1000,
-                        temperature=0.1
-                    ))
-                    
-                    content = response.choices[0].message.content
+                    content = await loop.run_in_executor(
+                        None,
+                        lambda: self._openrouter_chat(
+                            messages=[
+                                {"role": "system", "content": "You are an expert algorithmic trading risk manager. Output valid JSON only."},
+                                {"role": "user", "content": prompt},
+                            ],
+                            max_tokens=1000,
+                            temperature=0.1,
+                        ),
+                    )
                     # Clean up potential markdown blocks
                     if "```json" in content:
                         content = content.split("```json")[1].split("```")[0].strip()
@@ -313,11 +332,18 @@ class AIAgentService:
         """
         Анализирует рыночные данные и дает комментарий по ситуации.
         """
-        if not self.client:
+        if not self.api_key:
             return {
                 "trend": "neutral",
                 "volatility": "normal",
-                "advice": "AI Agent not configured (OpenAI/OpenRouter key missing).",
+                "advice": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
+                "confidence": 0
+            }
+        if not HAS_REQUESTS:
+            return {
+                "trend": "neutral",
+                "volatility": "normal",
+                "advice": "AI Agent недоступен: пакет requests не установлен в окружении.",
                 "confidence": 0
             }
             
@@ -349,17 +375,17 @@ class AIAgentService:
             
             for attempt in range(max_retries):
                 try:
-                    response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": "You are an expert crypto trader. Output valid JSON only."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=500,
-                        temperature=0.2
-                    ))
-                    
-                    content = response.choices[0].message.content
+                    content = await loop.run_in_executor(
+                        None,
+                        lambda: self._openrouter_chat(
+                            messages=[
+                                {"role": "system", "content": "You are an expert crypto trader. Output valid JSON only."},
+                                {"role": "user", "content": prompt},
+                            ],
+                            max_tokens=500,
+                            temperature=0.2,
+                        ),
+                    )
                      # Clean up potential markdown blocks
                     if "```json" in content:
                         content = content.split("```json")[1].split("```")[0].strip()
@@ -771,8 +797,10 @@ class AIAgentService:
         """
         Handles chat interaction with the user.
         """
-        if not self.client:
-            return "AI Agent is not configured (API Key missing)."
+        if not self.api_key:
+            return "AI Agent is not configured (OPENROUTER_API_KEY missing)."
+        if not HAS_REQUESTS:
+            return "AI Agent is not configured (requests missing)."
 
         # 1. Save user message (fire and forget task to speed up response, or await if consistency needed)
         # We await it to ensure order if messages come fast
@@ -841,17 +869,17 @@ class AIAgentService:
         
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful trading bot assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=800,
-                temperature=0.3
-            ))
-            
-            ai_response = response.choices[0].message.content
+            ai_response = await loop.run_in_executor(
+                None,
+                lambda: self._openrouter_chat(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful trading bot assistant."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=800,
+                    temperature=0.3,
+                ),
+            )
             
             # 3. Save AI response
             await self._save_chat_message("assistant", ai_response)
