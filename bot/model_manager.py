@@ -16,6 +16,30 @@ class ModelManager:
         self.models_dir = Path("ml_models")
         self.models_dir.mkdir(exist_ok=True)
 
+    def _infer_interval_minutes(self, model_path: str, symbol: str) -> str:
+        symbol = symbol.upper()
+        stem = Path(model_path).stem
+        parts = stem.split("_")
+
+        idx = next((i for i, p in enumerate(parts) if p.upper() == symbol), None)
+        if idx is not None and idx + 1 < len(parts):
+            maybe = parts[idx + 1]
+            if maybe.isdigit():
+                return maybe
+
+        for p in parts:
+            if p.isdigit():
+                return p
+
+        for p in parts:
+            low = p.lower()
+            if low == "1h":
+                return "60"
+            if low == "15m":
+                return "15"
+
+        return "15"
+
     def train_and_compare(self, symbol: str, use_mtf: Optional[bool] = None) -> Optional[Dict[str, Any]]:
         """
         Запускает переобучение моделей для символа и возвращает отчет.
@@ -113,6 +137,17 @@ class ModelManager:
         models.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         return models
 
+    def find_single_models_for_symbol(self, symbol: str) -> list:
+        symbol = symbol.upper()
+        models = self.find_models_for_symbol(symbol)
+        out = []
+        for p in models:
+            s = p.stem.lower()
+            if s.endswith("_mtf") or "_mtf_" in s:
+                continue
+            out.append(p)
+        return out
+
     def test_model(self, model_path: str, symbol: str, days: int = 14, initial_balance: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Тестирует модель на исторических данных и возвращает метрики
@@ -135,12 +170,13 @@ class ModelManager:
             from backtest_ml_strategy import run_exact_backtest
             
             logger.info(f"[test_model] Starting backtest for {model_path} on {symbol} ({days} days, balance=${initial_balance:.2f})")
+            interval = self._infer_interval_minutes(model_path, symbol)
             
             metrics = run_exact_backtest(
                 model_path=str(model_path),
                 symbol=symbol,
                 days_back=days,
-                interval="15",  # 15 минут в формате для backtest
+                interval=interval,
                 initial_balance=initial_balance,  # Используем переданное значение или 100.0 по умолчанию
                 risk_per_trade=0.02,
                 leverage=10,

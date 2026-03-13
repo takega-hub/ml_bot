@@ -1842,6 +1842,12 @@ class TradingLoop:
             if await self._check_pullback_condition(pending_signal, symbol, current_price, high, low, df):
                 # Условия выполнены - возвращаем сигнал для открытия позиции
                 signal = pending_signal['signal']
+                try:
+                    indicators_info = signal.indicators_info if isinstance(signal.indicators_info, dict) else {}
+                    indicators_info['signal_received_time'] = pd.Timestamp.now().isoformat()
+                    signal.indicators_info = indicators_info
+                except Exception:
+                    pass
                 self.pending_pullback_signals[symbol].remove(pending_signal)
                 logger.info(f"[{symbol}] ✅ Pullback condition met after {pending_signal['bars_waited']} bars, opening position")
                 return signal
@@ -2954,17 +2960,20 @@ class TradingLoop:
                                 except:
                                     entry_ts_with_buffer = 0
                                 
+                                close_side = "Sell" if local_pos.side == "Buy" else "Buy"
+                                expected_sides = {local_pos.side, close_side}
+                                
                                 for pnl_item in pnl_list:
                                     if pnl_item and isinstance(pnl_item, dict):
                                         # Логируем все ключи для отладки
-                                        logger.info(f"PnL item keys: {list(pnl_item.keys())}")
+                                        logger.debug(f"PnL item keys: {list(pnl_item.keys())}")
                                         
                                         pnl_symbol = pnl_item.get("symbol", "")
-                                        pnl_side = pnl_item.get("side", "")
+                                        pnl_side = str(pnl_item.get("side", "")).capitalize()
                                         created_time = int(pnl_item.get("createdTime", 0))
                                         
                                         # Проверяем, что это наша позиция (тот же символ, сторона и создана ПОСЛЕ открытия с учетом буфера)
-                                        if pnl_symbol == symbol and pnl_side == local_pos.side and created_time > entry_ts_with_buffer:
+                                        if pnl_symbol == symbol and pnl_side in expected_sides and created_time > entry_ts_with_buffer:
                                             # Накапливаем PnL и комиссии
                                             closed_pnl_val = float(pnl_item.get("closedPnl", 0))
                                             accumulated_pnl += closed_pnl_val
@@ -2991,7 +3000,7 @@ class TradingLoop:
                                                     last_exit_time = created_time
                                                 
                                                 # Gross PnL (Position P&L)
-                                                if pnl_side == "Buy":
+                                                if local_pos.side == "Buy":
                                                     gross_pnl = (exit_price_val - entry_price_val) * qty_val
                                                 else:
                                                     gross_pnl = (entry_price_val - exit_price_val) * qty_val
@@ -3001,7 +3010,7 @@ class TradingLoop:
                                                 accumulated_fee += calculated_fee
                                                 
                                                 # Логируем детали для отладки
-                                                logger.info(f"PnL item: closedPnl={closed_pnl_val:.4f}, openFee={open_fee:.4f}, closeFee={close_fee:.4f}, funding={funding_fee:.4f}, total_fee_api={total_fee_from_api:.4f}, calculated_fee={calculated_fee:.4f}")
+                                                logger.debug(f"PnL item: closedPnl={closed_pnl_val:.4f}, openFee={open_fee:.4f}, closeFee={close_fee:.4f}, funding={funding_fee:.4f}, total_fee_api={total_fee_from_api:.4f}, calculated_fee={calculated_fee:.4f}")
                                                 
                                                 found_pnl = True
                                         elif pnl_symbol == symbol and created_time < entry_ts_with_buffer:
@@ -3107,12 +3116,12 @@ class TradingLoop:
             # ВАЖНО: Мы уже получили pnl_usd и pnl_pct из агрегированных данных closedPnl (если они были найдены)
             # Если pnl_usd == 0 (данные не найдены), тогда считаем вручную
             
-            logger.info(f"PnL calculation start: pnl_usd={pnl_usd}, pnl_pct={pnl_pct}, exit_price={exit_price}")
+            logger.debug(f"PnL calculation start: pnl_usd={pnl_usd}, pnl_pct={pnl_pct}, exit_price={exit_price}")
             
             if pnl_usd == 0 and exit_price is not None:
                 leverage = self.settings.leverage
                 
-                logger.info(f"Manual PnL calculation for {symbol}: entry_price={local_pos.entry_price}, qty={local_pos.qty}, side={local_pos.side}, leverage={leverage}, exit_price={exit_price}")
+                logger.debug(f"Manual PnL calculation for {symbol}: entry_price={local_pos.entry_price}, qty={local_pos.qty}, side={local_pos.side}, leverage={leverage}, exit_price={exit_price}")
                 
                 if local_pos.side == "Buy":
                     price_diff_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price)
@@ -3126,7 +3135,7 @@ class TradingLoop:
                 margin = (local_pos.entry_price * local_pos.qty) / leverage
                 pnl_usd = (pnl_pct / 100) * margin
                 
-                logger.info(f"Manual PnL: price_diff_pct={price_diff_pct:.8f}, pnl_pct_raw={pnl_pct:.8f}%, margin={margin:.6f}, pnl_usd_before_fee={pnl_usd:.6f}")
+                logger.debug(f"Manual PnL: price_diff_pct={price_diff_pct:.8f}, pnl_pct_raw={pnl_pct:.8f}%, margin={margin:.6f}, pnl_usd_before_fee={pnl_usd:.6f}")
 
                 # Учитываем комиссию биржи (если считаем вручную)
                 fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)

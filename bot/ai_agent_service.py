@@ -604,7 +604,13 @@ class AIAgentService:
             logger.error(f"Chat failed: {e}")
             return f"Error: {str(e)}"
 
-    def start_research_experiment(self, symbol: str, experiment_type: str) -> Dict[str, Any]:
+    def start_research_experiment(
+        self,
+        symbol: str,
+        experiment_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        allow_duplicate: bool = False,
+    ) -> Dict[str, Any]:
         """
         Starts a research experiment (Training + Backtest)
         experiment_type: 'aggressive' | 'conservative' | 'balanced'
@@ -614,6 +620,15 @@ class AIAgentService:
             import subprocess
             from pathlib import Path
             import uuid
+            import json
+            from datetime import datetime
+            from typing import Dict, Any
+            from .experiment_management import (
+                ExperimentCriteria,
+                ExperimentStore,
+                build_param_signature,
+                get_code_version,
+            )
             
             project_root = Path(__file__).resolve().parent.parent
             # Use the new research runner script
@@ -644,6 +659,87 @@ class AIAgentService:
                 "--type", experiment_type,
                 "--experiment-id", experiment_id
             ] + params
+
+            store = ExperimentStore(project_root / "experiments.json")
+            meta = metadata if isinstance(metadata, dict) else {}
+            exp_params = {
+                "interval": (params[1] if len(params) >= 2 and params[0] == "--interval" else "15m"),
+                "no_mtf": "--no-mtf" in params,
+            }
+            signature = build_param_signature(
+                symbol=symbol,
+                experiment_type=experiment_type,
+                params=exp_params,
+                hyperparams=meta.get("hyperparams") if isinstance(meta.get("hyperparams"), dict) else None,
+            )
+
+            existing = [
+                e
+                for e in store.list()
+                if isinstance(e, dict) and e.get("param_signature") == signature
+            ]
+            criteria = ExperimentCriteria()
+            if existing and not allow_duplicate:
+                def _is_ineffective(e: Dict[str, Any]) -> bool:
+                    status = e.get("status")
+                    if status in {"failed"}:
+                        return True
+                    if status != "completed":
+                        return False
+                    results = e.get("results") if isinstance(e.get("results"), dict) else {}
+                    trades = int(results.get("total_trades") or 0)
+                    pf = float(results.get("profit_factor") or 0.0)
+                    pnl = float(results.get("total_pnl_pct") or 0.0)
+                    dd = float(results.get("max_drawdown_pct") or results.get("max_drawdown") or 0.0)
+                    return not (
+                        trades >= criteria.min_total_trades
+                        and pf >= criteria.min_profit_factor
+                        and pnl >= criteria.min_total_pnl_pct
+                        and dd <= criteria.max_drawdown_pct
+                    )
+
+                if any(_is_ineffective(e) for e in existing):
+                    return {
+                        "ok": False,
+                        "error": "Duplicate ineffective experiment blocked",
+                        "experiment_id": experiment_id,
+                        "param_signature": signature,
+                    }
+
+            code_version = get_code_version(project_root)
+            created_at = datetime.now().isoformat()
+            record: Dict[str, Any] = {
+                "id": experiment_id,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "status": "starting",
+                "symbol": symbol,
+                "type": experiment_type,
+                "params": exp_params,
+                "param_signature": signature,
+                "code_version": code_version,
+            }
+            for k in [
+                "baseline",
+                "param_changes",
+                "hypothesis",
+                "expected_outcome",
+                "rationale",
+                "hyperparams",
+                "criteria",
+                "tags",
+            ]:
+                if k in meta:
+                    record[k] = meta[k]
+
+            store.upsert(experiment_id, record)
+
+            meta_dir = project_root / "experiment_meta"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            meta_path = meta_dir / f"{experiment_id}.json"
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+            cmd += ["--metadata-path", str(meta_path)]
             
             logger.info(f"Starting research experiment: {' '.join(cmd)}")
             
@@ -664,6 +760,7 @@ class AIAgentService:
                 "experiment_id": experiment_id,
                 "symbol": symbol, 
                 "type": experiment_type,
+                "param_signature": signature,
                 "message": f"Experiment {experiment_type} started for {symbol}"
             }
             
@@ -689,4 +786,3 @@ class AIAgentService:
         except Exception as e:
             logger.error(f"Failed to get experiments: {e}")
             return []
-

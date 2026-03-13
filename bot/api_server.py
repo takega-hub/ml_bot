@@ -13,6 +13,7 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 from typing import Optional, Any, List, Dict
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -762,14 +763,18 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         real_stats = {}
         for t in state.trades:
             if t.symbol == symbol and t.model_name:
-                if t.model_name not in real_stats:
-                    real_stats[t.model_name] = {"pnl": 0.0, "wins": 0, "count": 0}
+                model_key = Path(str(t.model_name)).stem
+                if not model_key:
+                    model_key = str(t.model_name)
+                
+                if model_key not in real_stats:
+                    real_stats[model_key] = {"pnl": 0.0, "wins": 0, "count": 0}
                 
                 if t.status == "closed":
-                    real_stats[t.model_name]["pnl"] += t.pnl_usd
-                    real_stats[t.model_name]["count"] += 1
+                    real_stats[model_key]["pnl"] += t.pnl_usd
+                    real_stats[model_key]["count"] += 1
                     if t.pnl_usd > 0:
-                        real_stats[t.model_name]["wins"] += 1
+                        real_stats[model_key]["wins"] += 1
 
         list_models = []
         models_1h = []
@@ -921,6 +926,77 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         background_tasks.add_task(_run_test)
         
         return {"ok": True, "symbol": symbol, "message": "Test started in background"}
+
+    class TestAllSingleModelsBody(BaseModel):
+        days: int = 14
+        symbols: Optional[List[str]] = None
+
+    @app.post("/api/models/test_all_single_models", dependencies=[Depends(verify_api_key)])
+    def post_test_all_single_models(body: TestAllSingleModelsBody, background_tasks: BackgroundTasks):
+        if not model_manager:
+            raise HTTPException(status_code=501, detail="Model manager not available")
+
+        symbols = body.symbols if body.symbols else list(state.active_symbols)
+        symbols = [s.upper() for s in symbols]
+
+        def _run_test_all_single():
+            try:
+                if tg_bot:
+                    _send_telegram_sync(
+                        f"🧪 Started testing ALL single models for {len(symbols)} active symbols..."
+                    )
+                state.add_notification("Started testing all single models", "info")
+
+                for sym in symbols:
+                    models = []
+                    if hasattr(model_manager, "find_single_models_for_symbol"):
+                        models = model_manager.find_single_models_for_symbol(sym)
+                    else:
+                        models = model_manager.find_models_for_symbol(sym)
+                        models = [
+                            p for p in models
+                            if not (p.stem.lower().endswith("_mtf") or "_mtf_" in p.stem.lower())
+                        ]
+
+                    if not models:
+                        logger.info(f"No models found for {sym} in ml_models")
+                        continue
+
+                    logger.info(f"Testing {len(models)} models for {sym}")
+                    if tg_bot:
+                        _send_telegram_sync(f"🧪 {sym}: testing {len(models)} models...")
+
+                    ok_count = 0
+                    for p in models:
+                        try:
+                            results = model_manager.test_model(str(p), sym, days=body.days)
+                            if results:
+                                model_manager.save_model_test_result(sym, str(p), results)
+                                ok_count += 1
+                        except Exception as e:
+                            logger.error(f"Error testing model {p} for {sym}: {e}")
+
+                    logger.info(f"Testing finished for {sym}: {ok_count}/{len(models)} models saved")
+                    state.add_notification(
+                        f"Testing finished for {sym}: {ok_count}/{len(models)} models",
+                        "success",
+                    )
+                    if tg_bot:
+                        _send_telegram_sync(
+                            f"✅ {sym}: testing finished ({ok_count}/{len(models)} models)."
+                        )
+
+                state.add_notification("Testing all single models finished", "success")
+                if tg_bot:
+                    _send_telegram_sync("✅ Testing ALL single models finished.")
+            except Exception as e:
+                logger.error(f"Error in test_all_single_models: {e}")
+                state.add_notification("Testing all single models failed", "error")
+                if tg_bot:
+                    _send_telegram_sync(f"❌ Testing ALL single models failed: {e}")
+
+        background_tasks.add_task(_run_test_all_single)
+        return {"ok": True, "message": "Test started in background", "symbols": symbols}
 
     class TestAllBody(BaseModel):
         symbol: str
@@ -1627,16 +1703,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     class ResearchBody(BaseModel):
         symbol: str
         type: str = "balanced" # aggressive, conservative, balanced
+        metadata: Optional[Dict[str, Any]] = None
+        allow_duplicate: bool = False
 
     @app.post("/api/ai/research/start", dependencies=[Depends(verify_api_key)])
     async def post_start_research(body: ResearchBody):
         """Запускает эксперимент (Research Agent)."""
         symbol = body.symbol.upper()
         try:
-            res = ai_agent.start_research_experiment(symbol, body.type)
+            res = ai_agent.start_research_experiment(
+                symbol,
+                body.type,
+                metadata=body.metadata,
+                allow_duplicate=body.allow_duplicate,
+            )
             if not res.get("ok"):
                  error_msg = res.get("error", "Unknown error")
                  logger.error(f"Research start failed for {symbol}: {error_msg}")
+                 if "Duplicate" in error_msg:
+                     raise HTTPException(status_code=409, detail=error_msg)
                  raise HTTPException(status_code=500, detail=error_msg)
             
             if tg_bot:
@@ -1648,6 +1733,96 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception as e:
             logger.error(f"Research endpoint error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/ai/experiments/insights", dependencies=[Depends(verify_api_key)])
+    def get_experiment_insights(symbol: Optional[str] = None, type: Optional[str] = None):
+        from pathlib import Path
+        from .experiment_management import (
+            ExperimentAnalyzer,
+            ExperimentCriteria,
+            ExperimentReportBuilder,
+            ExperimentStore,
+            HypothesisGenerator,
+        )
+
+        store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
+        experiments = store.list()
+        analyzer = ExperimentAnalyzer(experiments)
+        summary = analyzer.summarize(symbol=symbol, experiment_type=type)
+        impact = analyzer.compute_param_impact(symbol.upper()) if symbol else None
+        hypotheses = HypothesisGenerator(ExperimentCriteria()).propose(summary)
+        return {
+            "symbol": symbol.upper() if symbol else None,
+            "type": type,
+            "summary": summary,
+            "impact": impact,
+            "hypotheses": hypotheses,
+        }
+
+    @app.get("/api/ai/experiments/report/{experiment_id}", dependencies=[Depends(verify_api_key)])
+    def get_experiment_report(experiment_id: str):
+        from pathlib import Path
+        from .experiment_management import (
+            ExperimentAnalyzer,
+            ExperimentReportBuilder,
+            ExperimentStore,
+        )
+
+        store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
+        exp = store.get(experiment_id)
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        analyzer = ExperimentAnalyzer(store.list())
+        impact = None
+        if exp.get("symbol"):
+            impact = analyzer.compute_param_impact(str(exp.get("symbol")))
+        md = ExperimentReportBuilder().build_markdown(exp, impact=impact)
+        return {"experiment_id": experiment_id, "markdown": md}
+
+    @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])
+    def delete_research_experiment(experiment_id: str):
+        from .experiment_management import ExperimentStore
+
+        store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
+        exp = store.get(experiment_id)
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        status = str(exp.get("status") or "unknown")
+        if status == "completed":
+            raise HTTPException(status_code=400, detail="Completed experiment cannot be deleted")
+
+        project_root = Path(__file__).resolve().parent.parent
+
+        if paper_trading_manager:
+            try:
+                paper_trading_manager.delete_session(experiment_id)
+            except Exception as e:
+                logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+
+        data = store.read_all()
+        if experiment_id in data:
+            del data[experiment_id]
+            store.write_all(data)
+
+        removed_paths: List[str] = []
+        meta_path = project_root / "experiment_meta" / f"{experiment_id}.json"
+        if meta_path.exists():
+            try:
+                meta_path.unlink()
+                removed_paths.append(str(meta_path))
+            except Exception as e:
+                logger.error(f"Failed to remove meta file {meta_path}: {e}", exc_info=True)
+
+        artifacts_dir = project_root / "experiment_artifacts" / experiment_id
+        if artifacts_dir.exists():
+            try:
+                shutil.rmtree(artifacts_dir)
+                removed_paths.append(str(artifacts_dir))
+            except Exception as e:
+                logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
+
+        return {"ok": True, "experiment_id": experiment_id, "removed_paths": removed_paths}
 
     @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
     def get_research_status():
@@ -1789,12 +1964,39 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             models = results.get("models", {})
             model_15m_path = models.get("15m")
             model_1h_path = models.get("1h")
+            recommended_tactic = results.get("recommended_tactic")
             
             if not model_15m_path and not model_1h_path:
                 raise HTTPException(status_code=400, detail="Experiment has no models")
             
             # Применяем стратегию
-            if model_1h_path and model_15m_path:
+            if recommended_tactic == "single_1h":
+                model_path = model_1h_path
+                if not model_path:
+                    raise HTTPException(status_code=400, detail="No 1h model available for single_1h tactic")
+                if not model_manager:
+                    raise HTTPException(status_code=501, detail="Model manager not available")
+                model_manager.apply_model(symbol, model_path)
+                state.symbol_models[symbol] = model_path
+                config = {"mode": "single", "model_path": model_path}
+                state.set_strategy_config(symbol, config)
+                experiment["applied_mode"] = "single_1h"
+                experiment["applied_models"] = {"single": model_path}
+                logger.info(f"Applied single_1h experiment {body.experiment_id} for {symbol}: model={model_path}")
+            elif recommended_tactic == "single_15m":
+                model_path = model_15m_path
+                if not model_path:
+                    raise HTTPException(status_code=400, detail="No 15m model available for single_15m tactic")
+                if not model_manager:
+                    raise HTTPException(status_code=501, detail="Model manager not available")
+                model_manager.apply_model(symbol, model_path)
+                state.symbol_models[symbol] = model_path
+                config = {"mode": "single", "model_path": model_path}
+                state.set_strategy_config(symbol, config)
+                experiment["applied_mode"] = "single_15m"
+                experiment["applied_models"] = {"single": model_path}
+                logger.info(f"Applied single_15m experiment {body.experiment_id} for {symbol}: model={model_path}")
+            elif model_1h_path and model_15m_path:
                 # MTF стратегия
                 config = {
                     "mode": "mtf",
@@ -1802,6 +2004,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "model_15m_path": model_15m_path
                 }
                 state.set_strategy_config(symbol, config)
+                experiment["applied_mode"] = "mtf"
+                experiment["applied_models"] = {"1h": model_1h_path, "15m": model_15m_path}
                 logger.info(f"Applied MTF experiment {body.experiment_id} for {symbol}: 1h={model_1h_path}, 15m={model_15m_path}")
             else:
                 # Single стратегия (используем 15m модель, если есть)
@@ -1816,6 +2020,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 state.symbol_models[symbol] = model_path
                 config = {"mode": "single", "model_path": model_path}
                 state.set_strategy_config(symbol, config)
+                experiment["applied_mode"] = "single"
+                experiment["applied_models"] = {"single": model_path}
                 logger.info(f"Applied single experiment {body.experiment_id} for {symbol}: model={model_path}")
             
             # Обновляем эксперимент с пометкой о применении

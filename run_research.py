@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--symbol", required=True, help="Trading pair")
     parser.add_argument("--type", required=True, help="Experiment type (aggressive, conservative, balanced)")
     parser.add_argument("--experiment-id", required=True, help="Unique ID for the experiment")
+    parser.add_argument("--metadata-path", default=None, help="Optional JSON file with experiment metadata")
     
     # Pass-through args for retraining
     parser.add_argument("--interval", default="15m", help="Base interval")
@@ -68,14 +69,25 @@ def main():
     exp_type = args.type
     
     logger.info(f"Starting research experiment {experiment_id} for {symbol} ({exp_type})")
-    update_experiment_status(experiment_id, "starting", {
+    details = {
         "symbol": symbol,
         "type": exp_type,
         "params": {
             "interval": args.interval,
             "no_mtf": args.no_mtf
         }
-    })
+    }
+    if args.metadata_path:
+        try:
+            with open(args.metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if isinstance(meta, dict):
+                for k, v in meta.items():
+                    if k not in {"status", "updated_at", "created_at"}:
+                        details[k] = v
+        except Exception as e:
+            logger.error(f"Failed to read metadata file: {e}")
+    update_experiment_status(experiment_id, "starting", details)
     
     try:
         # 1. Training Phase
@@ -90,6 +102,10 @@ def main():
             "--model-suffix", suffix,
             "--interval", args.interval
         ]
+        artifacts_dir = Path("experiment_artifacts") / experiment_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        training_report_path = artifacts_dir / "training_report.json"
+        train_cmd += ["--report-json", str(training_report_path)]
         
         if args.no_mtf:
             train_cmd.append("--no-mtf")
@@ -199,10 +215,66 @@ def main():
                     model_1h_path = str(c)
                     break
             if model_1h_path: break
-            
+
+        single_results: Dict[str, Any] = {}
+        def _run_single_backtest(tag: str, model_path: str, interval: str) -> Optional[Dict[str, Any]]:
+            try:
+                out_path = artifacts_dir / f"backtest_single_{tag}.json"
+                cmd_single = [
+                    sys.executable,
+                    "backtest_ml_strategy.py",
+                    "--model",
+                    model_path,
+                    "--symbol",
+                    symbol,
+                    "--days",
+                    "30",
+                    "--interval",
+                    interval,
+                    "--save",
+                    "--out-json",
+                    str(out_path),
+                ]
+                logger.info(f"Running single backtest ({tag}): {' '.join(cmd_single)}")
+                p = subprocess.Popen(
+                    cmd_single,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                while True:
+                    line = p.stdout.readline()
+                    if not line and p.poll() is not None:
+                        break
+                    if line:
+                        logger.info(f"[SINGLE-{tag}] {line.strip()}")
+                rc = p.poll()
+                if rc != 0:
+                    err = p.stderr.read()
+                    logger.error(f"Single backtest failed ({tag}): {err}")
+                    return None
+                if out_path.exists():
+                    with open(out_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return data if isinstance(data, dict) else None
+                return None
+            except Exception as e:
+                logger.error(f"Single backtest error ({tag}): {e}", exc_info=True)
+                return None
+
+        if model_15m_path:
+            r15 = _run_single_backtest("15m", model_15m_path, "15m")
+            if r15:
+                single_results["15m"] = r15
+
         if model_1h_path:
             backtest_cmd.extend(["--model-1h", model_1h_path])
             logger.info(f"Using new 1h model: {model_1h_path}")
+            r1h = _run_single_backtest("1h", model_1h_path, "1h")
+            if r1h:
+                single_results["1h"] = r1h
         else:
             logger.info("Using best available 1h model (automatic selection)")
             
@@ -248,17 +320,55 @@ def main():
             reverse=True
         )
         
-        result_data = {}
+        mtf_report = {}
         if json_files:
             latest_file = json_files[0]
             logger.info(f"Found result file: {latest_file}")
             with open(latest_file, "r", encoding="utf-8") as f:
-                result_data = json.load(f)
+                mtf_report = json.load(f)
         else:
             logger.warning("No result JSON found!")
             
+        def _score(metrics: Dict[str, Any]) -> float:
+            pnl = float(metrics.get("total_pnl_pct") or 0.0)
+            dd = float(metrics.get("max_drawdown_pct") or 0.0)
+            trades = float(metrics.get("total_trades") or 0.0)
+            return pnl - (0.5 * dd) + (0.01 * trades)
+
+        tactics: Dict[str, Any] = {}
+        if isinstance(mtf_report, dict) and mtf_report:
+            tactics["mtf"] = mtf_report
+        if "15m" in single_results:
+            tactics["single_15m"] = single_results["15m"]
+        if "1h" in single_results:
+            tactics["single_1h"] = single_results["1h"]
+
+        recommended_tactic = None
+        best_metrics: Dict[str, Any] = {}
+        best_score = None
+        for name, payload in tactics.items():
+            if not isinstance(payload, dict):
+                continue
+            s = _score(payload)
+            if best_score is None or s > best_score:
+                best_score = s
+                recommended_tactic = name
+                best_metrics = payload
+
+        result_data = dict(best_metrics) if isinstance(best_metrics, dict) else {}
+        result_data["tactics"] = tactics
+        result_data["recommended_tactic"] = recommended_tactic
+
         # Add training logs/metrics to result
         result_data["training_logs"] = logs[-20:] # Last 20 lines of training log
+        try:
+            if training_report_path.exists():
+                with open(training_report_path, "r", encoding="utf-8") as f:
+                    training_report = json.load(f)
+                if isinstance(training_report, dict):
+                    result_data["training_report"] = training_report
+        except Exception as e:
+            logger.error(f"Failed to load training report: {e}")
         result_data["models"] = {
             "15m": model_15m_path,
             "1h": model_1h_path

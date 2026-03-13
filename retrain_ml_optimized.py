@@ -168,6 +168,11 @@ def main():
         default="",
         help="Суффикс имени файла модели (например _ob для версии с orderbook). Итог: rf_SYM_15_15m<suffix>.pkl"
     )
+    parser.add_argument(
+        "--report-json",
+        type=str,
+        help="Путь к JSON-файлу для сохранения итоговых метрик эксперимента"
+    )
     args = parser.parse_known_args()[0]
     
     safe_print("=" * 80)
@@ -911,6 +916,34 @@ def main():
             safe_print(f"\n✅ Лучшая модель для {symbol}: {best_model}")
             safe_print(f"   Score: {best_score:.4f}")
     
+    report: Dict[str, Any] = {}
+    try:
+        report = {
+            "symbols": symbols,
+            "interval_display": interval_display,
+            "ml_mtf_enabled": ml_mtf_enabled,
+            "rf_metrics": rf_metrics,
+        }
+        if "xgb_metrics" in locals():
+            report["xgb_metrics"] = xgb_metrics
+        if "ensemble_metrics" in locals():
+            report["ensemble_metrics"] = ensemble_metrics
+        if "triple_ensemble_metrics" in locals():
+            report["triple_ensemble_metrics"] = triple_ensemble_metrics
+        if "quad_metrics" in locals():
+            report["quad_metrics"] = quad_metrics
+        if args.report_json:
+            try:
+                from pathlib import Path as _Path
+                p = _Path(args.report_json)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+            except Exception as e:
+                safe_print(f"[WARNING] Не удалось сохранить отчёт эксперимента: {e}")
+    except Exception as e:
+        safe_print(f"[WARNING] Ошибка при формировании отчёта эксперимента: {e}")
+
     # Финальное сообщение
     safe_print("\n" + "=" * 80)
     safe_print("🎉 ПЕРЕОБУЧЕНИЕ ЗАВЕРШЕНО!")

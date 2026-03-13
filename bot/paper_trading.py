@@ -1025,3 +1025,19 @@ class PaperTradingManager:
         if persisted:
             return persisted.get("chart_data")
         return None
+
+    def delete_session(self, experiment_id: str) -> bool:
+        removed = False
+        if experiment_id in self.sessions:
+            try:
+                self.sessions[experiment_id].stop(reason="deleted")
+            except Exception:
+                pass
+            del self.sessions[experiment_id]
+            removed = True
+        if experiment_id in self.persisted_sessions:
+            del self.persisted_sessions[experiment_id]
+            removed = True
+        if removed:
+            self._write_state()
+        return removed

@@ -1745,6 +1745,10 @@ def main():
                        help='Процент отката от high/low сигнальной свечи (по умолчанию: 0.3%%)')
     parser.add_argument('--pullback-max-bars', type=int, default=3,
                        help='Максимальная задержка входа в свечах (по умолчанию: 3)')
+    parser.add_argument('--save', action='store_true',
+                       help='Сохранить результаты в JSON файл')
+    parser.add_argument('--out-json', type=str, default=None,
+                       help='Путь к JSON файлу результатов (если не задан, сохраняет в backtest_reports)')
     
     args = parser.parse_args()
     
@@ -1784,6 +1788,28 @@ def main():
     if metrics:
         print(f"\n✅ Точный бэктест завершен!")
         print(f"   Результаты показывают КАК стратегия работает на самом деле")
+
+        if args.save:
+            try:
+                from dataclasses import asdict
+                from pathlib import Path
+                import json
+                from datetime import datetime
+
+                if args.out_json:
+                    filepath = Path(args.out_json)
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    results_dir = Path("backtest_reports")
+                    results_dir.mkdir(exist_ok=True)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filepath = results_dir / f"backtest_single_{args.symbol}_{timestamp}.json"
+
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(asdict(metrics), f, indent=2, default=str)
+                print(f"\n✅ Результаты сохранены в {filepath}")
+            except Exception as e:
+                print(f"\n⚠️  Не удалось сохранить результаты: {e}")
         
         # Финальный вердикт
         tradable_count = metrics.long_signals + metrics.short_signals
