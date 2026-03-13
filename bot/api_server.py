@@ -1791,8 +1791,6 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         status = str(exp.get("status") or "unknown")
         if status == "active":
             raise HTTPException(status_code=400, detail="Active experiment cannot be deleted")
-        if exp.get("applied") is True:
-            raise HTTPException(status_code=400, detail="Applied experiment cannot be deleted")
 
         project_root = Path(__file__).resolve().parent.parent
 
