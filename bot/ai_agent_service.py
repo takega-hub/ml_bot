@@ -709,7 +709,7 @@ class AIAgentService:
                     }
 
             code_version = get_code_version(project_root)
-            created_at = datetime.now().isoformat()
+            created_at = datetime.utcnow().isoformat() + "Z"
             record: Dict[str, Any] = {
                 "id": experiment_id,
                 "created_at": created_at,
@@ -762,7 +762,7 @@ class AIAgentService:
                     experiment_id,
                     {
                         "runner_pid": process.pid,
-                        "started_at": datetime.now().isoformat(),
+                        "started_at": datetime.utcnow().isoformat() + "Z",
                     },
                 )
             except Exception:

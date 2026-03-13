@@ -9,7 +9,7 @@ import logging
 import threading
 import queue
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # Configure logging
@@ -38,11 +38,11 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
         if experiment_id not in data:
             data[experiment_id] = {
                 "id": experiment_id,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
             
         data[experiment_id]["status"] = status
-        data[experiment_id]["updated_at"] = datetime.now().isoformat()
+        data[experiment_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         if details:
             for k, v in details.items():
@@ -117,7 +117,7 @@ def run_process_with_heartbeat(
 
         if now - last_hb >= heartbeat_interval_sec:
             patch = dict(base_details or {})
-            patch["heartbeat_at"] = datetime.utcnow().isoformat()
+            patch["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
             if last_log:
                 patch["last_log"] = last_log
             update_experiment_status(experiment_id, status, patch)
@@ -191,7 +191,7 @@ def main():
             update_experiment_status(
                 experiment_id,
                 "training",
-                {"progress": progress, "last_log": f"Training {interval} started", "heartbeat_at": datetime.utcnow().isoformat()},
+                {"progress": progress, "last_log": f"Training {interval} started", "heartbeat_at": datetime.now(timezone.utc).isoformat()},
             )
 
             train_cmd = [
