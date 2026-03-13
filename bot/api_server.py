@@ -1779,6 +1779,46 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         md = ExperimentReportBuilder().build_markdown(exp, impact=impact)
         return {"experiment_id": experiment_id, "markdown": md}
 
+    @app.get("/api/ai/research/experiment/{experiment_id}/health", dependencies=[Depends(verify_api_key)])
+    def get_research_experiment_health(experiment_id: str):
+        from .experiment_management import ExperimentStore
+        from datetime import datetime
+
+        store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
+        exp = store.get(experiment_id)
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        heartbeat_at = exp.get("heartbeat_at") or exp.get("updated_at")
+        seconds_since = None
+        if isinstance(heartbeat_at, str):
+            try:
+                dt = datetime.fromisoformat(heartbeat_at)
+                seconds_since = int((datetime.now(dt.tzinfo) - dt).total_seconds())
+            except Exception:
+                seconds_since = None
+
+        runner_pid = exp.get("runner_pid")
+        alive = None
+        exit_code = None
+        try:
+            proc = getattr(ai_agent, "research_processes", {}).get(experiment_id) if ai_agent else None
+            if proc is not None:
+                exit_code = proc.poll()
+                alive = exit_code is None
+        except Exception:
+            alive = None
+
+        return {
+            "experiment_id": experiment_id,
+            "status": exp.get("status"),
+            "runner_pid": runner_pid,
+            "alive": alive,
+            "exit_code": exit_code,
+            "heartbeat_at": heartbeat_at,
+            "seconds_since_heartbeat": seconds_since,
+        }
+
     @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])
     def delete_research_experiment(experiment_id: str):
         from .experiment_management import ExperimentStore

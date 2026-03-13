@@ -42,6 +42,7 @@ class AIAgentService:
         self.supabase_key = os.getenv("SUPABASE_KEY")
         
         self._init_supabase()
+        self.research_processes: Dict[str, Any] = {}
 
         # Debug logging for API Key (masked)
         if self.api_key:
@@ -754,6 +755,18 @@ class AIAgentService:
                 encoding='utf-8',
                 errors='replace'
             )
+
+            try:
+                self.research_processes[experiment_id] = process
+                store.upsert(
+                    experiment_id,
+                    {
+                        "runner_pid": process.pid,
+                        "started_at": datetime.now().isoformat(),
+                    },
+                )
+            except Exception:
+                pass
             
             return {
                 "ok": True, 

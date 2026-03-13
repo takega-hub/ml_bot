@@ -6,8 +6,11 @@ import subprocess
 import argparse
 import time
 import logging
+import threading
+import queue
 from pathlib import Path
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +53,82 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
             
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
+
+def run_process_with_heartbeat(
+    cmd,
+    log_prefix: str,
+    experiment_id: str,
+    status: str,
+    base_details: dict,
+    heartbeat_interval_sec: int = 10,
+):
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    q_out: "queue.Queue[str]" = queue.Queue()
+    q_err: "queue.Queue[str]" = queue.Queue()
+
+    def _reader(stream, q):
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                q.put(line.rstrip("\n"))
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    t_out = threading.Thread(target=_reader, args=(process.stdout, q_out), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(process.stderr, q_err), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    lines: List[str] = []
+    last_hb = time.monotonic()
+    last_log = None
+
+    while True:
+        now = time.monotonic()
+        try:
+            line = q_out.get(timeout=0.5)
+            last_log = line.strip()
+            if last_log:
+                logger.info(f"[{log_prefix}] {last_log}")
+                lines.append(last_log)
+                if len(lines) > 200:
+                    lines = lines[-200:]
+        except queue.Empty:
+            pass
+
+        try:
+            err_line = q_err.get_nowait()
+            if err_line:
+                logger.info(f"[{log_prefix}-ERR] {err_line.strip()}")
+        except queue.Empty:
+            pass
+
+        if now - last_hb >= heartbeat_interval_sec:
+            patch = dict(base_details or {})
+            patch["heartbeat_at"] = datetime.utcnow().isoformat()
+            if last_log:
+                patch["last_log"] = last_log
+            update_experiment_status(experiment_id, status, patch)
+            last_hb = now
+
+        rc = process.poll()
+        if rc is not None and q_out.empty() and q_err.empty():
+            break
+
+    return_code = process.poll()
+    return return_code, lines, process
 
 def main():
     parser = argparse.ArgumentParser(description="Run Research Experiment (Train + Backtest)")
@@ -112,7 +191,7 @@ def main():
             update_experiment_status(
                 experiment_id,
                 "training",
-                {"progress": progress, "last_log": f"Training {interval} started"},
+                {"progress": progress, "last_log": f"Training {interval} started", "heartbeat_at": datetime.utcnow().isoformat()},
             )
 
             train_cmd = [
@@ -132,31 +211,16 @@ def main():
                 train_cmd.append("--no-mtf")
 
             logger.info(f"Running training command ({interval}): {' '.join(train_cmd)}")
-
-            process = subprocess.Popen(
+            return_code, out_lines, _ = run_process_with_heartbeat(
                 train_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                f"TRAIN-{interval}",
+                experiment_id,
+                "training",
+                {"progress": progress},
             )
-
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    line = line.strip()
-                    logger.info(f"[TRAIN-{interval}] {line}")
-                    logs.append(line)
-                    if len(logs) % 10 == 0:
-                        update_experiment_status(experiment_id, "training", {"last_log": line})
-
-            return_code = process.poll()
+            logs.extend(out_lines[-20:])
             if return_code != 0:
-                stderr = process.stderr.read()
-                raise Exception(f"Training failed ({interval}) with code {return_code}: {stderr}")
+                raise Exception(f"Training failed ({interval}) with code {return_code}")
 
             try:
                 if training_report_path.exists():
@@ -310,31 +374,14 @@ def main():
             
         logger.info(f"Running backtest command: {' '.join(backtest_cmd)}")
         
-        process_bt = subprocess.Popen(
+        return_code_bt, bt_logs, _ = run_process_with_heartbeat(
             backtest_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
+            "BACKTEST",
+            experiment_id,
+            "backtesting",
+            {"progress": 70},
         )
-        
-        bt_logs = []
-        while True:
-            line = process_bt.stdout.readline()
-            if not line and process_bt.poll() is not None:
-                break
-            if line:
-                line = line.strip()
-                logger.info(f"[BACKTEST] {line}")
-                bt_logs.append(line)
-                
-        return_code_bt = process_bt.poll()
         if return_code_bt != 0:
-            stderr_bt = process_bt.stderr.read()
-            logger.error(f"Backtest failed: {stderr_bt}")
-            # Don't fail the whole experiment, just the backtest part? 
-            # No, backtest is crucial for "Virtual Trading" status.
             raise Exception(f"Backtest failed with code {return_code_bt}")
 
         # 3. Harvest Results
