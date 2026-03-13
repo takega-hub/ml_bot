@@ -1823,7 +1823,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         ):
                             in_use.append(p)
                     if in_use:
-                        raise HTTPException(status_code=400, detail="Experiment models are currently in use")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Experiment models are currently in use: {', '.join(in_use)}",
+                        )
 
             for p in model_candidates:
                 fp = (project_root / p) if not Path(p).is_absolute() else Path(p)
