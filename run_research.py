@@ -90,58 +90,85 @@ def main():
     update_experiment_status(experiment_id, "starting", details)
     
     try:
+        artifacts_dir = Path("experiment_artifacts") / experiment_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        training_reports: Dict[str, Any] = {}
+
+        intervals = ["15m", "1h"]
+        primary = (args.interval or "15m").strip().lower()
+        if primary in ("1h", "60m"):
+            intervals = ["1h", "15m"]
+
         # 1. Training Phase
         logger.info("Phase 1: Training Models...")
         update_experiment_status(experiment_id, "training", {"progress": 10})
         
         suffix = f"_{exp_type}_exp"
-        
-        train_cmd = [
-            sys.executable, "retrain_ml_optimized.py",
-            "--symbol", symbol,
-            "--model-suffix", suffix,
-            "--interval", args.interval
-        ]
-        artifacts_dir = Path("experiment_artifacts") / experiment_id
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        training_report_path = artifacts_dir / "training_report.json"
-        train_cmd += ["--report-json", str(training_report_path)]
-        
-        if args.no_mtf:
-            train_cmd.append("--no-mtf")
-            
-        logger.info(f"Running training command: {' '.join(train_cmd)}")
-        
-        process = subprocess.Popen(
-            train_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
-        
-        # Stream output to capture logs
-        logs = []
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-            if line:
-                line = line.strip()
-                logger.info(f"[TRAIN] {line}")
-                logs.append(line)
-                # Update status occasionally with last log
-                if len(logs) % 10 == 0:
-                     update_experiment_status(experiment_id, "training", {"last_log": line})
 
-        return_code = process.poll()
-        if return_code != 0:
-            stderr = process.stderr.read()
-            raise Exception(f"Training failed with code {return_code}: {stderr}")
-            
+        logs = []
+        for idx, interval in enumerate(intervals):
+            progress = 10 + int(((idx + 1) / len(intervals)) * 40)
+            update_experiment_status(
+                experiment_id,
+                "training",
+                {"progress": progress, "last_log": f"Training {interval} started"},
+            )
+
+            train_cmd = [
+                sys.executable,
+                "retrain_ml_optimized.py",
+                "--symbol",
+                symbol,
+                "--model-suffix",
+                suffix,
+                "--interval",
+                interval,
+            ]
+            training_report_path = artifacts_dir / f"training_report_{interval}.json"
+            train_cmd += ["--report-json", str(training_report_path)]
+
+            if args.no_mtf:
+                train_cmd.append("--no-mtf")
+
+            logger.info(f"Running training command ({interval}): {' '.join(train_cmd)}")
+
+            process = subprocess.Popen(
+                train_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    line = line.strip()
+                    logger.info(f"[TRAIN-{interval}] {line}")
+                    logs.append(line)
+                    if len(logs) % 10 == 0:
+                        update_experiment_status(experiment_id, "training", {"last_log": line})
+
+            return_code = process.poll()
+            if return_code != 0:
+                stderr = process.stderr.read()
+                raise Exception(f"Training failed ({interval}) with code {return_code}: {stderr}")
+
+            try:
+                if training_report_path.exists():
+                    with open(training_report_path, "r", encoding="utf-8") as f:
+                        rep = json.load(f)
+                    if isinstance(rep, dict):
+                        training_reports[interval] = rep
+            except Exception as e:
+                logger.error(f"Failed to load training report ({interval}): {e}")
+
         logger.info("Training completed successfully.")
-        update_experiment_status(experiment_id, "training_completed", {"progress": 50})
+        update_experiment_status(experiment_id, "training", {"progress": 50, "last_log": "Training completed"})
         
         # 2. Backtesting Phase (Virtual Trading)
         logger.info("Phase 2: Virtual Trading (Backtest)...")
@@ -192,11 +219,14 @@ def main():
              pass
 
         # Prepare backtest command
+        backtest_days = 7
         backtest_cmd = [
             sys.executable, "backtest_mtf_strategy.py",
             "--symbol", symbol,
-            "--days", "30", # Standard test period
-            "--save"
+            "--days", str(backtest_days),
+            "--save",
+            "--out-json",
+            str(artifacts_dir / "backtest_mtf.json"),
         ]
         
         if model_15m_path:
@@ -228,7 +258,7 @@ def main():
                     "--symbol",
                     symbol,
                     "--days",
-                    "30",
+                    str(backtest_days),
                     "--interval",
                     interval,
                     "--save",
@@ -321,7 +351,14 @@ def main():
         )
         
         mtf_report = {}
-        if json_files:
+        mtf_path = artifacts_dir / "backtest_mtf.json"
+        if mtf_path.exists():
+            try:
+                with open(mtf_path, "r", encoding="utf-8") as f:
+                    mtf_report = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load mtf report: {e}")
+        elif json_files:
             latest_file = json_files[0]
             logger.info(f"Found result file: {latest_file}")
             with open(latest_file, "r", encoding="utf-8") as f:
@@ -358,17 +395,12 @@ def main():
         result_data = dict(best_metrics) if isinstance(best_metrics, dict) else {}
         result_data["tactics"] = tactics
         result_data["recommended_tactic"] = recommended_tactic
+        result_data["evaluation_window_days"] = backtest_days
 
         # Add training logs/metrics to result
         result_data["training_logs"] = logs[-20:] # Last 20 lines of training log
-        try:
-            if training_report_path.exists():
-                with open(training_report_path, "r", encoding="utf-8") as f:
-                    training_report = json.load(f)
-                if isinstance(training_report, dict):
-                    result_data["training_report"] = training_report
-        except Exception as e:
-            logger.error(f"Failed to load training report: {e}")
+        if training_reports:
+            result_data["training_report"] = training_reports
         result_data["models"] = {
             "15m": model_15m_path,
             "1h": model_1h_path

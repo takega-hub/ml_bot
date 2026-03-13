@@ -663,7 +663,8 @@ class AIAgentService:
             store = ExperimentStore(project_root / "experiments.json")
             meta = metadata if isinstance(metadata, dict) else {}
             exp_params = {
-                "interval": (params[1] if len(params) >= 2 and params[0] == "--interval" else "15m"),
+                "primary_interval": (params[1] if len(params) >= 2 and params[0] == "--interval" else "15m"),
+                "train_intervals": ["15m", "1h"],
                 "no_mtf": "--no-mtf" in params,
             }
             signature = build_param_signature(

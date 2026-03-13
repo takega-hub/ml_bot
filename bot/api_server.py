@@ -1789,8 +1789,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         status = str(exp.get("status") or "unknown")
-        if status == "completed":
-            raise HTTPException(status_code=400, detail="Completed experiment cannot be deleted")
+        if status == "active":
+            raise HTTPException(status_code=400, detail="Active experiment cannot be deleted")
+        if exp.get("applied") is True:
+            raise HTTPException(status_code=400, detail="Applied experiment cannot be deleted")
 
         project_root = Path(__file__).resolve().parent.parent
 
@@ -1799,6 +1801,44 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 paper_trading_manager.delete_session(experiment_id)
             except Exception as e:
                 logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+
+        removed_model_paths: List[str] = []
+        try:
+            results = exp.get("results") if isinstance(exp.get("results"), dict) else {}
+            models = results.get("models") if isinstance(results.get("models"), dict) else {}
+            model_candidates: List[str] = []
+            for v in models.values():
+                if isinstance(v, str) and v:
+                    model_candidates.append(v)
+
+            if exp.get("symbol") and hasattr(state, "get_strategy_config"):
+                current_cfg = state.get_strategy_config(str(exp.get("symbol")))
+                if isinstance(current_cfg, dict):
+                    in_use = []
+                    for p in model_candidates:
+                        if p and (
+                            current_cfg.get("model_path") == p
+                            or current_cfg.get("model_1h_path") == p
+                            or current_cfg.get("model_15m_path") == p
+                        ):
+                            in_use.append(p)
+                    if in_use:
+                        raise HTTPException(status_code=400, detail="Experiment models are currently in use")
+
+            for p in model_candidates:
+                fp = (project_root / p) if not Path(p).is_absolute() else Path(p)
+                if "ml_models" not in fp.parts:
+                    continue
+                if fp.exists() and fp.is_file():
+                    try:
+                        fp.unlink()
+                        removed_model_paths.append(str(fp))
+                    except Exception as e:
+                        logger.error(f"Failed to remove model file {fp}: {e}", exc_info=True)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to remove model files for {experiment_id}: {e}", exc_info=True)
 
         data = store.read_all()
         if experiment_id in data:
@@ -1822,7 +1862,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             except Exception as e:
                 logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
 
-        return {"ok": True, "experiment_id": experiment_id, "removed_paths": removed_paths}
+        return {
+            "ok": True,
+            "experiment_id": experiment_id,
+            "removed_paths": removed_paths,
+            "removed_model_paths": removed_model_paths,
+        }
 
     @app.get("/api/ai/research/status", dependencies=[Depends(verify_api_key)])
     def get_research_status():

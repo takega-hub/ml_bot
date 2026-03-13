@@ -919,6 +919,7 @@ def main():
                        help="Множитель TP при согласии 4h (по умолчанию: 1.3)")
     
     parser.add_argument("--save", action="store_true", help="Сохранить результаты в файл")
+    parser.add_argument("--out-json", type=str, default=None, help="Путь к JSON файлу результатов (если не задан, сохраняет в backtest_reports)")
     parser.add_argument("--plot", action="store_true", help="Построить графики")
     
     args = parser.parse_args()
@@ -994,12 +995,16 @@ def main():
     if metrics and args.save:
         # Сохраняем результаты
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"backtest_mtf_{args.symbol}_{timestamp}.json"
         
         # Сохраняем метрики в JSON
-        results_dir = Path("backtest_reports")
-        results_dir.mkdir(exist_ok=True)
-        filepath = results_dir / filename
+        if args.out_json:
+            filepath = Path(args.out_json)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            filename = f"backtest_mtf_{args.symbol}_{timestamp}.json"
+            results_dir = Path("backtest_reports")
+            results_dir.mkdir(exist_ok=True)
+            filepath = results_dir / filename
         
         import json
         from dataclasses import asdict
