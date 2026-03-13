@@ -1332,8 +1332,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     @app.get("/api/logs", dependencies=[Depends(verify_api_key)])
     def get_logs(log_type: str = "bot", lines: int = 100):
-        """log_type: bot, trades, signals, errors."""
-        path_map = {"bot": "logs/bot.log", "trades": "logs/trades.log", "signals": "logs/signals.log", "errors": "logs/errors.log"}
+        """log_type: bot, trades, signals, errors, ai."""
+        path_map = {"bot": "logs/bot.log", "trades": "logs/trades.log", "signals": "logs/signals.log", "errors": "logs/errors.log", "ai": "logs/ai_entry_audit.jsonl"}
         path = PROJECT_ROOT / path_map.get(log_type, path_map["bot"])
         if not path.exists():
             return {"lines": [], "path": str(path)}
@@ -1341,6 +1341,43 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 raw = f.readlines()
             last = raw[-lines:] if len(raw) > lines else raw
+            if log_type == "ai":
+                out = []
+                for l in last:
+                    s = l.strip()
+                    if not s:
+                        continue
+                    try:
+                        import json as _json
+                        rec = _json.loads(s)
+                        if isinstance(rec, dict):
+                            event_type = rec.get("event_type")
+                            ts = rec.get("timestamp_utc") or rec.get("response", {}).get("timestamp_utc")
+                            symbol = rec.get("symbol")
+                            side = rec.get("side")
+                            decision_id = rec.get("decision_id") or rec.get("response", {}).get("decision_id")
+                            if event_type == "confirm_entry":
+                                resp = rec.get("response", {}) if isinstance(rec.get("response"), dict) else {}
+                                decision = resp.get("decision")
+                                mult = resp.get("size_multiplier")
+                                codes = resp.get("reason_codes")
+                                latency = resp.get("latency_ms")
+                                out.append(
+                                    f"{ts} AI confirm_entry {symbol} {side} decision={decision} mult={mult} codes={codes} latency_ms={latency} id={decision_id}"
+                                )
+                                continue
+                            if event_type == "trade_outcome":
+                                pnl_usd = rec.get("pnl_usd")
+                                pnl_pct = rec.get("pnl_pct")
+                                exit_reason = rec.get("exit_reason")
+                                out.append(
+                                    f"{ts} AI trade_outcome {symbol} {side} pnl_usd={pnl_usd} pnl_pct={pnl_pct} exit_reason={exit_reason} id={decision_id}"
+                                )
+                                continue
+                    except Exception:
+                        pass
+                    out.append(s[:2000])
+                return {"lines": out, "path": str(path)}
             return {"lines": [l.rstrip() for l in last], "path": str(path)}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
