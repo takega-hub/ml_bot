@@ -2650,6 +2650,14 @@ class TelegramBot:
                 "trend_weights": getattr(self.settings.ml_strategy, "trend_weights", None),
                 "flat_weights": getattr(self.settings.ml_strategy, "flat_weights", None),
                 "use_fixed_sl_from_risk": getattr(self.settings.ml_strategy, "use_fixed_sl_from_risk", False),
+                "ai_entry_confirmation_enabled": getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False),
+                "ai_fallback_force_enabled": getattr(self.settings.ml_strategy, "ai_fallback_force_enabled", False),
+                "ai_fallback_spread_reduce_pct": getattr(self.settings.ml_strategy, "ai_fallback_spread_reduce_pct", 0.10),
+                "ai_fallback_spread_veto_pct": getattr(self.settings.ml_strategy, "ai_fallback_spread_veto_pct", 0.25),
+                "ai_fallback_min_depth_usd_5": getattr(self.settings.ml_strategy, "ai_fallback_min_depth_usd_5", 0.0),
+                "ai_fallback_imbalance_abs_reduce": getattr(self.settings.ml_strategy, "ai_fallback_imbalance_abs_reduce", 0.60),
+                "ai_fallback_orderflow_ratio_low": getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_low", 0.40),
+                "ai_fallback_orderflow_ratio_high": getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_high", 2.50),
             }
             
             # Сохраняем все настройки
@@ -2702,6 +2710,14 @@ class TelegramBot:
                 "trend_weights": getattr(self.settings.ml_strategy, "trend_weights", None),
                 "flat_weights": getattr(self.settings.ml_strategy, "flat_weights", None),
                 "use_fixed_sl_from_risk": getattr(self.settings.ml_strategy, "use_fixed_sl_from_risk", False),
+                "ai_entry_confirmation_enabled": getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False),
+                "ai_fallback_force_enabled": getattr(self.settings.ml_strategy, "ai_fallback_force_enabled", False),
+                "ai_fallback_spread_reduce_pct": getattr(self.settings.ml_strategy, "ai_fallback_spread_reduce_pct", 0.10),
+                "ai_fallback_spread_veto_pct": getattr(self.settings.ml_strategy, "ai_fallback_spread_veto_pct", 0.25),
+                "ai_fallback_min_depth_usd_5": getattr(self.settings.ml_strategy, "ai_fallback_min_depth_usd_5", 0.0),
+                "ai_fallback_imbalance_abs_reduce": getattr(self.settings.ml_strategy, "ai_fallback_imbalance_abs_reduce", 0.60),
+                "ai_fallback_orderflow_ratio_low": getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_low", 0.40),
+                "ai_fallback_orderflow_ratio_high": getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_high", 2.50),
             }
             
             # Проверяем, нужно ли обновить файл

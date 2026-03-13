@@ -2,9 +2,12 @@ import os
 import json
 import logging
 import asyncio
+import time
+import uuid
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,13 @@ except ImportError:
     logger.warning("OpenAI library not installed. AI Agent features will be disabled. Run 'pip install openai'")
 
 try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    logger.warning("requests library not installed. AI Agent features will be disabled. Run 'pip install requests'")
+
+try:
     from supabase import create_client, Client
     HAS_SUPABASE = True
 except ImportError:
@@ -35,6 +45,7 @@ class AIAgentService:
         self.model = model
         self.base_url = "https://openrouter.ai/api/v1"
         self.client = None
+        self.http_timeout_s = float(os.getenv("OPENROUTER_HTTP_TIMEOUT_S", "30"))
         
         # Supabase setup
         self.supabase: Optional[Client] = None
@@ -51,19 +62,34 @@ class AIAgentService:
         else:
             logger.warning("AI Agent: API Key NOT found in environment or arguments")
 
-        if self.api_key and HAS_OPENAI:
-            try:
-                self.client = OpenAI(
-                    base_url=self.base_url,
-                    api_key=self.api_key,
-                )
-                logger.info(f"AI Agent initialized with model: {self.model}")
-            except Exception as e:
-                logger.error(f"Failed to initialize OpenAI client: {e}")
-        elif not HAS_OPENAI:
-             logger.warning("AI Agent disabled: openai module missing")
+        if self.api_key and HAS_REQUESTS:
+            logger.info(f"AI Agent initialized with model: {self.model}")
+        elif not HAS_REQUESTS:
+            logger.warning("AI Agent disabled: requests module missing")
         else:
             logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
+
+    def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int, temperature: float) -> str:
+        if not self.api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is not configured")
+        if not HAS_REQUESTS:
+            raise RuntimeError("requests is not installed")
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=self.http_timeout_s)
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
 
     def _init_supabase(self):
         """Attempts to initialize Supabase client."""
@@ -356,6 +382,236 @@ class AIAgentService:
                 "advice": f"Ошибка анализа: {str(e)}",
                 "confidence": 0
             }
+
+    def validate_confirm_entry_request(self, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a dict")
+        for key in ("request_id", "timestamp_utc", "symbol", "timeframe", "signal", "bot_context", "market_context"):
+            if key not in payload:
+                raise ValueError(f"missing field: {key}")
+        if not isinstance(payload.get("request_id"), str) or not payload["request_id"]:
+            raise ValueError("request_id must be a non-empty string")
+        if not isinstance(payload.get("timestamp_utc"), str) or not payload["timestamp_utc"]:
+            raise ValueError("timestamp_utc must be a non-empty string")
+        if not isinstance(payload.get("symbol"), str) or not payload["symbol"]:
+            raise ValueError("symbol must be a non-empty string")
+        if not isinstance(payload.get("timeframe"), str) or not payload["timeframe"]:
+            raise ValueError("timeframe must be a non-empty string")
+        if not isinstance(payload.get("signal"), dict):
+            raise ValueError("signal must be an object")
+        if not isinstance(payload.get("bot_context"), dict):
+            raise ValueError("bot_context must be an object")
+        if not isinstance(payload.get("market_context"), dict):
+            raise ValueError("market_context must be an object")
+
+        s = payload["signal"]
+        for k in ("action", "price"):
+            if k not in s:
+                raise ValueError(f"signal missing field: {k}")
+        if not isinstance(s.get("action"), str) or s["action"] not in ("LONG", "SHORT"):
+            raise ValueError("signal.action must be LONG or SHORT")
+        if not isinstance(s.get("price"), (int, float)):
+            raise ValueError("signal.price must be a number")
+
+    async def confirm_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        self.validate_confirm_entry_request(payload)
+
+        decision_id = payload.get("request_id") or str(uuid.uuid4())
+        now_utc = datetime.now(timezone.utc).isoformat()
+
+        force_fallback = bool(payload.get("bot_context", {}).get("ai_fallback_policy", {}).get("force_enabled", False))
+        llm_available = bool(self.api_key) and HAS_REQUESTS
+
+        if force_fallback or not llm_available:
+            try:
+                ob = payload.get("market_context", {}).get("orderbook", {})
+                tr = payload.get("market_context", {}).get("recent_trades", {})
+                pol = payload.get("bot_context", {}).get("ai_fallback_policy", {})
+                spread_pct = ob.get("spread_pct")
+                bid_vol_5 = ob.get("bid_vol_5")
+                ask_vol_5 = ob.get("ask_vol_5")
+                imbalance_20 = ob.get("imbalance_20")
+                buy_sell_ratio = tr.get("buy_sell_ratio")
+                spread_reduce_pct = pol.get("spread_reduce_pct", 0.10)
+                spread_veto_pct = pol.get("spread_veto_pct", 0.25)
+                min_depth_usd_5 = pol.get("min_depth_usd_5", 0.0)
+                imbalance_abs_reduce = pol.get("imbalance_abs_reduce", 0.60)
+                orderflow_ratio_low = pol.get("orderflow_ratio_low", 0.40)
+                orderflow_ratio_high = pol.get("orderflow_ratio_high", 2.50)
+
+                if force_fallback:
+                    reason_codes: List[str] = ["FORCED_FALLBACK"]
+                elif not llm_available:
+                    reason_codes = ["AI_UNAVAILABLE"]
+                else:
+                    reason_codes = ["AI_UNAVAILABLE"]
+                size_multiplier = 1.0
+                decision = "allow"
+
+                if isinstance(spread_pct, (int, float)):
+                    if spread_pct >= float(spread_veto_pct):
+                        decision = "veto"
+                        reason_codes.append("SPREAD_TOO_WIDE")
+                    elif spread_pct >= float(spread_reduce_pct):
+                        decision = "reduce"
+                        size_multiplier = min(size_multiplier, 0.25)
+                        reason_codes.append("SPREAD_WIDE")
+                else:
+                    reason_codes.append("SPREAD_UNKNOWN")
+
+                if isinstance(bid_vol_5, (int, float)) and isinstance(ask_vol_5, (int, float)):
+                    if (bid_vol_5 + ask_vol_5) <= float(min_depth_usd_5):
+                        decision = "reduce" if decision != "veto" else decision
+                        size_multiplier = min(size_multiplier, 0.25)
+                        reason_codes.append("LOW_DEPTH")
+                else:
+                    reason_codes.append("DEPTH_UNKNOWN")
+
+                if isinstance(imbalance_20, (int, float)):
+                    if imbalance_20 <= -float(imbalance_abs_reduce) or imbalance_20 >= float(imbalance_abs_reduce):
+                        decision = "reduce" if decision != "veto" else decision
+                        size_multiplier = min(size_multiplier, 0.50)
+                        reason_codes.append("IMBALANCE_EXTREME")
+                else:
+                    reason_codes.append("IMBALANCE_UNKNOWN")
+
+                if isinstance(buy_sell_ratio, (int, float)):
+                    if buy_sell_ratio <= float(orderflow_ratio_low) or buy_sell_ratio >= float(orderflow_ratio_high):
+                        decision = "reduce" if decision != "veto" else decision
+                        size_multiplier = min(size_multiplier, 0.50)
+                        reason_codes.append("ORDERFLOW_SKEW")
+                else:
+                    reason_codes.append("ORDERFLOW_UNKNOWN")
+
+                if decision == "reduce" and size_multiplier >= 1.0:
+                    size_multiplier = 0.25
+
+                return {
+                    "decision": decision,
+                    "confidence": 0.0,
+                    "risk_score": 50 if decision != "veto" else 25,
+                    "size_multiplier": float(size_multiplier),
+                    "reason_codes": reason_codes,
+                    "notes": "Offline fallback decision",
+                    "decision_id": decision_id,
+                    "timestamp_utc": now_utc,
+                    "latency_ms": 0,
+                }
+            except Exception:
+                return {
+                    "decision": "allow",
+                    "confidence": 0.0,
+                    "risk_score": 50,
+                    "size_multiplier": 1.0,
+                    "reason_codes": ["AI_UNAVAILABLE", "FALLBACK_ERROR"],
+                    "notes": "AI Agent not configured",
+                    "decision_id": decision_id,
+                    "timestamp_utc": now_utc,
+                    "latency_ms": 0,
+                }
+
+        prompt = f"""
+Ты — риск-менеджер и трейдер по крипторынку. Твоя задача: подтвердить или запретить вход по сигналу ML.
+
+Контекст (JSON):
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+
+Ответь строго валидным JSON без markdown и без текста до/после.
+Правила выбора:
+- decision="allow": вход нормального качества.
+- decision="reduce": вход допустим, но есть риск исполнения/ликвидности/шума; тогда size_multiplier должен быть одним из [0.1, 0.25, 0.5].
+- decision="veto": вход нельзя открывать (критический риск).
+- Ориентируйся на orderbook.spread_pct, глубину bid_vol_5/ask_vol_5, imbalance_20 и recent_trades.buy_sell_ratio.
+- Если данных мало или они противоречивы — выбирай reduce (не veto).
+Формат ответа:
+{{
+  "decision": "allow" | "reduce" | "veto",
+  "confidence": 0.0,
+  "risk_score": 0,
+  "size_multiplier": 1.0,
+  "reason_codes": ["..."],
+  "notes": "Коротко (до 30 слов)"
+}}
+"""
+
+        loop = asyncio.get_event_loop()
+        max_retries = 3
+        last_exception = None
+        started = time.time()
+
+        for attempt in range(max_retries):
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._openrouter_chat(
+                        messages=[
+                            {"role": "system", "content": "You are an expert crypto trading risk manager. Output valid JSON only."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        max_tokens=600,
+                        temperature=0.1,
+                    )
+                )
+                content = response
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].strip()
+                result = json.loads(content)
+                if not isinstance(result, dict):
+                    raise ValueError("AI response is not an object")
+                decision = result.get("decision")
+                if decision == "allow_reduced":
+                    decision = "reduce"
+                    result["decision"] = "reduce"
+                if decision not in ("allow", "reduce", "veto"):
+                    raise ValueError("AI response decision must be allow, reduce, or veto")
+
+                latency_ms = int((time.time() - started) * 1000)
+                result["decision_id"] = decision_id
+                result["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+                result["latency_ms"] = latency_ms
+                if "reason_codes" not in result or not isinstance(result["reason_codes"], list):
+                    result["reason_codes"] = []
+                if "confidence" not in result:
+                    result["confidence"] = 0.0
+                if "risk_score" not in result:
+                    result["risk_score"] = 50
+                if "size_multiplier" not in result:
+                    result["size_multiplier"] = 1.0
+                try:
+                    result["size_multiplier"] = float(result["size_multiplier"])
+                except Exception:
+                    result["size_multiplier"] = 1.0
+                if result["size_multiplier"] <= 0:
+                    result["size_multiplier"] = 1.0
+                if result.get("decision") == "reduce":
+                    allowed = (0.1, 0.25, 0.5)
+                    if result["size_multiplier"] not in allowed:
+                        result["size_multiplier"] = 0.25
+                else:
+                    if result["size_multiplier"] > 2.0:
+                        result["size_multiplier"] = 2.0
+                if "notes" not in result:
+                    result["notes"] = ""
+                return result
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"AI confirm_entry attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(1)
+
+        logger.error(f"AI confirm_entry failed: {last_exception}")
+        return {
+            "decision": "allow",
+            "confidence": 0.0,
+            "risk_score": 50,
+            "size_multiplier": 1.0,
+            "reason_codes": ["AI_ERROR"],
+            "notes": f"confirm_entry error: {str(last_exception)}",
+            "decision_id": decision_id,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "latency_ms": int((time.time() - started) * 1000),
+        }
 
     async def _get_chat_history(self, limit: int = 10) -> List[Dict[str, str]]:
         """Retrieves chat history from Supabase."""

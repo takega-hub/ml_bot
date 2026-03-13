@@ -100,6 +100,16 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
 
     # Источник SL в сигнале: False = от модели/ATR (максимум прибыли), True = фиксированный из риска (stop_loss_pct / max_loss/leverage)
     use_fixed_sl_from_risk: bool = False
+
+    ai_entry_confirmation_enabled: bool = False
+    ai_fallback_force_enabled: bool = False
+
+    ai_fallback_spread_reduce_pct: float = 0.10
+    ai_fallback_spread_veto_pct: float = 0.25
+    ai_fallback_min_depth_usd_5: float = 0.0
+    ai_fallback_imbalance_abs_reduce: float = 0.60
+    ai_fallback_orderflow_ratio_low: float = 0.40
+    ai_fallback_orderflow_ratio_high: float = 2.50
     
     def __post_init__(self):
         """Валидация значений"""
@@ -522,6 +532,22 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.flat_weights = {k: float(v) for k, v in ml_dict["flat_weights"].items()}
                 if "use_fixed_sl_from_risk" in ml_dict:
                     settings.ml_strategy.use_fixed_sl_from_risk = bool(ml_dict["use_fixed_sl_from_risk"])
+                if "ai_entry_confirmation_enabled" in ml_dict:
+                    settings.ml_strategy.ai_entry_confirmation_enabled = bool(ml_dict["ai_entry_confirmation_enabled"])
+                if "ai_fallback_force_enabled" in ml_dict:
+                    settings.ml_strategy.ai_fallback_force_enabled = bool(ml_dict["ai_fallback_force_enabled"])
+                if "ai_fallback_spread_reduce_pct" in ml_dict:
+                    settings.ml_strategy.ai_fallback_spread_reduce_pct = float(ml_dict["ai_fallback_spread_reduce_pct"])
+                if "ai_fallback_spread_veto_pct" in ml_dict:
+                    settings.ml_strategy.ai_fallback_spread_veto_pct = float(ml_dict["ai_fallback_spread_veto_pct"])
+                if "ai_fallback_min_depth_usd_5" in ml_dict:
+                    settings.ml_strategy.ai_fallback_min_depth_usd_5 = float(ml_dict["ai_fallback_min_depth_usd_5"])
+                if "ai_fallback_imbalance_abs_reduce" in ml_dict:
+                    settings.ml_strategy.ai_fallback_imbalance_abs_reduce = float(ml_dict["ai_fallback_imbalance_abs_reduce"])
+                if "ai_fallback_orderflow_ratio_low" in ml_dict:
+                    settings.ml_strategy.ai_fallback_orderflow_ratio_low = float(ml_dict["ai_fallback_orderflow_ratio_low"])
+                if "ai_fallback_orderflow_ratio_high" in ml_dict:
+                    settings.ml_strategy.ai_fallback_orderflow_ratio_high = float(ml_dict["ai_fallback_orderflow_ratio_high"])
         except Exception as e:
             logger.warning(f"Failed to load ml_settings.json: {e}")
     

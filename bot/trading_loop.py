@@ -4,6 +4,9 @@ import logging
 import math
 import pandas as pd
 import numpy as np
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Dict, Optional, Union, TYPE_CHECKING
 from bot.config import AppSettings
 from bot.state import BotState, TradeRecord
@@ -13,6 +16,8 @@ from bot.strategy import Action, Signal, Bias
 from bot.indicators import prepare_with_indicators
 from bot.notification_manager import NotificationManager, NotificationLevel
 from bot.paper_trading import PaperTradingManager
+from bot.ai_agent_service import AIAgentService
+from bot.audit_logger import append_jsonl
 
 if TYPE_CHECKING:
     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
@@ -84,10 +89,221 @@ class TradingLoop:
             }
         }
         self.paper_trading_manager = PaperTradingManager(bot_settings)
+        self._ai_agent: Optional[AIAgentService] = None
         
         # Валидация моделей при старте
         if self.settings.ml_strategy.use_mtf_strategy:
             self._validate_mtf_models()
+
+    def _get_ai_agent(self) -> Optional[AIAgentService]:
+        if self._ai_agent is not None:
+            return self._ai_agent
+        try:
+            self._ai_agent = AIAgentService()
+            return self._ai_agent
+        except Exception:
+            self._ai_agent = None
+            return None
+
+    @staticmethod
+    def _safe_float(val, default: float = 0.0) -> float:
+        try:
+            return float(val)
+        except Exception:
+            return default
+
+    @classmethod
+    def _orderbook_summary(cls, ob: Dict) -> Dict:
+        result = ob.get("result") if isinstance(ob, dict) else None
+        if not isinstance(result, dict):
+            return {}
+        bids = result.get("b") or []
+        asks = result.get("a") or []
+
+        def _sum_levels(levels, depth: int) -> float:
+            total = 0.0
+            if not isinstance(levels, list):
+                return 0.0
+            for level in levels[:depth]:
+                if isinstance(level, (list, tuple)) and len(level) >= 2:
+                    total += cls._safe_float(level[1], 0.0)
+            return total
+
+        def _imbalance(depth: int) -> float:
+            bid_vol = _sum_levels(bids, depth)
+            ask_vol = _sum_levels(asks, depth)
+            tot = bid_vol + ask_vol
+            if tot <= 0:
+                return 0.0
+            return (bid_vol - ask_vol) / tot
+
+        best_bid = None
+        best_ask = None
+        if isinstance(bids, list) and bids:
+            lvl = bids[0]
+            if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
+                best_bid = cls._safe_float(lvl[0], 0.0)
+        if isinstance(asks, list) and asks:
+            lvl = asks[0]
+            if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
+                best_ask = cls._safe_float(lvl[0], 0.0)
+        spread = None
+        spread_pct = None
+        if best_bid and best_ask and best_ask > 0:
+            spread = best_ask - best_bid
+            mid = (best_bid + best_ask) / 2.0 if (best_bid + best_ask) > 0 else best_ask
+            spread_pct = (spread / mid) * 100 if mid > 0 else None
+
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "spread_pct": spread_pct,
+            "imbalance_5": _imbalance(5),
+            "imbalance_20": _imbalance(20),
+            "imbalance_50": _imbalance(50),
+            "bid_vol_5": _sum_levels(bids, 5),
+            "ask_vol_5": _sum_levels(asks, 5),
+            "bid_vol_20": _sum_levels(bids, 20),
+            "ask_vol_20": _sum_levels(asks, 20),
+        }
+
+    @classmethod
+    def _recent_trades_summary(cls, trades: List[Dict]) -> Dict:
+        if not isinstance(trades, list) or not trades:
+            return {}
+        buy_vol = 0.0
+        sell_vol = 0.0
+        last_price = None
+        last_ts = None
+        for t in trades:
+            if not isinstance(t, dict):
+                continue
+            side = str(t.get("side") or t.get("S") or "").lower()
+            size = cls._safe_float(t.get("size") or t.get("v") or t.get("qty") or 0.0, 0.0)
+            price = cls._safe_float(t.get("price") or t.get("p") or 0.0, 0.0)
+            ts = t.get("time") or t.get("t")
+            if last_price is None and price > 0:
+                last_price = price
+            if last_ts is None and ts is not None:
+                last_ts = ts
+            if "buy" in side:
+                buy_vol += size
+            elif "sell" in side:
+                sell_vol += size
+        total = buy_vol + sell_vol
+        return {
+            "trades_count": len(trades),
+            "buy_volume": buy_vol,
+            "sell_volume": sell_vol,
+            "buy_sell_ratio": (buy_vol / sell_vol) if sell_vol > 0 else None,
+            "total_volume": total,
+            "last_price": last_price,
+            "last_time": last_ts,
+        }
+
+    async def _confirm_entry_with_ai(self, symbol: str, side: str, signal: Signal, position_horizon: Optional[str]) -> Dict:
+        decision_id = str(uuid.uuid4())
+        now_utc = datetime.now(timezone.utc).isoformat()
+
+        ob = {}
+        trades = []
+        ohlcv = []
+        try:
+            if self.bybit:
+                ob = await asyncio.to_thread(self.bybit.get_orderbook, symbol, 50)
+                trades = await asyncio.to_thread(self.bybit.get_recent_trades, symbol, 200)
+                df = await asyncio.to_thread(self.bybit.get_kline_df, symbol, self.settings.timeframe, 60)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    ohlcv = [
+                        {
+                            "time": int(r.get("timestamp", 0)),
+                            "open": float(r.get("open", 0.0)),
+                            "high": float(r.get("high", 0.0)),
+                            "low": float(r.get("low", 0.0)),
+                            "close": float(r.get("close", 0.0)),
+                            "volume": float(r.get("volume", 0.0)),
+                        }
+                        for r in df.tail(60).to_dict(orient="records")
+                    ]
+        except Exception as e:
+            logger.warning(f"[{symbol}] AI confirm_entry market data error: {e}")
+
+        indicators_info = signal.indicators_info if isinstance(signal.indicators_info, dict) else {}
+        payload = {
+            "request_id": decision_id,
+            "timestamp_utc": now_utc,
+            "symbol": symbol,
+            "timeframe": self.settings.timeframe,
+            "signal": {
+                "action": signal.action.value,
+                "reason": signal.reason or "",
+                "price": float(signal.price),
+                "stop_loss": float(signal.stop_loss) if signal.stop_loss else None,
+                "take_profit": float(signal.take_profit) if signal.take_profit else None,
+                "signal_timestamp": str(signal.timestamp) if getattr(signal, "timestamp", None) is not None else None,
+                "confidence": float(indicators_info.get("confidence", 0.0)) if isinstance(indicators_info, dict) else 0.0,
+                "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else "",
+            },
+            "bot_context": {
+                "side": side,
+                "leverage": int(self.settings.leverage),
+                "position_horizon": position_horizon or "",
+                "risk_settings": {
+                    "base_order_usd": float(self.settings.risk.base_order_usd),
+                    "margin_pct_balance": float(self.settings.risk.margin_pct_balance),
+                    "stop_loss_pct": float(self.settings.risk.stop_loss_pct),
+                    "take_profit_pct": float(self.settings.risk.take_profit_pct),
+                    "max_position_usd": float(self.settings.risk.max_position_usd),
+                },
+                "ai_fallback_policy": {
+                    "force_enabled": bool(getattr(self.settings.ml_strategy, "ai_fallback_force_enabled", False)),
+                    "spread_reduce_pct": float(getattr(self.settings.ml_strategy, "ai_fallback_spread_reduce_pct", 0.10)),
+                    "spread_veto_pct": float(getattr(self.settings.ml_strategy, "ai_fallback_spread_veto_pct", 0.25)),
+                    "min_depth_usd_5": float(getattr(self.settings.ml_strategy, "ai_fallback_min_depth_usd_5", 0.0)),
+                    "imbalance_abs_reduce": float(getattr(self.settings.ml_strategy, "ai_fallback_imbalance_abs_reduce", 0.60)),
+                    "orderflow_ratio_low": float(getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_low", 0.40)),
+                    "orderflow_ratio_high": float(getattr(self.settings.ml_strategy, "ai_fallback_orderflow_ratio_high", 2.50)),
+                },
+            },
+            "market_context": {
+                "ohlcv": ohlcv[-60:],
+                "orderbook": self._orderbook_summary(ob),
+                "recent_trades": self._recent_trades_summary(trades),
+            },
+        }
+
+        agent = self._get_ai_agent()
+        if not agent:
+            result = {
+                "decision": "allow",
+                "confidence": 0.0,
+                "risk_score": 50,
+                "reason_codes": ["AI_UNAVAILABLE"],
+                "notes": "AI agent init failed",
+                "decision_id": decision_id,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "latency_ms": 0,
+            }
+        else:
+            result = await agent.confirm_entry(payload)
+
+        root = Path(__file__).resolve().parent.parent
+        append_jsonl(
+            str(root / "logs" / "ai_entry_audit.jsonl"),
+            {
+                "event_type": "confirm_entry",
+                "symbol": symbol,
+                "side": side,
+                "decision_id": result.get("decision_id", decision_id),
+                "timestamp_utc": result.get("timestamp_utc", now_utc),
+                "latency_ms": result.get("latency_ms"),
+                "request": payload,
+                "response": result,
+            },
+        )
+
+        return result
     
     def _validate_mtf_models(self):
         """Проверяет наличие MTF моделей для активных символов при старте"""
@@ -1259,6 +1475,28 @@ class TradingLoop:
                     f"signal.stop_loss={signal.stop_loss}, indicators_info={indicators_info}"
                 )
                 return
+
+            if not is_add and getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False):
+                decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
+                if not isinstance(signal.indicators_info, dict):
+                    signal.indicators_info = {}
+                signal.indicators_info["ai_entry_confirmation"] = decision
+                if isinstance(decision, dict) and decision.get("decision") == "veto":
+                    logger.info(
+                        f"[{symbol}] ⛔ AI Agent veto entry: decision_id={decision.get('decision_id')} "
+                        f"codes={decision.get('reason_codes')} notes={decision.get('notes')}"
+                    )
+                    return
+                if isinstance(decision, dict) and decision.get("size_multiplier") is not None:
+                    try:
+                        signal.indicators_info["ai_size_multiplier"] = float(decision.get("size_multiplier"))
+                    except Exception:
+                        signal.indicators_info["ai_size_multiplier"] = 1.0
+                if isinstance(decision, dict) and decision.get("decision") == "reduce":
+                    if not isinstance(signal.indicators_info, dict):
+                        signal.indicators_info = {}
+                    if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
+                        signal.indicators_info["ai_size_multiplier"] = 0.25
             
             tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
             sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
@@ -1317,9 +1555,25 @@ class TradingLoop:
                 # Маржа = размер позиции / leverage
                 fixed_margin_usd = position_size_usd / self.settings.leverage
             else:
-                fixed_margin_usd = self.settings.risk.base_order_usd
+                size_multiplier = 1.0
+                if isinstance(indicators_info, dict) and "ai_size_multiplier" in indicators_info:
+                    try:
+                        size_multiplier = float(indicators_info.get("ai_size_multiplier", 1.0))
+                    except Exception:
+                        size_multiplier = 1.0
+                if size_multiplier <= 0:
+                    size_multiplier = 1.0
+                if size_multiplier > 2.0:
+                    size_multiplier = 2.0
+                fixed_margin_usd = self.settings.risk.base_order_usd * size_multiplier
                 # Размер позиции в USD = маржа * leverage
                 position_size_usd = fixed_margin_usd * self.settings.leverage
+
+                max_position_usd = getattr(self.settings.risk, "max_position_usd", None)
+                if isinstance(max_position_usd, (int, float)) and max_position_usd and max_position_usd > 0:
+                    if position_size_usd > float(max_position_usd):
+                        position_size_usd = float(max_position_usd)
+                        fixed_margin_usd = position_size_usd / self.settings.leverage
             
             # Проверяем, что маржа не превышает баланс
             if fixed_margin_usd > balance:
@@ -1493,6 +1747,14 @@ class TradingLoop:
                         'stop_loss_pct': sl_pct,
                         'risk_reward_ratio': (tp_pct / sl_pct) if (tp_pct and sl_pct and sl_pct > 0) else None,
                     }
+                    ai_entry_confirmation = indicators_info.get("ai_entry_confirmation") if isinstance(indicators_info, dict) else None
+                    if isinstance(ai_entry_confirmation, dict):
+                        signal_parameters["ai_entry_confirmation"] = ai_entry_confirmation
+                    if isinstance(indicators_info, dict) and "ai_size_multiplier" in indicators_info:
+                        try:
+                            signal_parameters["ai_size_multiplier"] = float(indicators_info.get("ai_size_multiplier", 1.0))
+                        except Exception:
+                            signal_parameters["ai_size_multiplier"] = 1.0
                     
                     trade = TradeRecord(
                         symbol=symbol,

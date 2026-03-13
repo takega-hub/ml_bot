@@ -4,8 +4,9 @@ import logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
+from bot.audit_logger import append_jsonl
 
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trades")
@@ -342,8 +343,13 @@ class BotState:
         self.save()
 
     def add_trade(self, trade: TradeRecord):
-        # Log to trades.log
-        trade_logger.info(f"TRADE OPEN: {trade.symbol} | Side: {trade.side} | Entry: {trade.entry_price} | Size: {trade.qty} | Reason: {trade.entry_reason}")
+        ai = None
+        if isinstance(trade.signal_parameters, dict):
+            ai = trade.signal_parameters.get("ai_entry_confirmation")
+        ai_part = ""
+        if isinstance(ai, dict) and ai.get("decision_id"):
+            ai_part = f" | AI: {ai.get('decision')} | AI_ID: {ai.get('decision_id')}"
+        trade_logger.info(f"TRADE OPEN: {trade.symbol} | Side: {trade.side} | Entry: {trade.entry_price} | Size: {trade.qty} | Reason: {trade.entry_reason}{ai_part}")
         
         with self.lock:
             self.trades.append(trade)
@@ -594,9 +600,6 @@ class BotState:
         """
         logger.info(f"[{symbol}] 🔄 update_trade_on_close called: exit_price={exit_price:.2f}, pnl_usd={pnl_usd:.6f}, pnl_pct={pnl_pct:.4f}%, commission={commission:.4f}, exit_reason={exit_reason}")
         
-        # Log to trades.log
-        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.6f} ({pnl_pct:.4f}%) | Fee: ${commission:.4f} | Reason: {exit_reason}")
-        
         closed_trade = None
         with self.lock:
             # Находим открытую сделку для символа
@@ -612,6 +615,14 @@ class BotState:
                         trade.exit_reason = exit_reason
                     closed_trade = trade
                     break
+
+        ai = None
+        if closed_trade and isinstance(closed_trade.signal_parameters, dict):
+            ai = closed_trade.signal_parameters.get("ai_entry_confirmation")
+        ai_part = ""
+        if isinstance(ai, dict) and ai.get("decision_id"):
+            ai_part = f" | AI: {ai.get('decision')} | AI_ID: {ai.get('decision_id')}"
+        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.6f} ({pnl_pct:.4f}%) | Fee: ${commission:.4f} | Reason: {exit_reason}{ai_part}")
         
         # Экспортируем закрытую сделку в Excel
         if closed_trade:
@@ -633,6 +644,28 @@ class BotState:
                 logger.error(f"[{symbol}] ❌ Failed to export trade to Excel: {e}", exc_info=True)
         else:
             logger.warning(f"[{symbol}] ⚠️ No closed trade found to export (trade might not have been in state)")
+
+        if isinstance(ai, dict) and ai.get("decision_id"):
+            try:
+                root = Path(__file__).resolve().parent.parent
+                append_jsonl(
+                    str(root / "logs" / "ai_entry_audit.jsonl"),
+                    {
+                        "event_type": "trade_outcome",
+                        "symbol": symbol,
+                        "side": closed_trade.side if closed_trade else None,
+                        "decision_id": ai.get("decision_id"),
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "entry_time": closed_trade.entry_time if closed_trade else None,
+                        "exit_time": closed_trade.exit_time if closed_trade else None,
+                        "exit_reason": closed_trade.exit_reason if closed_trade else exit_reason,
+                        "pnl_usd": pnl_usd,
+                        "pnl_pct": pnl_pct,
+                        "commission": commission,
+                    },
+                )
+            except Exception:
+                pass
         
         # Проверяем, была ли сделка убыточной
         if pnl_usd < 0:

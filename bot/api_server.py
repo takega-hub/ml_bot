@@ -532,6 +532,14 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "auto_optimize_day": getattr(m, "auto_optimize_day", "sunday"),
             "auto_optimize_hour": getattr(m, "auto_optimize_hour", 3),
             "use_fixed_sl_from_risk": getattr(m, "use_fixed_sl_from_risk", False),
+            "ai_entry_confirmation_enabled": getattr(m, "ai_entry_confirmation_enabled", False),
+            "ai_fallback_force_enabled": getattr(m, "ai_fallback_force_enabled", False),
+            "ai_fallback_spread_reduce_pct": getattr(m, "ai_fallback_spread_reduce_pct", 0.10),
+            "ai_fallback_spread_veto_pct": getattr(m, "ai_fallback_spread_veto_pct", 0.25),
+            "ai_fallback_min_depth_usd_5": getattr(m, "ai_fallback_min_depth_usd_5", 0.0),
+            "ai_fallback_imbalance_abs_reduce": getattr(m, "ai_fallback_imbalance_abs_reduce", 0.60),
+            "ai_fallback_orderflow_ratio_low": getattr(m, "ai_fallback_orderflow_ratio_low", 0.40),
+            "ai_fallback_orderflow_ratio_high": getattr(m, "ai_fallback_orderflow_ratio_high", 2.50),
             "confidence_threshold": getattr(m, "confidence_threshold", 0.35),
             "min_confidence_for_trade": getattr(m, "min_confidence_for_trade", 0.5),
         }
@@ -551,10 +559,28 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     data = json.load(f)
             except Exception:
                 pass
-        for key in ("use_mtf_strategy", "atr_filter_enabled", "auto_optimize_strategies", "use_fixed_sl_from_risk"):
+        for key in (
+            "use_mtf_strategy",
+            "atr_filter_enabled",
+            "auto_optimize_strategies",
+            "use_fixed_sl_from_risk",
+            "ai_entry_confirmation_enabled",
+            "ai_fallback_force_enabled",
+        ):
             if key in body:
                 data[key] = bool(body[key])
-        for key in ("mtf_confidence_threshold_1h", "mtf_confidence_threshold_15m", "confidence_threshold", "min_confidence_for_trade"):
+        for key in (
+            "mtf_confidence_threshold_1h",
+            "mtf_confidence_threshold_15m",
+            "confidence_threshold",
+            "min_confidence_for_trade",
+            "ai_fallback_spread_reduce_pct",
+            "ai_fallback_spread_veto_pct",
+            "ai_fallback_min_depth_usd_5",
+            "ai_fallback_imbalance_abs_reduce",
+            "ai_fallback_orderflow_ratio_low",
+            "ai_fallback_orderflow_ratio_high",
+        ):
             if key in body:
                 v = float(body[key])
                 if v >= 1:
@@ -570,7 +596,14 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             m.auto_optimize_hour = data["auto_optimize_hour"]
         for k, v in data.items():
             if hasattr(m, k):
-                if k in ("confidence_threshold", "min_confidence_for_trade", "mtf_confidence_threshold_1h", "mtf_confidence_threshold_15m") and isinstance(v, (int, float)) and v >= 1:
+                if k in (
+                    "confidence_threshold",
+                    "min_confidence_for_trade",
+                    "mtf_confidence_threshold_1h",
+                    "mtf_confidence_threshold_15m",
+                    "ai_fallback_spread_reduce_pct",
+                    "ai_fallback_spread_veto_pct",
+                ) and isinstance(v, (int, float)) and v >= 1:
                     v = v / 100.0
                 setattr(m, k, v)
         with open(ml_file, "w", encoding="utf-8") as f:
