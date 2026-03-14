@@ -54,6 +54,12 @@ model_test_results_*.json
 symbol_ml_settings.json
 risk_settings.json
 ml_settings.json
+experiments.json
+ai_risk_state.json
+paper_trading_state.json
+experiment_artifacts/
+experiment_meta/
+trade_history/
 
 # Backtest reports
 backtest_reports/
