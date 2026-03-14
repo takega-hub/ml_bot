@@ -1909,6 +1909,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             and exp.get("status") in {"training", "backtesting"}
         )
 
+        child_count = None
+        zombie_child_count = None
+        no_child_processes = None
+        if isinstance(runner_pid, int):
+            try:
+                out = subprocess.check_output(
+                    ["ps", "--ppid", str(runner_pid), "-o", "stat="],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                stats = [s.strip() for s in out.splitlines() if s.strip()]
+                child_count = len(stats)
+                zombie_child_count = sum(1 for s in stats if s.startswith("Z"))
+                no_child_processes = child_count == 0
+            except Exception:
+                child_count = None
+                zombie_child_count = None
+                no_child_processes = None
+
         return {
             "experiment_id": experiment_id,
             "status": exp.get("status"),
@@ -1921,6 +1940,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "seconds_since_output": seconds_since_output,
             "stale": stale,
             "no_output_warning": no_output_warning,
+            "runner_idle_seconds": seconds_since_output,
+            "child_count": child_count,
+            "zombie_child_count": zombie_child_count,
+            "no_child_processes": no_child_processes,
             "runner_phase": exp.get("runner_phase"),
             "runner_step": exp.get("runner_step"),
         }
