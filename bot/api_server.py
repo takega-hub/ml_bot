@@ -1912,21 +1912,27 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         child_count = None
         zombie_child_count = None
         no_child_processes = None
+        child_probe_error = None
         if isinstance(runner_pid, int):
             try:
-                out = subprocess.check_output(
-                    ["ps", "--ppid", str(runner_pid), "-o", "stat="],
-                    stderr=subprocess.DEVNULL,
+                res = subprocess.run(
+                    ["/usr/bin/ps", "--ppid", str(runner_pid), "-o", "stat="],
+                    capture_output=True,
                     text=True,
+                    check=False,
                 )
+                out = res.stdout or ""
                 stats = [s.strip() for s in out.splitlines() if s.strip()]
                 child_count = len(stats)
                 zombie_child_count = sum(1 for s in stats if s.startswith("Z"))
                 no_child_processes = child_count == 0
-            except Exception:
+                if res.returncode not in (0, 1) and (res.stderr or "").strip():
+                    child_probe_error = f"ps rc={res.returncode}: {(res.stderr or '').strip()}"
+            except Exception as e:
                 child_count = None
                 zombie_child_count = None
                 no_child_processes = None
+                child_probe_error = str(e)
 
         return {
             "experiment_id": experiment_id,
@@ -1944,6 +1950,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "child_count": child_count,
             "zombie_child_count": zombie_child_count,
             "no_child_processes": no_child_processes,
+            "child_probe_error": child_probe_error,
             "runner_phase": exp.get("runner_phase"),
             "runner_step": exp.get("runner_step"),
         }
