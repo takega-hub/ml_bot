@@ -25,23 +25,26 @@ logger = logging.getLogger("research_runner")
 
 _FILE_LOCK = threading.Lock()
 
-def _try_with_file_lock(fn, timeout_sec: float = 0.2):
-    acquired = False
-    try:
-        acquired = _FILE_LOCK.acquire(timeout=timeout_sec)
-        if not acquired:
+def _try_with_file_lock(fn, timeout_sec: float = 2.0, retries: int = 3):
+    for _ in range(max(1, int(retries))):
+        acquired = False
+        try:
+            acquired = _FILE_LOCK.acquire(timeout=timeout_sec)
+            if not acquired:
+                time.sleep(0.1)
+                continue
+            fn()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to write experiments.json: {e}")
             return False
-        fn()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to write experiments.json: {e}")
-        return False
-    finally:
-        if acquired:
-            try:
-                _FILE_LOCK.release()
-            except Exception:
-                pass
+        finally:
+            if acquired:
+                try:
+                    _FILE_LOCK.release()
+                except Exception:
+                    pass
+    return False
 
 def update_experiment_status(experiment_id: str, status: str, details: dict = None):
     """Updates the status of an experiment in experiments.json"""
