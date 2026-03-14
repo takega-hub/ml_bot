@@ -122,6 +122,19 @@ def run_process_with_heartbeat(
         env=env,
     )
 
+    waiter_done = threading.Event()
+    waiter_result: Dict[str, Any] = {"rc": None}
+
+    def _waiter():
+        try:
+            waiter_result["rc"] = process.wait()
+        except Exception:
+            waiter_result["rc"] = process.poll()
+        finally:
+            waiter_done.set()
+
+    threading.Thread(target=_waiter, daemon=True).start()
+
     q_out: "queue.Queue[str]" = queue.Queue()
     q_err: "queue.Queue[str]" = queue.Queue()
 
@@ -146,7 +159,6 @@ def run_process_with_heartbeat(
     last_hb = time.monotonic()
     last_log = None
     last_output_write = 0.0
-    reaped = False
 
     try:
         while True:
@@ -204,23 +216,17 @@ def run_process_with_heartbeat(
                 update_experiment_status(experiment_id, status, patch)
                 last_hb = now
 
-            rc = process.poll()
-            if rc is not None and not reaped:
-                try:
-                    process.wait()
-                except Exception:
-                    pass
-                reaped = True
-            if rc is not None and q_out.empty() and q_err.empty():
+            if waiter_done.is_set() and q_out.empty() and q_err.empty():
                 break
     finally:
         try:
-            if process.poll() is not None:
-                process.wait()
+            waiter_done.wait(timeout=0.5)
         except Exception:
             pass
 
-    return_code = process.poll()
+    return_code = waiter_result.get("rc")
+    if return_code is None:
+        return_code = process.poll()
     return return_code, lines, process
 
 def main():
