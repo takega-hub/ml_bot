@@ -528,6 +528,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "mtf_confidence_threshold_15m": getattr(m, "mtf_confidence_threshold_15m", 0.35),
             "mtf_alignment_mode": getattr(m, "mtf_alignment_mode", "strict"),
             "atr_filter_enabled": getattr(m, "atr_filter_enabled", False),
+            "follow_btc_filter_enabled": getattr(m, "follow_btc_filter_enabled", True),
+            "follow_btc_override_confidence": getattr(m, "follow_btc_override_confidence", 0.80),
             "auto_optimize_strategies": getattr(m, "auto_optimize_strategies", False),
             "auto_optimize_day": getattr(m, "auto_optimize_day", "sunday"),
             "auto_optimize_hour": getattr(m, "auto_optimize_hour", 3),
@@ -562,6 +564,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         for key in (
             "use_mtf_strategy",
             "atr_filter_enabled",
+            "follow_btc_filter_enabled",
             "auto_optimize_strategies",
             "use_fixed_sl_from_risk",
             "ai_entry_confirmation_enabled",
@@ -574,6 +577,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "mtf_confidence_threshold_15m",
             "confidence_threshold",
             "min_confidence_for_trade",
+            "follow_btc_override_confidence",
             "ai_fallback_spread_reduce_pct",
             "ai_fallback_spread_veto_pct",
             "ai_fallback_min_depth_usd_5",
@@ -601,6 +605,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "min_confidence_for_trade",
                     "mtf_confidence_threshold_1h",
                     "mtf_confidence_threshold_15m",
+                    "follow_btc_override_confidence",
                     "ai_fallback_spread_reduce_pct",
                     "ai_fallback_spread_veto_pct",
                 ) and isinstance(v, (int, float)) and v >= 1:
@@ -2570,6 +2575,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "mtf_confidence_threshold_15m": settings.ml_strategy.mtf_confidence_threshold_15m,
                     "mtf_alignment_mode": settings.ml_strategy.mtf_alignment_mode,
                     "mtf_require_alignment": settings.ml_strategy.mtf_require_alignment,
+                    "follow_btc_filter_enabled": getattr(settings.ml_strategy, "follow_btc_filter_enabled", True),
+                    "follow_btc_override_confidence": getattr(settings.ml_strategy, "follow_btc_override_confidence", 0.80),
                 }
             
             # Get risk management settings
@@ -2633,6 +2640,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         "mtf_confidence_threshold_15m": settings.ml_strategy.mtf_confidence_threshold_15m,
                         "mtf_alignment_mode": settings.ml_strategy.mtf_alignment_mode,
                         "mtf_require_alignment": settings.ml_strategy.mtf_require_alignment,
+                        "follow_btc_filter_enabled": getattr(settings.ml_strategy, "follow_btc_filter_enabled", True),
+                        "follow_btc_override_confidence": getattr(settings.ml_strategy, "follow_btc_override_confidence", 0.80),
                     },
                     "risk": {
                         "base_order_usd": settings.risk.base_order_usd,

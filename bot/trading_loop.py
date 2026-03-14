@@ -1319,19 +1319,26 @@ class TradingLoop:
                             logger.info(f"[{symbol}] ⏭️ Skipping trade: position already exists in same direction (DCA conditions not met)")
                         return
 
-                # Проверка сигнала BTCUSDT для других пар (альткоины следуют за BTC)
-                if symbol != "BTCUSDT":
-                    btc_signal = await self._get_btc_signal()
-                    if btc_signal and btc_signal.get("action") in (Action.LONG, Action.SHORT):
-                        btc_action = btc_signal["action"]
-                        # Если сигнал BTC противоположен сигналу текущего символа - игнорируем
-                        if (btc_action == Action.LONG and signal.action == Action.SHORT) or \
-                           (btc_action == Action.SHORT and signal.action == Action.LONG):
-                            logger.info(
-                                f"[{symbol}] ⏭️ Signal ignored: BTCUSDT={btc_action.value}, "
-                                f"{symbol}={signal.action.value} (opposite direction, following BTC)"
-                            )
-                            return
+                if getattr(self.settings.ml_strategy, "follow_btc_filter_enabled", True) and symbol != "BTCUSDT":
+                    override_conf = getattr(self.settings.ml_strategy, "follow_btc_override_confidence", 0.80)
+                    indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+                    signal_strength = indicators_info.get("strength", "") if isinstance(indicators_info, dict) else ""
+                    bypass = (signal_strength == "очень_сильное") or (override_conf is not None and confidence >= float(override_conf))
+                    if not bypass:
+                        btc_signal = await self._get_btc_signal()
+                        if btc_signal and btc_signal.get("action") in (Action.LONG, Action.SHORT):
+                            btc_action = btc_signal["action"]
+                            if (btc_action == Action.LONG and signal.action == Action.SHORT) or \
+                               (btc_action == Action.SHORT and signal.action == Action.LONG):
+                                logger.info(
+                                    f"[{symbol}] ⏭️ Signal ignored: BTCUSDT={btc_action.value}, "
+                                    f"{symbol}={signal.action.value} (opposite direction, following BTC)"
+                                )
+                                return
+                    else:
+                        logger.info(
+                            f"[{symbol}] 🟢 BTC follow bypassed: strength={signal_strength}, confidence={confidence:.2%}, threshold={float(override_conf):.2%}"
+                        )
 
                 guard = None
                 if self.settings.risk.tp_reentry_enabled and has_pos is None and local_pos is None:

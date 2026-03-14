@@ -37,6 +37,8 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     confidence_threshold: float = 0.35  # Минимальная уверенность модели для открытия позиции (35% по умолчанию, настроено для ~5 сделок в день)
     min_signal_strength: str = "слабое"  # Минимальная сила сигнала
     stability_filter: bool = True  # Фильтр стабильности сигналов (минимальная защита от частой смены направления)
+    follow_btc_filter_enabled: bool = True
+    follow_btc_override_confidence: float = 0.80
     
     # Параметры риск-менеджмента
     target_profit_pct_margin: float = 18.0  # Целевая прибыль от маржи в %
@@ -141,6 +143,9 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
         # Валидация min_confidence_for_trade
         if not 0 <= self.min_confidence_for_trade <= 1:
             self.min_confidence_for_trade = 0.50
+
+        if not 0 <= self.follow_btc_override_confidence <= 1:
+            self.follow_btc_override_confidence = 0.80
         
         # Валидация параметров автообновления
         valid_days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -519,6 +524,13 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.atr_min_pct = float(ml_dict["atr_min_pct"])
                 if "atr_max_pct" in ml_dict:
                     settings.ml_strategy.atr_max_pct = float(ml_dict["atr_max_pct"])
+                if "follow_btc_filter_enabled" in ml_dict:
+                    settings.ml_strategy.follow_btc_filter_enabled = bool(ml_dict["follow_btc_filter_enabled"])
+                if "follow_btc_override_confidence" in ml_dict:
+                    v = float(ml_dict["follow_btc_override_confidence"])
+                    if v >= 1:
+                        v = v / 100.0
+                    settings.ml_strategy.follow_btc_override_confidence = v
                 # Динамические веса ансамбля (тренд/флэт по ADX)
                 if "use_dynamic_ensemble_weights" in ml_dict:
                     settings.ml_strategy.use_dynamic_ensemble_weights = bool(ml_dict["use_dynamic_ensemble_weights"])
@@ -596,6 +608,19 @@ def load_settings() -> AppSettings:
     if ml_atr_max:
         try:
             settings.ml_strategy.atr_max_pct = float(ml_atr_max)
+        except ValueError:
+            pass
+
+    ml_follow_btc = os.getenv("ML_FOLLOW_BTC_FILTER_ENABLED", "").strip()
+    if ml_follow_btc:
+        settings.ml_strategy.follow_btc_filter_enabled = ml_follow_btc.lower() in ("1", "true", "yes")
+    ml_follow_btc_override = os.getenv("ML_FOLLOW_BTC_OVERRIDE_CONFIDENCE", "").strip()
+    if ml_follow_btc_override:
+        try:
+            v = float(ml_follow_btc_override)
+            if v >= 1:
+                v = v / 100.0
+            settings.ml_strategy.follow_btc_override_confidence = v
         except ValueError:
             pass
     

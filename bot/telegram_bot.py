@@ -2553,6 +2553,14 @@ class TelegramBot:
             status = "включен" if ml_settings.atr_filter_enabled else "выключен"
             await query.answer(f"✅ Фильтр волатильности (ATR 1h) {status}", show_alert=True)
             await self.show_ml_settings(query)
+        elif setting_name == "follow_btc_filter_enabled":
+            old_value = getattr(ml_settings, "follow_btc_filter_enabled", True)
+            ml_settings.follow_btc_filter_enabled = not bool(old_value)
+            logger.info(f"Follow BTC filter toggled: {old_value} -> {ml_settings.follow_btc_filter_enabled}")
+            self.save_ml_settings()
+            status = "включено" if ml_settings.follow_btc_filter_enabled else "выключено"
+            await query.answer(f"✅ Следование за BTC {status}", show_alert=True)
+            await self.show_ml_settings(query)
         elif setting_name == "use_fixed_sl_from_risk":
             use_fixed = getattr(ml_settings, "use_fixed_sl_from_risk", False)
             ml_settings.use_fixed_sl_from_risk = not use_fixed
@@ -2644,6 +2652,8 @@ class TelegramBot:
                 "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
                 "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
                 "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
+                "follow_btc_filter_enabled": getattr(self.settings.ml_strategy, "follow_btc_filter_enabled", True),
+                "follow_btc_override_confidence": getattr(self.settings.ml_strategy, "follow_btc_override_confidence", 0.80),
                 "use_dynamic_ensemble_weights": getattr(self.settings.ml_strategy, "use_dynamic_ensemble_weights", False),
                 "adx_trend_threshold": getattr(self.settings.ml_strategy, "adx_trend_threshold", 25.0),
                 "adx_flat_threshold": getattr(self.settings.ml_strategy, "adx_flat_threshold", 20.0),
@@ -2704,6 +2714,8 @@ class TelegramBot:
                 "atr_filter_enabled": self.settings.ml_strategy.atr_filter_enabled,
                 "atr_min_pct": self.settings.ml_strategy.atr_min_pct,
                 "atr_max_pct": self.settings.ml_strategy.atr_max_pct,
+                "follow_btc_filter_enabled": getattr(self.settings.ml_strategy, "follow_btc_filter_enabled", True),
+                "follow_btc_override_confidence": getattr(self.settings.ml_strategy, "follow_btc_override_confidence", 0.80),
                 "use_dynamic_ensemble_weights": getattr(self.settings.ml_strategy, "use_dynamic_ensemble_weights", False),
                 "adx_trend_threshold": getattr(self.settings.ml_strategy, "adx_trend_threshold", 25.0),
                 "adx_flat_threshold": getattr(self.settings.ml_strategy, "adx_flat_threshold", 20.0),
@@ -2839,6 +2851,8 @@ class TelegramBot:
         text += f"📊 Фильтр волатильности (ATR 1h): {'✅ Включен' if ml_settings.atr_filter_enabled else '❌ Выключен'}\n"
         if ml_settings.atr_filter_enabled:
             text += f"   • Диапазон ATR: {ml_settings.atr_min_pct}% – {ml_settings.atr_max_pct}%\n\n"
+        text += f"₿ Следование за BTC: {'✅ Включено' if getattr(ml_settings, 'follow_btc_filter_enabled', True) else '❌ Выключено'}\n"
+        text += f"   • Пропуск при сильном сигнале: {getattr(ml_settings, 'follow_btc_override_confidence', 0.80)*100:.0f}%+\n\n"
         text += f"🤖 Автообновление стратегий: {'✅ Включено' if ml_settings.auto_optimize_strategies else '❌ Выключено'}\n"
         if ml_settings.auto_optimize_strategies:
             day_names = {
@@ -2875,6 +2889,10 @@ class TelegramBot:
             [InlineKeyboardButton(
                 f"📊 Фильтр волатильности: {'✅ Вкл' if ml_settings.atr_filter_enabled else '❌ Выкл'}", 
                 callback_data="toggle_ml_atr_filter_enabled"
+            )],
+            [InlineKeyboardButton(
+                f"₿ Следование за BTC: {'✅ Вкл' if getattr(ml_settings, 'follow_btc_filter_enabled', True) else '❌ Выкл'}",
+                callback_data="toggle_ml_follow_btc_filter_enabled"
             )],
             [InlineKeyboardButton(
                 f"🤖 Автообновление: {'✅ Вкл' if ml_settings.auto_optimize_strategies else '❌ Выкл'}", 

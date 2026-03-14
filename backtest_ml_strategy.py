@@ -1010,6 +1010,9 @@ def run_exact_backtest(
             logger.error(f"[run_exact_backtest] Ошибка загрузки настроек: {e}")
             print(f"❌ Ошибка загрузки настроек: {e}")
             return None
+
+        follow_btc_filter_enabled = getattr(getattr(settings, "ml_strategy", None), "follow_btc_filter_enabled", True)
+        follow_btc_override_confidence = getattr(getattr(settings, "ml_strategy", None), "follow_btc_override_confidence", 0.80)
         
         # Создаем клиент
         client = BybitClient(settings.api)
@@ -1417,44 +1420,44 @@ def run_exact_backtest(
                 if exited:
                     continue
             
-            # Проверка сигнала BTCUSDT для других пар (альткоины следуют за BTC)
-            if symbol != "BTCUSDT" and signal.action in (Action.LONG, Action.SHORT) and btc_strategy is not None and btc_df_with_features is not None:
+            if follow_btc_filter_enabled and symbol != "BTCUSDT" and signal.action in (Action.LONG, Action.SHORT) and btc_strategy is not None and btc_df_with_features is not None:
                 try:
-                    if idx < len(btc_df_with_features):
-                        btc_row = btc_df_with_features.iloc[idx]
-                        btc_current_price = btc_row['close']
-                        btc_df_window = btc_df_with_features.iloc[:idx+1]
-                        
-                        # Генерируем сигнал BTCUSDT
-                        btc_signal = btc_strategy.generate_signal(
-                            row=btc_row,
-                            df=btc_df_window,
-                            has_position=None,  # В бэктесте не проверяем позиции BTC
-                            current_price=btc_current_price,
-                            leverage=leverage
-                        )
-                        
-                        if btc_signal and btc_signal.action in (Action.LONG, Action.SHORT):
-                            # Если сигнал BTC противоположен сигналу текущего символа - игнорируем
-                            if (btc_signal.action == Action.LONG and signal.action == Action.SHORT) or \
-                               (btc_signal.action == Action.SHORT and signal.action == Action.LONG):
-                                logger.debug(
-                                    f"[run_exact_backtest] Signal ignored: BTCUSDT={btc_signal.action.value}, "
-                                    f"{symbol}={signal.action.value} (opposite direction, following BTC)"
-                                )
-                                # Пропускаем этот сигнал, но продолжаем обработку
-                                processed_bars += 1
-                                if processed_bars % 500 == 0:
-                                    trades_count = len(simulator.trades)
-                                    elapsed = time.time() - start_time_loop if start_time_loop else 0
-                                    bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
-                                    logger.info(
-                                        f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
-                                        f"({processed_bars*100/(total_bars - min_window_size):.1f}%), "
-                                        f"сделок: {trades_count}, баланс: ${simulator.balance:.2f}, "
-                                        f"скорость: {bars_per_sec:.1f} бар/сек"
+                    confidence = signal.indicators_info.get('confidence', 0.0) if signal.indicators_info else 0.0
+                    signal_strength = signal.indicators_info.get('strength', '') if signal.indicators_info else ''
+                    bypass = (signal_strength == "очень_сильное") or (follow_btc_override_confidence is not None and confidence >= float(follow_btc_override_confidence))
+                    if not bypass:
+                        if idx < len(btc_df_with_features):
+                            btc_row = btc_df_with_features.iloc[idx]
+                            btc_current_price = btc_row['close']
+                            btc_df_window = btc_df_with_features.iloc[:idx+1]
+                            
+                            btc_signal = btc_strategy.generate_signal(
+                                row=btc_row,
+                                df=btc_df_window,
+                                has_position=None,
+                                current_price=btc_current_price,
+                                leverage=leverage
+                            )
+                            
+                            if btc_signal and btc_signal.action in (Action.LONG, Action.SHORT):
+                                if (btc_signal.action == Action.LONG and signal.action == Action.SHORT) or \
+                                   (btc_signal.action == Action.SHORT and signal.action == Action.LONG):
+                                    logger.debug(
+                                        f"[run_exact_backtest] Signal ignored: BTCUSDT={btc_signal.action.value}, "
+                                        f"{symbol}={signal.action.value} (opposite direction, following BTC)"
                                     )
-                                continue
+                                    processed_bars += 1
+                                    if processed_bars % 500 == 0:
+                                        trades_count = len(simulator.trades)
+                                        elapsed = time.time() - start_time_loop if start_time_loop else 0
+                                        bars_per_sec = processed_bars / elapsed if elapsed > 0 else 0
+                                        logger.info(
+                                            f"[run_exact_backtest] Прогресс: {processed_bars}/{total_bars - min_window_size} баров "
+                                            f"({processed_bars*100/(total_bars - min_window_size):.1f}%), "
+                                            f"сделок: {trades_count}, баланс: ${simulator.balance:.2f}, "
+                                            f"скорость: {bars_per_sec:.1f} бар/сек"
+                                        )
+                                    continue
                 except Exception as e:
                     logger.debug(f"[run_exact_backtest] Ошибка проверки BTCUSDT сигнала: {e}")
                     # Продолжаем обработку, если проверка BTC не удалась
