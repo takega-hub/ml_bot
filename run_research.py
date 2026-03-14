@@ -207,7 +207,7 @@ def run_process_with_heartbeat(
             rc = process.poll()
             if rc is not None and not reaped:
                 try:
-                    process.wait(timeout=0)
+                    process.wait()
                 except Exception:
                     pass
                 reaped = True
@@ -215,7 +215,8 @@ def run_process_with_heartbeat(
                 break
     finally:
         try:
-            process.wait(timeout=0)
+            if process.poll() is not None:
+                process.wait()
         except Exception:
             pass
 
