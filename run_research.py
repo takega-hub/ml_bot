@@ -146,6 +146,7 @@ def run_process_with_heartbeat(
     last_hb = time.monotonic()
     last_log = None
     last_output_write = 0.0
+    reaped = False
 
     try:
         while True:
@@ -204,6 +205,12 @@ def run_process_with_heartbeat(
                 last_hb = now
 
             rc = process.poll()
+            if rc is not None and not reaped:
+                try:
+                    process.wait(timeout=0)
+                except Exception:
+                    pass
+                reaped = True
             if rc is not None and q_out.empty() and q_err.empty():
                 break
     finally:
