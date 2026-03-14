@@ -25,10 +25,28 @@ logger = logging.getLogger("research_runner")
 
 _FILE_LOCK = threading.Lock()
 
+def _try_with_file_lock(fn, timeout_sec: float = 0.2):
+    acquired = False
+    try:
+        acquired = _FILE_LOCK.acquire(timeout=timeout_sec)
+        if not acquired:
+            return False
+        fn()
+        return True
+    except Exception as e:
+        logger.error(f"Failed to write experiments.json: {e}")
+        return False
+    finally:
+        if acquired:
+            try:
+                _FILE_LOCK.release()
+            except Exception:
+                pass
+
 def update_experiment_status(experiment_id: str, status: str, details: dict = None):
     """Updates the status of an experiment in experiments.json"""
     try:
-        with _FILE_LOCK:
+        def _write():
             file_path = Path("experiments.json")
             data = {}
             if file_path.exists():
@@ -53,13 +71,14 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
                     
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-            
+        
+        _try_with_file_lock(_write)
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
 
 def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
     try:
-        with _FILE_LOCK:
+        def _write():
             file_path = Path("experiments.json")
             data: Dict[str, Any] = {}
             if file_path.exists():
@@ -78,6 +97,8 @@ def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
             data[experiment_id] = exp
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+        
+        _try_with_file_lock(_write)
     except Exception as e:
         logger.error(f"Failed to patch experiment: {e}")
 
@@ -186,6 +207,11 @@ def run_process_with_heartbeat(
             break
 
     return_code = process.poll()
+    try:
+        if return_code is None:
+            return_code = process.wait(timeout=0)
+    except Exception:
+        pass
     return return_code, lines, process
 
 def main():
