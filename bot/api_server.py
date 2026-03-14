@@ -1860,13 +1860,21 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         heartbeat_at = exp.get("heartbeat_at") or exp.get("updated_at")
+        last_output_at = exp.get("last_output_at")
         seconds_since = None
+        seconds_since_output = None
         if isinstance(heartbeat_at, str):
             try:
                 dt = datetime.fromisoformat(heartbeat_at)
                 seconds_since = int((datetime.now(dt.tzinfo) - dt).total_seconds())
             except Exception:
                 seconds_since = None
+        if isinstance(last_output_at, str):
+            try:
+                dt2 = datetime.fromisoformat(last_output_at)
+                seconds_since_output = int((datetime.now(dt2.tzinfo) - dt2).total_seconds())
+            except Exception:
+                seconds_since_output = None
 
         runner_pid = exp.get("runner_pid")
         alive = None
@@ -1897,8 +1905,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "exit_code": exit_code,
             "heartbeat_at": heartbeat_at,
             "seconds_since_heartbeat": seconds_since,
+            "last_output_at": last_output_at,
+            "seconds_since_output": seconds_since_output,
             "stale": stale,
             "runner_phase": exp.get("runner_phase"),
+            "runner_step": exp.get("runner_step"),
         }
 
     @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])

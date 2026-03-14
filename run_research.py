@@ -121,6 +121,7 @@ def run_process_with_heartbeat(
     lines: List[str] = []
     last_hb = time.monotonic()
     last_log = None
+    last_output_write = 0.0
 
     while True:
         now = time.monotonic()
@@ -132,13 +133,40 @@ def run_process_with_heartbeat(
                 lines.append(last_log)
                 if len(lines) > 200:
                     lines = lines[-200:]
+                if now - last_output_write >= 5:
+                    try:
+                        patch_experiment(
+                            experiment_id,
+                            {
+                                "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                "runner_step": log_prefix,
+                                "last_log": last_log,
+                            },
+                        )
+                        last_output_write = now
+                    except Exception:
+                        pass
         except queue.Empty:
             pass
 
         try:
             err_line = q_err.get_nowait()
             if err_line:
-                logger.info(f"[{log_prefix}-ERR] {err_line.strip()}")
+                err_line = err_line.strip()
+                logger.info(f"[{log_prefix}-ERR] {err_line}")
+                if now - last_output_write >= 5:
+                    try:
+                        patch_experiment(
+                            experiment_id,
+                            {
+                                "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                "runner_step": f"{log_prefix}-ERR",
+                                "last_log": err_line,
+                            },
+                        )
+                        last_output_write = now
+                    except Exception:
+                        pass
         except queue.Empty:
             pass
 
@@ -196,7 +224,7 @@ def main():
     update_experiment_status(experiment_id, "starting", details)
     
     stop_hb = threading.Event()
-    current_phase: Dict[str, str] = {"status": "starting"}
+    current_phase: Dict[str, str] = {"status": "starting", "step": "starting"}
     hb_started = False
 
     try:
@@ -212,6 +240,7 @@ def main():
                         {
                             "heartbeat_at": datetime.now(timezone.utc).isoformat(),
                             "runner_phase": current_phase.get("status"),
+                            "runner_step": current_phase.get("step"),
                         },
                     )
                     stop_hb.wait(10)
@@ -232,6 +261,7 @@ def main():
 
         logs = []
         for idx, interval in enumerate(intervals):
+            current_phase["step"] = f"training_{interval}"
             progress = 10 + int(((idx + 1) / len(intervals)) * 40)
             update_experiment_status(
                 experiment_id,
@@ -281,6 +311,7 @@ def main():
         
         # 2. Backtesting Phase (Virtual Trading)
         current_phase["status"] = "backtesting"
+        current_phase["step"] = "backtesting_mtf"
         logger.info("Phase 2: Virtual Trading (Backtest)...")
         update_experiment_status(experiment_id, "backtesting", {"progress": 60})
         
@@ -405,11 +436,13 @@ def main():
                 return None
 
         if model_15m_path:
+            current_phase["step"] = "backtesting_single_15m"
             r15 = _run_single_backtest("15m", model_15m_path, "15m")
             if r15:
                 single_results["15m"] = r15
 
         if model_1h_path:
+            current_phase["step"] = "backtesting_single_1h"
             backtest_cmd.extend(["--model-1h", model_1h_path])
             logger.info(f"Using new 1h model: {model_1h_path}")
             r1h = _run_single_backtest("1h", model_1h_path, "1h")
