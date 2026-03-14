@@ -1902,6 +1902,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 alive = False
 
         stale = seconds_since is not None and seconds_since > 60 and exp.get("status") in {"starting", "training", "backtesting"}
+        no_output_warning = (
+            alive is True
+            and seconds_since_output is not None
+            and seconds_since_output > 1200
+            and exp.get("status") in {"training", "backtesting"}
+        )
 
         return {
             "experiment_id": experiment_id,
@@ -1914,6 +1920,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "last_output_at": last_output_at,
             "seconds_since_output": seconds_since_output,
             "stale": stale,
+            "no_output_warning": no_output_warning,
             "runner_phase": exp.get("runner_phase"),
             "runner_step": exp.get("runner_step"),
         }

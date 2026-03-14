@@ -412,24 +412,15 @@ def main():
                     str(out_path),
                 ]
                 logger.info(f"Running single backtest ({tag}): {' '.join(cmd_single)}")
-                p = subprocess.Popen(
+                rc, _, _ = run_process_with_heartbeat(
                     cmd_single,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    f"SINGLE-{tag}",
+                    experiment_id,
+                    "backtesting",
+                    {"progress": 68},
                 )
-                while True:
-                    line = p.stdout.readline()
-                    if not line and p.poll() is not None:
-                        break
-                    if line:
-                        logger.info(f"[SINGLE-{tag}] {line.strip()}")
-                rc = p.poll()
                 if rc != 0:
-                    err = p.stderr.read()
-                    logger.error(f"Single backtest failed ({tag}): {err}")
+                    logger.error(f"Single backtest failed ({tag}) with code {rc}")
                     return None
                 if out_path.exists():
                     with open(out_path, "r", encoding="utf-8") as f:
