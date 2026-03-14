@@ -89,6 +89,8 @@ def run_process_with_heartbeat(
     base_details: dict,
     heartbeat_interval_sec: int = 10,
 ):
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -96,6 +98,7 @@ def run_process_with_heartbeat(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
 
     q_out: "queue.Queue[str]" = queue.Queue()
@@ -271,6 +274,7 @@ def main():
 
             train_cmd = [
                 sys.executable,
+                "-u",
                 "retrain_ml_optimized.py",
                 "--symbol",
                 symbol,
@@ -307,7 +311,7 @@ def main():
                 logger.error(f"Failed to load training report ({interval}): {e}")
 
         logger.info("Training completed successfully.")
-        update_experiment_status(experiment_id, "training", {"progress": 50, "last_log": "Training completed"})
+        update_experiment_status(experiment_id, "training_completed", {"progress": 50, "last_log": "Training completed"})
         
         # 2. Backtesting Phase (Virtual Trading)
         current_phase["status"] = "backtesting"
@@ -362,7 +366,7 @@ def main():
         # Prepare backtest command
         backtest_days = 7
         backtest_cmd = [
-            sys.executable, "backtest_mtf_strategy.py",
+            sys.executable, "-u", "backtest_mtf_strategy.py",
             "--symbol", symbol,
             "--days", str(backtest_days),
             "--save",
@@ -393,6 +397,7 @@ def main():
                 out_path = artifacts_dir / f"backtest_single_{tag}.json"
                 cmd_single = [
                     sys.executable,
+                    "-u",
                     "backtest_ml_strategy.py",
                     "--model",
                     model_path,

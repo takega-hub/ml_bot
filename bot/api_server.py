@@ -14,6 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional, Any, List, Dict
 import shutil
+import signal
 
 logger = logging.getLogger(__name__)
 
@@ -1917,6 +1918,75 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "runner_step": exp.get("runner_step"),
         }
 
+    @app.post("/api/ai/research/experiment/{experiment_id}/stop", dependencies=[Depends(verify_api_key)])
+    def stop_research_experiment(experiment_id: str):
+        from .experiment_management import ExperimentStore
+        from datetime import datetime, timezone
+
+        store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
+        exp = store.get(experiment_id)
+        if not exp:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+
+        status = str(exp.get("status") or "unknown")
+        if status in {"completed", "failed", "interrupted"}:
+            raise HTTPException(status_code=400, detail=f"Experiment is already {status}")
+
+        pid = exp.get("runner_pid")
+        if not isinstance(pid, int):
+            raise HTTPException(status_code=400, detail="Experiment PID is missing")
+
+        killed = False
+        try:
+            proc = getattr(ai_agent, "research_processes", {}).get(experiment_id) if ai_agent else None
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                killed = proc.poll() is not None
+        except Exception as e:
+            logger.error(f"Failed to stop experiment via handle: {e}", exc_info=True)
+
+        if not killed:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed = True
+            except Exception:
+                killed = False
+
+        if not killed:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                killed = True
+            except Exception:
+                killed = False
+
+        patch = {
+            "status": "interrupted",
+            "status_reason": "stopped_by_user",
+            "stopped_at": datetime.now(timezone.utc).isoformat(),
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            store.upsert(experiment_id, patch)
+        except Exception as e:
+            logger.error(f"Failed to persist interrupted status for {experiment_id}: {e}", exc_info=True)
+
+        return {"ok": True, "experiment_id": experiment_id, "pid": pid, "killed": killed}
+
     @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])
     def delete_research_experiment(experiment_id: str):
         from .experiment_management import ExperimentStore
@@ -1931,6 +2001,21 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=400, detail="Active experiment cannot be deleted")
 
         project_root = Path(__file__).resolve().parent.parent
+
+        pid = exp.get("runner_pid")
+        if isinstance(pid, int):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                except Exception:
+                    pass
 
         if paper_trading_manager:
             try:
