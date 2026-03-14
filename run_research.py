@@ -147,71 +147,72 @@ def run_process_with_heartbeat(
     last_log = None
     last_output_write = 0.0
 
-    while True:
-        now = time.monotonic()
+    try:
+        while True:
+            now = time.monotonic()
+            try:
+                line = q_out.get(timeout=0.5)
+                last_log = line.strip()
+                if last_log:
+                    logger.info(f"[{log_prefix}] {last_log}")
+                    lines.append(last_log)
+                    if len(lines) > 200:
+                        lines = lines[-200:]
+                    if now - last_output_write >= 5:
+                        try:
+                            patch_experiment(
+                                experiment_id,
+                                {
+                                    "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                    "runner_step": log_prefix,
+                                    "last_log": last_log,
+                                },
+                            )
+                            last_output_write = now
+                        except Exception:
+                            pass
+            except queue.Empty:
+                pass
+
+            try:
+                err_line = q_err.get_nowait()
+                if err_line:
+                    err_line = err_line.strip()
+                    logger.info(f"[{log_prefix}-ERR] {err_line}")
+                    if now - last_output_write >= 5:
+                        try:
+                            patch_experiment(
+                                experiment_id,
+                                {
+                                    "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                    "runner_step": f"{log_prefix}-ERR",
+                                    "last_log": err_line,
+                                },
+                            )
+                            last_output_write = now
+                        except Exception:
+                            pass
+            except queue.Empty:
+                pass
+
+            if now - last_hb >= heartbeat_interval_sec:
+                patch = dict(base_details or {})
+                patch["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+                if last_log:
+                    patch["last_log"] = last_log
+                update_experiment_status(experiment_id, status, patch)
+                last_hb = now
+
+            rc = process.poll()
+            if rc is not None and q_out.empty() and q_err.empty():
+                break
+    finally:
         try:
-            line = q_out.get(timeout=0.5)
-            last_log = line.strip()
-            if last_log:
-                logger.info(f"[{log_prefix}] {last_log}")
-                lines.append(last_log)
-                if len(lines) > 200:
-                    lines = lines[-200:]
-                if now - last_output_write >= 5:
-                    try:
-                        patch_experiment(
-                            experiment_id,
-                            {
-                                "last_output_at": datetime.now(timezone.utc).isoformat(),
-                                "runner_step": log_prefix,
-                                "last_log": last_log,
-                            },
-                        )
-                        last_output_write = now
-                    except Exception:
-                        pass
-        except queue.Empty:
+            process.wait(timeout=0)
+        except Exception:
             pass
-
-        try:
-            err_line = q_err.get_nowait()
-            if err_line:
-                err_line = err_line.strip()
-                logger.info(f"[{log_prefix}-ERR] {err_line}")
-                if now - last_output_write >= 5:
-                    try:
-                        patch_experiment(
-                            experiment_id,
-                            {
-                                "last_output_at": datetime.now(timezone.utc).isoformat(),
-                                "runner_step": f"{log_prefix}-ERR",
-                                "last_log": err_line,
-                            },
-                        )
-                        last_output_write = now
-                    except Exception:
-                        pass
-        except queue.Empty:
-            pass
-
-        if now - last_hb >= heartbeat_interval_sec:
-            patch = dict(base_details or {})
-            patch["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
-            if last_log:
-                patch["last_log"] = last_log
-            update_experiment_status(experiment_id, status, patch)
-            last_hb = now
-
-        rc = process.poll()
-        if rc is not None and q_out.empty() and q_err.empty():
-            break
 
     return_code = process.poll()
-    try:
-        if return_code is None:
-            return_code = process.wait(timeout=0)
-    except Exception:
-        pass
     return return_code, lines, process
 
 def main():
