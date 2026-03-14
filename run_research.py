@@ -242,7 +242,64 @@ def run_process_with_heartbeat(
                 update_experiment_status(experiment_id, status, patch)
                 last_hb = now
 
-            if waiter_done.is_set() and q_out.empty() and q_err.empty():
+            if waiter_done.is_set():
+                drain_until = time.monotonic() + 2.0
+                while time.monotonic() < drain_until:
+                    drained = False
+                    try:
+                        while True:
+                            line = q_out.get_nowait()
+                            last_log = line.strip()
+                            if last_log:
+                                _touch_activity()
+                                logger.info(f"[{log_prefix}] {last_log}")
+                                lines.append(last_log)
+                                if len(lines) > 200:
+                                    lines = lines[-200:]
+                                if time.monotonic() - last_output_write >= 5:
+                                    try:
+                                        patch_experiment(
+                                            experiment_id,
+                                            {
+                                                "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                                "runner_step": log_prefix,
+                                                "last_log": last_log,
+                                            },
+                                        )
+                                        last_output_write = time.monotonic()
+                                    except Exception:
+                                        pass
+                            drained = True
+                    except queue.Empty:
+                        pass
+
+                    try:
+                        while True:
+                            err_line = q_err.get_nowait()
+                            err_line = err_line.strip()
+                            if err_line:
+                                _touch_activity()
+                                logger.info(f"[{log_prefix}-ERR] {err_line}")
+                                if time.monotonic() - last_output_write >= 5:
+                                    try:
+                                        patch_experiment(
+                                            experiment_id,
+                                            {
+                                                "last_output_at": datetime.now(timezone.utc).isoformat(),
+                                                "runner_step": f"{log_prefix}-ERR",
+                                                "last_log": err_line,
+                                            },
+                                        )
+                                        last_output_write = time.monotonic()
+                                    except Exception:
+                                        pass
+                            drained = True
+                    except queue.Empty:
+                        pass
+
+                    if not drained:
+                        break
+                    time.sleep(0.05)
                 break
     finally:
         try:
