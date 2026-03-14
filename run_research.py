@@ -25,6 +25,24 @@ logger = logging.getLogger("research_runner")
 
 _FILE_LOCK = threading.Lock()
 
+_ACTIVITY_LOCK = threading.Lock()
+_LAST_ACTIVITY_MONO = time.monotonic()
+_ACTIVE_SUBPROCS = 0
+
+def _touch_activity():
+    global _LAST_ACTIVITY_MONO
+    with _ACTIVITY_LOCK:
+        _LAST_ACTIVITY_MONO = time.monotonic()
+
+def _set_active_subprocs(delta: int):
+    global _ACTIVE_SUBPROCS
+    with _ACTIVITY_LOCK:
+        _ACTIVE_SUBPROCS = max(0, _ACTIVE_SUBPROCS + int(delta))
+
+def _get_activity_state():
+    with _ACTIVITY_LOCK:
+        return _LAST_ACTIVITY_MONO, _ACTIVE_SUBPROCS
+
 def _try_with_file_lock(fn, timeout_sec: float = 2.0, retries: int = 3):
     for _ in range(max(1, int(retries))):
         acquired = False
@@ -76,6 +94,7 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         
         _try_with_file_lock(_write)
+        _touch_activity()
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
 
@@ -102,6 +121,7 @@ def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         
         _try_with_file_lock(_write)
+        _touch_activity()
     except Exception as e:
         logger.error(f"Failed to patch experiment: {e}")
 
@@ -137,6 +157,7 @@ def run_process_with_heartbeat(
             waiter_done.set()
 
     threading.Thread(target=_waiter, daemon=True).start()
+    _set_active_subprocs(+1)
 
     q_out: "queue.Queue[str]" = queue.Queue()
     q_err: "queue.Queue[str]" = queue.Queue()
@@ -170,6 +191,7 @@ def run_process_with_heartbeat(
                 line = q_out.get(timeout=0.5)
                 last_log = line.strip()
                 if last_log:
+                    _touch_activity()
                     logger.info(f"[{log_prefix}] {last_log}")
                     lines.append(last_log)
                     if len(lines) > 200:
@@ -194,6 +216,7 @@ def run_process_with_heartbeat(
                 err_line = q_err.get_nowait()
                 if err_line:
                     err_line = err_line.strip()
+                    _touch_activity()
                     logger.info(f"[{log_prefix}-ERR] {err_line}")
                     if now - last_output_write >= 5:
                         try:
@@ -226,6 +249,7 @@ def run_process_with_heartbeat(
             waiter_done.wait(timeout=0.5)
         except Exception:
             pass
+        _set_active_subprocs(-1)
 
     return_code = waiter_result.get("rc")
     if return_code is None:
@@ -273,6 +297,7 @@ def main():
     stop_hb = threading.Event()
     current_phase: Dict[str, str] = {"status": "starting", "step": "starting"}
     hb_started = False
+    _touch_activity()
 
     try:
         artifacts_dir = Path("experiment_artifacts") / experiment_id
@@ -294,6 +319,42 @@ def main():
             threading.Thread(target=_hb_loop, daemon=True).start()
             hb_started = True
 
+        def _checkpoint(step: str, status_patch: Optional[Dict[str, Any]] = None):
+            current_phase["step"] = step
+            fields: Dict[str, Any] = {
+                "runner_phase": current_phase.get("status"),
+                "runner_step": step,
+                "last_output_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if isinstance(status_patch, dict):
+                fields.update(status_patch)
+            patch_experiment(experiment_id, fields)
+
+        def _watchdog_loop():
+            while not stop_hb.is_set():
+                last_mono, active = _get_activity_state()
+                idle = time.monotonic() - last_mono
+                if active == 0 and idle > 1800 and current_phase.get("status") in {"training", "backtesting"}:
+                    try:
+                        update_experiment_status(
+                            experiment_id,
+                            "failed",
+                            {
+                                "error": f"Runner idle for {int(idle)}s with no active subprocesses",
+                                "failed_at": datetime.now(timezone.utc).isoformat(),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        stop_hb.set()
+                    except Exception:
+                        pass
+                    os._exit(1)
+                stop_hb.wait(10)
+
+        threading.Thread(target=_watchdog_loop, daemon=True).start()
+
         intervals = ["15m", "1h"]
         primary = (args.interval or "15m").strip().lower()
         if primary in ("1h", "60m"):
@@ -302,6 +363,7 @@ def main():
         # 1. Training Phase
         current_phase["status"] = "training"
         logger.info("Phase 1: Training Models...")
+        _checkpoint("training_start")
         update_experiment_status(experiment_id, "training", {"progress": 10})
         
         suffix = f"_{exp_type}_exp"
@@ -309,6 +371,7 @@ def main():
         logs = []
         for idx, interval in enumerate(intervals):
             current_phase["step"] = f"training_{interval}"
+            _checkpoint(f"training_{interval}_start")
             progress = 10 + int(((idx + 1) / len(intervals)) * 40)
             update_experiment_status(
                 experiment_id,
@@ -341,6 +404,7 @@ def main():
                 "training",
                 {"progress": progress},
             )
+            _checkpoint(f"training_{interval}_done")
             logs.extend(out_lines[-20:])
             if return_code != 0:
                 raise Exception(f"Training failed ({interval}) with code {return_code}")
@@ -355,12 +419,14 @@ def main():
                 logger.error(f"Failed to load training report ({interval}): {e}")
 
         logger.info("Training completed successfully.")
+        _checkpoint("training_done")
         update_experiment_status(experiment_id, "training_completed", {"progress": 50, "last_log": "Training completed"})
         
         # 2. Backtesting Phase (Virtual Trading)
         current_phase["status"] = "backtesting"
         current_phase["step"] = "backtesting_mtf"
         logger.info("Phase 2: Virtual Trading (Backtest)...")
+        _checkpoint("backtesting_start")
         update_experiment_status(experiment_id, "backtesting", {"progress": 60})
         
         # Construct model names based on naming convention in retrain_ml_optimized.py
@@ -477,21 +543,26 @@ def main():
 
         if model_15m_path:
             current_phase["step"] = "backtesting_single_15m"
+            _checkpoint("backtesting_single_15m_start")
             r15 = _run_single_backtest("15m", model_15m_path, "15m")
             if r15:
                 single_results["15m"] = r15
+            _checkpoint("backtesting_single_15m_done")
 
         if model_1h_path:
             current_phase["step"] = "backtesting_single_1h"
+            _checkpoint("backtesting_single_1h_start")
             backtest_cmd.extend(["--model-1h", model_1h_path])
             logger.info(f"Using new 1h model: {model_1h_path}")
             r1h = _run_single_backtest("1h", model_1h_path, "1h")
             if r1h:
                 single_results["1h"] = r1h
+            _checkpoint("backtesting_single_1h_done")
         else:
             logger.info("Using best available 1h model (automatic selection)")
             
         logger.info(f"Running backtest command: {' '.join(backtest_cmd)}")
+        _checkpoint("backtesting_mtf_start")
         
         return_code_bt, bt_logs, _ = run_process_with_heartbeat(
             backtest_cmd,
@@ -500,11 +571,13 @@ def main():
             "backtesting",
             {"progress": 70},
         )
+        _checkpoint("backtesting_mtf_done")
         if return_code_bt != 0:
             raise Exception(f"Backtest failed with code {return_code_bt}")
 
         # 3. Harvest Results
         logger.info("Phase 3: Harvesting Results...")
+        _checkpoint("harvest_start")
         
         # Find the generated result JSON
         # backtest_mtf_strategy.py saves to backtest_reports/backtest_mtf_{symbol}_{timestamp}.json
