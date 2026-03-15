@@ -26,13 +26,13 @@ logger = logging.getLogger("research_runner")
 _FILE_LOCK = threading.Lock()
 
 _ACTIVITY_LOCK = threading.Lock()
-_LAST_ACTIVITY_MONO = time.monotonic()
+_LAST_OUTPUT_MONO = time.monotonic()
 _ACTIVE_SUBPROCS = 0
 
-def _touch_activity():
-    global _LAST_ACTIVITY_MONO
+def _touch_output():
+    global _LAST_OUTPUT_MONO
     with _ACTIVITY_LOCK:
-        _LAST_ACTIVITY_MONO = time.monotonic()
+        _LAST_OUTPUT_MONO = time.monotonic()
 
 def _set_active_subprocs(delta: int):
     global _ACTIVE_SUBPROCS
@@ -41,7 +41,7 @@ def _set_active_subprocs(delta: int):
 
 def _get_activity_state():
     with _ACTIVITY_LOCK:
-        return _LAST_ACTIVITY_MONO, _ACTIVE_SUBPROCS
+        return _LAST_OUTPUT_MONO, _ACTIVE_SUBPROCS
 
 def _try_with_file_lock(fn, timeout_sec: float = 2.0, retries: int = 3):
     for _ in range(max(1, int(retries))):
@@ -94,7 +94,6 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         
         _try_with_file_lock(_write)
-        _touch_activity()
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
 
@@ -121,7 +120,6 @@ def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         
         _try_with_file_lock(_write)
-        _touch_activity()
     except Exception as e:
         logger.error(f"Failed to patch experiment: {e}")
 
@@ -191,7 +189,7 @@ def run_process_with_heartbeat(
                 line = q_out.get(timeout=0.5)
                 last_log = line.strip()
                 if last_log:
-                    _touch_activity()
+                    _touch_output()
                     logger.info(f"[{log_prefix}] {last_log}")
                     lines.append(last_log)
                     if len(lines) > 200:
@@ -216,7 +214,7 @@ def run_process_with_heartbeat(
                 err_line = q_err.get_nowait()
                 if err_line:
                     err_line = err_line.strip()
-                    _touch_activity()
+                    _touch_output()
                     logger.info(f"[{log_prefix}-ERR] {err_line}")
                     if now - last_output_write >= 5:
                         try:
@@ -251,7 +249,7 @@ def run_process_with_heartbeat(
                             line = q_out.get_nowait()
                             last_log = line.strip()
                             if last_log:
-                                _touch_activity()
+                                _touch_output()
                                 logger.info(f"[{log_prefix}] {last_log}")
                                 lines.append(last_log)
                                 if len(lines) > 200:
@@ -278,7 +276,7 @@ def run_process_with_heartbeat(
                             err_line = q_err.get_nowait()
                             err_line = err_line.strip()
                             if err_line:
-                                _touch_activity()
+                                _touch_output()
                                 logger.info(f"[{log_prefix}-ERR] {err_line}")
                                 if time.monotonic() - last_output_write >= 5:
                                     try:
@@ -354,7 +352,7 @@ def main():
     stop_hb = threading.Event()
     current_phase: Dict[str, str] = {"status": "starting", "step": "starting"}
     hb_started = False
-    _touch_activity()
+    _touch_output()
 
     try:
         artifacts_dir = Path("experiment_artifacts") / experiment_id
@@ -386,6 +384,7 @@ def main():
             if isinstance(status_patch, dict):
                 fields.update(status_patch)
             patch_experiment(experiment_id, fields)
+            _touch_output()
 
         def _watchdog_loop():
             while not stop_hb.is_set():
