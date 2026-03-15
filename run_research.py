@@ -337,6 +337,119 @@ def _find_model_path(symbol: str, interval: str) -> Optional[Path]:
     return ordered[0] if ordered else None
 
 
+def _to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _metrics_quality_score(metrics: Dict[str, Any]) -> float:
+    if not isinstance(metrics, dict):
+        return -1.0
+    cv_f1 = _to_float(metrics.get("cv_f1_mean"))
+    f1 = _to_float(metrics.get("f1_score"))
+    cv_mean = _to_float(metrics.get("cv_mean"))
+    accuracy = _to_float(metrics.get("accuracy"))
+    return (4.0 * cv_f1) + (3.0 * f1) + (2.0 * cv_mean) + accuracy
+
+
+def _select_model_for_experiment(
+    symbol: str,
+    interval: str,
+    model_suffix: str,
+    training_report: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    model_dir = Path("ml_models")
+    if not model_dir.exists():
+        return None
+    base_interval = "60" if interval == "1h" else "15"
+    candidates = [
+        ("quad_ensemble", "quad_metrics", 5),
+        ("triple_ensemble", "triple_ensemble_metrics", 4),
+        ("ensemble", "ensemble_metrics", 3),
+        ("xgb", "xgb_metrics", 2),
+        ("rf", "rf_metrics", 1),
+    ]
+    ranked: List[Dict[str, Any]] = []
+    report = training_report if isinstance(training_report, dict) else {}
+    for prefix, metrics_key, tie_rank in candidates:
+        metrics = report.get(metrics_key)
+        if not isinstance(metrics, dict):
+            continue
+        filename = f"{prefix}_{symbol}_{base_interval}_{interval}{model_suffix}.pkl"
+        ranked.append(
+            {
+                "model_type": prefix,
+                "filename": filename,
+                "path": model_dir / filename,
+                "score": _metrics_quality_score(metrics),
+                "tie_rank": tie_rank,
+            }
+        )
+    ranked.sort(key=lambda item: (item["score"], item["tie_rank"]), reverse=True)
+    for item in ranked:
+        if item["path"].exists():
+            return {
+                "model_type": item["model_type"],
+                "path": str(item["path"]),
+                "score": float(item["score"]),
+            }
+    for prefix, _, _ in candidates:
+        fallback_path = model_dir / f"{prefix}_{symbol}_{base_interval}_{interval}{model_suffix}.pkl"
+        if fallback_path.exists():
+            return {
+                "model_type": prefix,
+                "path": str(fallback_path),
+                "score": None,
+            }
+    legacy = _find_model_path(symbol, interval)
+    if legacy:
+        return {
+            "model_type": "legacy_latest",
+            "path": str(legacy),
+            "score": None,
+        }
+    return None
+
+
+def _collect_experiment_models(
+    symbol: str,
+    interval: str,
+    model_suffix: str,
+    training_report: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    model_dir = Path("ml_models")
+    if not model_dir.exists():
+        return []
+    base_interval = "60" if interval == "1h" else "15"
+    candidates = [
+        ("quad_ensemble", "quad_metrics", 5),
+        ("triple_ensemble", "triple_ensemble_metrics", 4),
+        ("ensemble", "ensemble_metrics", 3),
+        ("xgb", "xgb_metrics", 2),
+        ("rf", "rf_metrics", 1),
+    ]
+    report = training_report if isinstance(training_report, dict) else {}
+    collected: List[Dict[str, Any]] = []
+    for prefix, metrics_key, tie_rank in candidates:
+        filename = f"{prefix}_{symbol}_{base_interval}_{interval}{model_suffix}.pkl"
+        path = model_dir / filename
+        if not path.exists():
+            continue
+        metrics = report.get(metrics_key) if isinstance(report.get(metrics_key), dict) else {}
+        collected.append(
+            {
+                "model_type": prefix,
+                "path": str(path),
+                "score": _metrics_quality_score(metrics),
+                "tie_rank": tie_rank,
+            }
+        )
+    collected.sort(key=lambda item: (float(item.get("score") or 0.0), int(item.get("tie_rank") or 0)), reverse=True)
+    return collected
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run AI research experiment")
     parser.add_argument("--symbol", required=True)
@@ -361,6 +474,15 @@ def main():
                 details = loaded
         except Exception as e:
             logger.warning(f"Failed to read metadata: {e}")
+
+    def _status_payload(extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "type": exp_type,
+        }
+        if isinstance(extra, dict):
+            payload.update(extra)
+        return payload
 
     artifacts_dir = Path("artifacts") / experiment_id
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -399,7 +521,7 @@ def main():
         backtest_days = max(3, min(120, requested_backtest_days))
         market_regime = details.get("market_regime") if isinstance(details.get("market_regime"), dict) else derive_market_regime_from_metrics(symbol)
 
-        update_experiment_status(experiment_id, "training", {
+        update_experiment_status(experiment_id, "training", _status_payload({
             "symbol": symbol,
             "type": exp_type,
             "params": {
@@ -411,21 +533,24 @@ def main():
             "market_regime": market_regime,
             "progress": 5,
             "started_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }))
 
         model_15m_path = None
         model_1h_path = None
         training_reports: Dict[str, Any] = {}
+        interval_candidate_models: Dict[str, List[Dict[str, Any]]] = {}
         hyperparams_payload = details.get("hyperparams") if isinstance(details.get("hyperparams"), dict) else None
 
         intervals = ["15m"] if args.no_mtf else ["15m", "1h"]
         train_script = _resolve_existing_train_script()
         for interval in intervals:
             report_path = artifacts_dir / f"training_{interval}.json"
+            model_suffix = f"__{experiment_id}_{interval}"
             train_cmd = train_script + [
                 "--symbol", symbol,
                 "--interval", interval,
                 "--report-json", str(report_path),
+                "--model-suffix", model_suffix,
             ]
             if args.no_mtf:
                 train_cmd.append("--no-mtf")
@@ -442,32 +567,46 @@ def main():
                 f"train_{interval}",
                 experiment_id,
                 "training",
-                {
+                _status_payload({
                     "progress": 15 if interval == "15m" else 35,
                     "current_phase": f"training_{interval}",
                     "market_regime": market_regime,
-                },
+                }),
             )
             subprocess_pids.append(pid)
             logs.extend(out_lines[-20:])
             if return_code != 0:
                 raise RuntimeError(f"Training failed for interval {interval} with code {return_code}")
-            found_model = _find_model_path(symbol, interval)
-            if not found_model:
-                raise RuntimeError(f"Model artifact not found after training for interval {interval}")
+            report_payload = _run_python_json(report_path) or {}
+            interval_models = _collect_experiment_models(symbol, interval, model_suffix, report_payload)
+            if not interval_models:
+                selected_model = _select_model_for_experiment(symbol, interval, model_suffix, report_payload)
+                if selected_model and selected_model.get("path"):
+                    interval_models = [selected_model]
+            if not interval_models:
+                raise RuntimeError(f"Model artifacts not found after training for interval {interval}")
+            interval_candidate_models[interval] = interval_models
+            selected_model = interval_models[0]
+            found_model = Path(str(selected_model.get("path")))
             if interval == "15m":
                 model_15m_path = str(found_model)
             else:
                 model_1h_path = str(found_model)
-            training_reports[interval] = _run_python_json(report_path)
+            if isinstance(report_payload, dict):
+                report_payload["selected_model_path"] = str(found_model)
+                report_payload["selected_model_type"] = selected_model.get("model_type")
+                report_payload["model_suffix"] = model_suffix
+                report_payload["model_selection_score"] = selected_model.get("score")
+                report_payload["candidate_models"] = interval_models
+            training_reports[interval] = report_payload
 
-        update_experiment_status(experiment_id, "training_completed", {
+        update_experiment_status(experiment_id, "training_completed", _status_payload({
             "progress": 45,
             "current_phase": "training_completed",
             "models": {"15m": model_15m_path, "1h": model_1h_path},
             "training_report": training_reports,
             "market_regime": market_regime,
-        })
+        }))
 
         def _run_single_backtest(name: str, model_path: Optional[str], interval: str, days_override: Optional[int] = None) -> Optional[Dict[str, Any]]:
             if not model_path:
@@ -488,11 +627,11 @@ def main():
                 f"backtest_{name}",
                 experiment_id,
                 "backtesting",
-                {
+                _status_payload({
                     "progress": 55 if name == "15m" else 62,
                     "current_phase": f"backtest_{name}",
                     "market_regime": market_regime,
-                },
+                }),
             )
             subprocess_pids.append(pid)
             logs.extend(bt_lines[-20:])
@@ -500,14 +639,53 @@ def main():
                 return None
             return _run_python_json(bt_path)
 
-        update_experiment_status(experiment_id, "backtesting", {"progress": 50, "market_regime": market_regime})
+        def _evaluate_interval_models(interval: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+            evaluated: List[Dict[str, Any]] = []
+            for idx, item in enumerate(candidates):
+                model_path = str(item.get("path") or "")
+                model_type = str(item.get("model_type") or f"model_{idx + 1}")
+                if not model_path:
+                    continue
+                metrics = _run_single_backtest(f"{interval}_{model_type}_{idx + 1}", model_path, interval)
+                if not isinstance(metrics, dict):
+                    continue
+                evaluated.append(
+                    {
+                        "model_path": model_path,
+                        "model_type": model_type,
+                        "train_score": item.get("score"),
+                        "metrics": metrics,
+                    }
+                )
+            evaluated.sort(
+                key=lambda x: (
+                    _to_float((x.get("metrics") or {}).get("total_pnl_pct")),
+                    _to_float((x.get("metrics") or {}).get("win_rate")),
+                    _to_float((x.get("metrics") or {}).get("profit_factor")),
+                    _to_float((x.get("metrics") or {}).get("total_trades")),
+                ),
+                reverse=True,
+            )
+            return {
+                "best": evaluated[0] if evaluated else None,
+                "candidates": evaluated,
+            }
+
+        update_experiment_status(experiment_id, "backtesting", _status_payload({"progress": 50, "market_regime": market_regime}))
         tactics: Dict[str, Any] = {}
-        single_15m = _run_single_backtest("15m", model_15m_path, "15m")
-        if isinstance(single_15m, dict):
-            tactics["single_15m"] = single_15m
-        single_1h = _run_single_backtest("1h", model_1h_path, "1h")
-        if isinstance(single_1h, dict):
-            tactics["single_1h"] = single_1h
+        interval_model_results: Dict[str, Any] = {}
+        eval_15m = _evaluate_interval_models("15m", interval_candidate_models.get("15m") or ([{"path": model_15m_path, "model_type": "fallback"}] if model_15m_path else []))
+        interval_model_results["15m"] = eval_15m
+        best_15m = eval_15m.get("best") if isinstance(eval_15m, dict) else None
+        if isinstance(best_15m, dict) and isinstance(best_15m.get("metrics"), dict):
+            model_15m_path = str(best_15m.get("model_path") or model_15m_path or "")
+            tactics["single_15m"] = best_15m.get("metrics")
+        eval_1h = _evaluate_interval_models("1h", interval_candidate_models.get("1h") or ([{"path": model_1h_path, "model_type": "fallback"}] if model_1h_path else []))
+        interval_model_results["1h"] = eval_1h
+        best_1h = eval_1h.get("best") if isinstance(eval_1h, dict) else None
+        if isinstance(best_1h, dict) and isinstance(best_1h.get("metrics"), dict):
+            model_1h_path = str(best_1h.get("model_path") or model_1h_path or "")
+            tactics["single_1h"] = best_1h.get("metrics")
 
         if not args.no_mtf and model_15m_path and model_1h_path:
             mtf_path = artifacts_dir / "backtest_mtf.json"
@@ -525,11 +703,11 @@ def main():
                 "backtest_mtf",
                 experiment_id,
                 "backtesting",
-                {
+                _status_payload({
                     "progress": 70,
                     "current_phase": "backtest_mtf",
                     "market_regime": market_regime,
-                },
+                }),
             )
             subprocess_pids.append(pid)
             logs.extend(mtf_lines[-20:])
@@ -627,6 +805,39 @@ def main():
         if recommended_tactic and isinstance(tactics.get(recommended_tactic), dict):
             result_data.update(tactics[recommended_tactic])
         result_data["recommended_tactic"] = recommended_tactic
+        result_data["model_comparison"] = interval_model_results
+        training_report_15m = training_reports.get("15m") if isinstance(training_reports.get("15m"), dict) else {}
+        training_report_1h = training_reports.get("1h") if isinstance(training_reports.get("1h"), dict) else {}
+        best_15m_payload = (interval_model_results.get("15m") or {}).get("best") if isinstance(interval_model_results.get("15m"), dict) else {}
+        best_1h_payload = (interval_model_results.get("1h") or {}).get("best") if isinstance(interval_model_results.get("1h"), dict) else {}
+        selected_path_15m = str((best_15m_payload or {}).get("model_path") or training_report_15m.get("selected_model_path") or model_15m_path or "")
+        selected_path_1h = str((best_1h_payload or {}).get("model_path") or training_report_1h.get("selected_model_path") or model_1h_path or "")
+        selected_type_15m = str((best_15m_payload or {}).get("model_type") or training_report_15m.get("selected_model_type") or "")
+        selected_type_1h = str((best_1h_payload or {}).get("model_type") or training_report_1h.get("selected_model_type") or "")
+        selected_score_15m = (
+            _to_float(((best_15m_payload or {}).get("metrics") or {}).get("total_pnl_pct"))
+            if isinstance((best_15m_payload or {}).get("metrics"), dict)
+            else training_report_15m.get("model_selection_score")
+        )
+        selected_score_1h = (
+            _to_float(((best_1h_payload or {}).get("metrics") or {}).get("total_pnl_pct"))
+            if isinstance((best_1h_payload or {}).get("metrics"), dict)
+            else training_report_1h.get("model_selection_score")
+        )
+        best_model_path = selected_path_15m if recommended_tactic in {"single_15m", "mtf"} else selected_path_1h
+        best_model_type = selected_type_15m if recommended_tactic in {"single_15m", "mtf"} else selected_type_1h
+        best_model_score = selected_score_15m if recommended_tactic in {"single_15m", "mtf"} else selected_score_1h
+        result_data["best_model_path"] = best_model_path
+        result_data["best_model_type"] = best_model_type
+        result_data["best_model"] = {
+            "recommended_tactic": recommended_tactic,
+            "primary_path": best_model_path,
+            "primary_type": best_model_type,
+            "primary_score": best_model_score,
+            "paths": {"15m": selected_path_15m, "1h": selected_path_1h},
+            "types": {"15m": selected_type_15m, "1h": selected_type_1h},
+            "scores": {"15m": selected_score_15m, "1h": selected_score_1h},
+        }
         result_data["selection"] = {
             "recommended_tactic": recommended_tactic,
             "recommended_score": best_score,
@@ -805,13 +1016,13 @@ def main():
             single_pnl = float((result_data.get("best_single") or {}).get("total_pnl_pct") or 0.0)
             result_data["combo_vs_single_delta_pnl"] = combo_pnl - single_pnl
 
-        update_experiment_status(experiment_id, "completed", {
+        update_experiment_status(experiment_id, "completed", _status_payload({
             "progress": 100,
             "current_phase": "completed",
             "results": result_data,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "market_regime": market_regime,
-        })
+        }))
 
         def _to_bool(v: Any, default: bool = False) -> bool:
             if isinstance(v, bool):
@@ -965,10 +1176,10 @@ def main():
         update_experiment_status(
             experiment_id,
             "failed",
-            {
+            _status_payload({
                 "error": str(e),
                 "failed_at": datetime.now(timezone.utc).isoformat(),
-            },
+            }),
         )
         raise
     finally:

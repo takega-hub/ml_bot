@@ -1579,14 +1579,22 @@ class ModelTrainer:
         
         lstm_model, lstm_metrics = lstm_trainer.train(df_lstm, validation_split=0.2)
         
-        # Устанавливаем feature_names в lstm_trainer для использования при предсказании
-        # Используем те же фичи, что и для классических моделей
-        if hasattr(self, 'feature_engineer'):
-            lstm_trainer.feature_names = self.feature_engineer.get_feature_names()
-        else:
-            # Если feature_engineer недоступен, извлекаем фичи из DataFrame
+        if not getattr(lstm_trainer, "feature_names", None):
             exclude_cols = ['open', 'high', 'low', 'close', 'volume', 'timestamp', 'target']
-            lstm_trainer.feature_names = [col for col in df_lstm.columns if col not in exclude_cols]
+            inferred_features = [
+                col for col in df_lstm.columns
+                if col not in exclude_cols and not col.startswith('target_')
+            ]
+            expected_features = (
+                lstm_trainer.scaler.n_features_in_
+                if hasattr(lstm_trainer, "scaler")
+                and lstm_trainer.scaler is not None
+                and hasattr(lstm_trainer.scaler, "n_features_in_")
+                else None
+            )
+            if expected_features and len(inferred_features) > expected_features:
+                inferred_features = inferred_features[:expected_features]
+            lstm_trainer.feature_names = inferred_features
         
         # Вычисляем веса на основе CV метрик
         rf_cv_score = rf_metrics.get("cv_mean", 0.5)
@@ -1632,4 +1640,3 @@ class ModelTrainer:
         }
         
         return ensemble, metrics
-
