@@ -1,0 +1,9 @@
+{
+  "experiment_id": "exp_1773565614_bf8f0854",
+  "pid": 2860105,
+  "start_time": "2026-03-15T09:06:54.194271",
+  "symbol": "BTCUSDT",
+  "type": "aggressive",
+  "config_file": "safe_training_config.json",
+  "status": "running"
+}

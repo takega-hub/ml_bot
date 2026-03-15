@@ -173,6 +173,11 @@ def main():
         type=str,
         help="Путь к JSON-файлу для сохранения итоговых метрик эксперимента"
     )
+    parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        help="Безопасный режим: пропустить QuadEnsemble с LSTM"
+    )
     args = parser.parse_known_args()[0]
     
     safe_print("=" * 80)
@@ -810,7 +815,9 @@ def main():
         # Обучаем QuadEnsemble (RF + XGB + LGB + LSTM)
         try:
             from bot.ml.model_trainer import LSTM_AVAILABLE, LIGHTGBM_AVAILABLE
-            if LSTM_AVAILABLE and LIGHTGBM_AVAILABLE:
+            if args.safe_mode:
+                safe_print(f"   ⚠️  Safe mode включен, пропускаем QuadEnsemble")
+            elif LSTM_AVAILABLE and LIGHTGBM_AVAILABLE:
                 safe_print(f"\n   🚀 Обучение QuadEnsemble (RF + XGB + LGB + LSTM)...")
                 safe_print(f"      (Это может занять некоторое время...)")
                 

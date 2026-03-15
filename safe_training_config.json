@@ -1,0 +1,16 @@
+{
+  "ml_settings": {
+    "confidence_threshold": 0.35,
+    "use_mtf_strategy": false,
+    "model_type": "ensemble",
+    "mtf_enabled": false,
+    "no_mtf": true
+  },
+  "training_settings": {
+    "max_training_time_per_model": 300,
+    "skip_lstm": true,
+    "use_ensemble_only": true,
+    "sequence_length": 30,
+    "early_stopping": true
+  }
+}

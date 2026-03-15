@@ -1781,6 +1781,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         type: str = "balanced" # aggressive, conservative, balanced
         metadata: Optional[Dict[str, Any]] = None
         allow_duplicate: bool = False
+        safe_mode: bool = True
 
     @app.post("/api/ai/research/start", dependencies=[Depends(verify_api_key)])
     async def post_start_research(body: ResearchBody):
@@ -1792,6 +1793,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 body.type,
                 metadata=body.metadata,
                 allow_duplicate=body.allow_duplicate,
+                safe_mode=body.safe_mode,
             )
             if not res.get("ok"):
                  error_msg = res.get("error", "Unknown error")

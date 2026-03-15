@@ -895,6 +895,7 @@ class AIAgentService:
         experiment_type: str,
         metadata: Optional[Dict[str, Any]] = None,
         allow_duplicate: bool = False,
+        safe_mode: bool = True,
     ) -> Dict[str, Any]:
         """
         Starts a research experiment (Training + Backtest)
@@ -951,6 +952,7 @@ class AIAgentService:
                 "primary_interval": (params[1] if len(params) >= 2 and params[0] == "--interval" else "15m"),
                 "train_intervals": ["15m", "1h"],
                 "no_mtf": "--no-mtf" in params,
+                "safe_mode": bool(safe_mode),
             }
             signature = build_param_signature(
                 symbol=symbol,
@@ -990,6 +992,7 @@ class AIAgentService:
                         "error": "Duplicate ineffective experiment blocked",
                         "experiment_id": experiment_id,
                         "param_signature": signature,
+                        "effective_params": exp_params,
                     }
 
             code_version = get_code_version(project_root)
@@ -1026,6 +1029,8 @@ class AIAgentService:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(record, f, ensure_ascii=False, indent=2, default=str)
             cmd += ["--metadata-path", str(meta_path)]
+            if safe_mode:
+                cmd.append("--safe-mode")
             
             logger.info(f"Starting research experiment: {' '.join(cmd)}")
             
@@ -1059,6 +1064,7 @@ class AIAgentService:
                 "symbol": symbol, 
                 "type": experiment_type,
                 "param_signature": signature,
+                "effective_params": exp_params,
                 "message": f"Experiment {experiment_type} started for {symbol}"
             }
             

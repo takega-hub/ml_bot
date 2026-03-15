@@ -321,6 +321,7 @@ def main():
     # Pass-through args for retraining
     parser.add_argument("--interval", default="15m", help="Base interval")
     parser.add_argument("--no-mtf", action="store_true", help="Disable MTF features")
+    parser.add_argument("--safe-mode", action="store_true", help="Use safer training settings")
     
     args = parser.parse_args()
     
@@ -451,6 +452,8 @@ def main():
 
             if args.no_mtf:
                 train_cmd.append("--no-mtf")
+            if args.safe_mode:
+                train_cmd.append("--safe-mode")
 
             logger.info(f"Running training command ({interval}): {' '.join(train_cmd)}")
             return_code, out_lines, _ = run_process_with_heartbeat(
