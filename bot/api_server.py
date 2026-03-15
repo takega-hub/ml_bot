@@ -448,33 +448,38 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     # --- Risk (read + write to file and in-memory) ---
     def _risk_to_dict(r):
+        def _v(name: str, default: Any = None):
+            try:
+                return getattr(r, name, default)
+            except Exception:
+                return default
         return {
-            "margin_pct_balance": r.margin_pct_balance,
-            "base_order_usd": r.base_order_usd,
-            "stop_loss_pct": r.stop_loss_pct,
-            "take_profit_pct": r.take_profit_pct,
-            "enable_trailing_stop": r.enable_trailing_stop,
-            "trailing_stop_activation_pct": r.trailing_stop_activation_pct,
-            "trailing_stop_distance_pct": r.trailing_stop_distance_pct,
-            "enable_partial_close": r.enable_partial_close,
-            "enable_breakeven": r.enable_breakeven,
-            "breakeven_level1_activation_pct": r.breakeven_level1_activation_pct,
-            "breakeven_level1_sl_pct": r.breakeven_level1_sl_pct,
-            "breakeven_level2_activation_pct": r.breakeven_level2_activation_pct,
-            "breakeven_level2_sl_pct": r.breakeven_level2_sl_pct,
-            "enable_loss_cooldown": r.enable_loss_cooldown,
-            "fee_rate": r.fee_rate,
-            "mid_term_tp_pct": r.mid_term_tp_pct,
-            "long_term_tp_pct": r.long_term_tp_pct,
-            "long_term_sl_pct": r.long_term_sl_pct,
-            "long_term_ignore_reverse": r.long_term_ignore_reverse,
-            "dca_enabled": r.dca_enabled,
-            "dca_drawdown_pct": r.dca_drawdown_pct,
-            "dca_max_adds": r.dca_max_adds,
-            "dca_min_confidence": r.dca_min_confidence,
-            "reverse_on_strong_signal": r.reverse_on_strong_signal,
-            "reverse_min_confidence": r.reverse_min_confidence,
-            "reverse_min_strength": getattr(r, "reverse_min_strength", "сильное"),
+            "margin_pct_balance": _v("margin_pct_balance", 0.0),
+            "base_order_usd": _v("base_order_usd", 0.0),
+            "stop_loss_pct": _v("stop_loss_pct", 0.0),
+            "take_profit_pct": _v("take_profit_pct", 0.0),
+            "enable_trailing_stop": _v("enable_trailing_stop", False),
+            "trailing_stop_activation_pct": _v("trailing_stop_activation_pct", 0.0),
+            "trailing_stop_distance_pct": _v("trailing_stop_distance_pct", 0.0),
+            "enable_partial_close": _v("enable_partial_close", False),
+            "enable_breakeven": _v("enable_breakeven", False),
+            "breakeven_level1_activation_pct": _v("breakeven_level1_activation_pct", 0.0),
+            "breakeven_level1_sl_pct": _v("breakeven_level1_sl_pct", 0.0),
+            "breakeven_level2_activation_pct": _v("breakeven_level2_activation_pct", 0.0),
+            "breakeven_level2_sl_pct": _v("breakeven_level2_sl_pct", 0.0),
+            "enable_loss_cooldown": _v("enable_loss_cooldown", False),
+            "fee_rate": _v("fee_rate", 0.0),
+            "mid_term_tp_pct": _v("mid_term_tp_pct", 0.0),
+            "long_term_tp_pct": _v("long_term_tp_pct", 0.0),
+            "long_term_sl_pct": _v("long_term_sl_pct", 0.0),
+            "long_term_ignore_reverse": _v("long_term_ignore_reverse", False),
+            "dca_enabled": _v("dca_enabled", False),
+            "dca_drawdown_pct": _v("dca_drawdown_pct", 0.0),
+            "dca_max_adds": _v("dca_max_adds", 0),
+            "dca_min_confidence": _v("dca_min_confidence", 0.0),
+            "reverse_on_strong_signal": _v("reverse_on_strong_signal", False),
+            "reverse_min_confidence": _v("reverse_min_confidence", 0.0),
+            "reverse_min_strength": _v("reverse_min_strength", "сильное"),
         }
 
     @app.get("/api/risk", dependencies=[Depends(verify_api_key)])
@@ -1677,31 +1682,38 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         AI анализирует последние 50 сделок и предлагает изменения в risk_settings.
         """
         from dataclasses import asdict
+        try:
+            closed_trades = [t for t in state.trades if getattr(t, "status", None) == "closed"]
+            if len(closed_trades) < 5:
+                logger.info("Few trades in memory, parsing trades.log for AI analysis...")
+                log_trades = _parse_trades_from_log(limit=50)
+                if log_trades:
+                    if not closed_trades:
+                        trades_data = log_trades
+                    else:
+                        trades_data = [asdict(t) for t in closed_trades] + log_trades
+                else:
+                    trades_data = [asdict(t) for t in closed_trades]
+            else:
+                trades_data = [asdict(t) for t in closed_trades]
 
-        # 1. Try to get from memory state first
-        closed_trades = [t for t in state.trades if t.status == "closed"]
-        
-        # 2. If memory is empty or low, try to parse from logs
-        if len(closed_trades) < 5:
-             logger.info("Few trades in memory, parsing trades.log for AI analysis...")
-             log_trades = _parse_trades_from_log(limit=50)
-             if log_trades:
-                 if not closed_trades:
-                     trades_data = log_trades
-                 else:
-                     trades_data = [asdict(t) for t in closed_trades] + log_trades
-             else:
-                 trades_data = [asdict(t) for t in closed_trades]
-        else:
-             trades_data = [asdict(t) for t in closed_trades]
+            if not trades_data:
+                return {"analysis": "Нет закрытых сделок для анализа (ни в памяти, ни в логах).", "suggestions": [], "risk_score": 100}
 
-        if not trades_data:
-            return {"analysis": "Нет закрытых сделок для анализа (ни в памяти, ни в логах).", "suggestions": [], "risk_score": 100}
-            
-        current_risk = _risk_to_dict(settings.risk)
-        
-        result = await ai_agent.analyze_risk_settings(trades_data, current_risk)
-        return result
+            current_risk = _risk_to_dict(settings.risk)
+            payload = {
+                "trades": trades_data,
+                "current_risk": current_risk,
+            }
+            result = await ai_agent.analyze_risk_settings(payload)
+            return result
+        except Exception as e:
+            logger.error(f"AI risk endpoint failed: {e}", exc_info=True)
+            return {
+                "analysis": f"Ошибка анализа риска: {str(e)}",
+                "suggestions": [],
+                "risk_score": 0,
+            }
 
     @app.get("/api/ai/market_insight", dependencies=[Depends(verify_api_key)])
     async def get_ai_market_insight(symbol: str, interval: str = "60"):
@@ -2024,15 +2036,26 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
         status = str(exp.get("status") or "unknown")
         if status in {"completed", "failed", "interrupted"}:
-            raise HTTPException(status_code=400, detail=f"Experiment is already {status}")
+            return {
+                "ok": True,
+                "experiment_id": experiment_id,
+                "already_stopped": True,
+                "status": status,
+                "killed": False,
+            }
 
+        proc = getattr(ai_agent, "research_processes", {}).get(experiment_id) if ai_agent else None
         pid = exp.get("runner_pid")
         if not isinstance(pid, int):
-            raise HTTPException(status_code=400, detail="Experiment PID is missing")
+            pid = exp.get("pid")
+        if not isinstance(pid, int) and proc is not None:
+            try:
+                pid = int(proc.pid)
+            except Exception:
+                pid = None
 
         killed = False
         try:
-            proc = getattr(ai_agent, "research_processes", {}).get(experiment_id) if ai_agent else None
             if proc is not None:
                 try:
                     proc.terminate()
@@ -2074,6 +2097,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "stopped_at": datetime.now(timezone.utc).isoformat(),
             "heartbeat_at": datetime.now(timezone.utc).isoformat(),
         }
+        if isinstance(pid, int):
+            patch["stopped_pid"] = pid
         try:
             store.upsert(experiment_id, patch)
         except Exception as e:
@@ -2082,7 +2107,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         return {"ok": True, "experiment_id": experiment_id, "pid": pid, "killed": killed}
 
     @app.delete("/api/ai/research/experiment/{experiment_id}", dependencies=[Depends(verify_api_key)])
-    def delete_research_experiment(experiment_id: str):
+    def delete_research_experiment(experiment_id: str, force: bool = False):
         from .experiment_management import ExperimentStore
 
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
@@ -2091,7 +2116,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         status = str(exp.get("status") or "unknown")
-        if status == "active":
+        if status == "active" and not force:
             raise HTTPException(status_code=400, detail="Active experiment cannot be deleted")
 
         project_root = Path(__file__).resolve().parent.parent
@@ -2118,6 +2143,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
 
         removed_model_paths: List[str] = []
+        strategy_reset = False
         try:
             results = exp.get("results") if isinstance(exp.get("results"), dict) else {}
             models = results.get("models") if isinstance(results.get("models"), dict) else {}
@@ -2138,10 +2164,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         ):
                             in_use.append(p)
                     if in_use:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Experiment models are currently in use: {', '.join(in_use)}",
-                        )
+                        if not force:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Experiment models are currently in use: {', '.join(in_use)}. Use ?force=true to detach and delete.",
+                            )
+                        try:
+                            state.set_strategy_config(str(exp.get("symbol")), {"mode": "single"})
+                            strategy_reset = True
+                        except Exception as e:
+                            logger.error(f"Failed to reset strategy config for symbol {exp.get('symbol')}: {e}", exc_info=True)
+                        try:
+                            symbol_key = str(exp.get("symbol")).upper()
+                            if hasattr(state, "symbol_models") and isinstance(state.symbol_models, dict):
+                                current_model_path = current_cfg.get("model_path")
+                                if isinstance(current_model_path, str) and current_model_path in in_use:
+                                    state.symbol_models.pop(symbol_key, None)
+                                    state.save()
+                        except Exception as e:
+                            logger.error(f"Failed to clear symbol_models for symbol {exp.get('symbol')}: {e}", exc_info=True)
 
             for p in model_candidates:
                 fp = (project_root / p) if not Path(p).is_absolute() else Path(p)
@@ -2183,6 +2224,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         return {
             "ok": True,
             "experiment_id": experiment_id,
+            "force": force,
+            "strategy_reset": strategy_reset,
             "removed_paths": removed_paths,
             "removed_model_paths": removed_model_paths,
         }

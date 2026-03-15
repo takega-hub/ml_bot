@@ -1189,3 +1189,55 @@ def build_experiment_report(experiment: Dict[str, Any]) -> Dict[str, Any]:
         "next_experiments": experiment.get("next_experiments") or results.get("next_experiments"),
     }
     return report
+
+
+class ExperimentReportBuilder:
+    def build_markdown(self, experiment: Dict[str, Any], impact: Optional[Dict[str, Any]] = None) -> str:
+        exp = experiment if isinstance(experiment, dict) else {}
+        results = exp.get("results") if isinstance(exp.get("results"), dict) else {}
+        exp_id = str(exp.get("id") or "unknown")
+        symbol = str(exp.get("symbol") or "UNKNOWN")
+        exp_type = str(exp.get("type") or "custom")
+        status = str(exp.get("status") or "unknown")
+        total_pnl = results.get("total_pnl_pct")
+        win_rate = results.get("win_rate")
+        max_dd = results.get("max_drawdown_pct") or results.get("max_drawdown")
+        trades = results.get("total_trades")
+        tactic = results.get("recommended_tactic")
+        created_at = exp.get("created_at")
+        completed_at = exp.get("completed_at")
+        lines: List[str] = []
+        lines.append(f"# Experiment Report: {exp_id}")
+        lines.append("")
+        lines.append("## Overview")
+        lines.append(f"- Symbol: {symbol}")
+        lines.append(f"- Type: {exp_type}")
+        lines.append(f"- Status: {status}")
+        if created_at:
+            lines.append(f"- Created at: {created_at}")
+        if completed_at:
+            lines.append(f"- Completed at: {completed_at}")
+        lines.append("")
+        lines.append("## Performance")
+        lines.append(f"- Total PnL (%): {total_pnl}")
+        lines.append(f"- Win rate (%): {win_rate}")
+        lines.append(f"- Max drawdown (%): {max_dd}")
+        lines.append(f"- Total trades: {trades}")
+        lines.append(f"- Recommended tactic: {tactic}")
+        analysis_summary = results.get("analysis_summary") or exp.get("analysis_summary")
+        if analysis_summary:
+            lines.append("")
+            lines.append("## Analysis Summary")
+            lines.append(str(analysis_summary))
+        if isinstance(impact, dict):
+            lines.append("")
+            lines.append("## Parameter Impact")
+            for key, value in impact.items():
+                lines.append(f"- {key}: {value}")
+        next_experiments = exp.get("next_experiments") or results.get("next_experiments")
+        if isinstance(next_experiments, list) and next_experiments:
+            lines.append("")
+            lines.append("## Next Experiments")
+            for item in next_experiments:
+                lines.append(f"- {item}")
+        return "\n".join(lines)

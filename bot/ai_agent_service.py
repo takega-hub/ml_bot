@@ -13,11 +13,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
+    from dotenv import load_dotenv
+    HAS_DOTENV = True
+except Exception:
+    load_dotenv = None
+    HAS_DOTENV = False
+
+try:
     import requests
     HAS_REQUESTS = True
 except Exception:
     requests = None
     HAS_REQUESTS = False
+
+try:
+    from supabase import create_client
+    HAS_SUPABASE = True
+except Exception:
+    create_client = None
+    HAS_SUPABASE = False
 
 from .experiment_management import (
     ExperimentAnalyzer,
@@ -35,11 +49,26 @@ logger = logging.getLogger(__name__)
 
 class AIAgentService:
     def __init__(self):
+        if HAS_DOTENV:
+            try:
+                env_path = Path(__file__).resolve().parent.parent / ".env"
+                load_dotenv(dotenv_path=env_path, override=False)
+            except Exception:
+                pass
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
         self.research_processes: Dict[str, subprocess.Popen] = {}
         self.risk_state_file = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
+        self.chat_history_file = Path(__file__).resolve().parent.parent / "ai_chat_history.json"
+        self.supabase = None
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        if HAS_SUPABASE and supabase_url and supabase_key:
+            try:
+                self.supabase = create_client(supabase_url, supabase_key)
+            except Exception:
+                self.supabase = None
 
     def _load_risk_state(self) -> Dict[str, Any]:
         try:
@@ -57,6 +86,78 @@ class AIAgentService:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
         except Exception:
             logger.exception("Failed to save AI risk state")
+
+    def _load_chat_history(self) -> List[Dict[str, Any]]:
+        if self.supabase is not None:
+            try:
+                response = (
+                    self.supabase.table("chat_messages")
+                    .select("role,content,created_at")
+                    .order("created_at", desc=True)
+                    .limit(500)
+                    .execute()
+                )
+                data = getattr(response, "data", None)
+                if isinstance(data, list):
+                    data = list(reversed(data))
+                    out: List[Dict[str, Any]] = []
+                    for row in data:
+                        if not isinstance(row, dict):
+                            continue
+                        out.append(
+                            {
+                                "role": row.get("role"),
+                                "content": row.get("content"),
+                                "timestamp": row.get("created_at"),
+                            }
+                        )
+                    return out
+            except Exception:
+                pass
+        try:
+            if self.chat_history_file.exists():
+                with open(self.chat_history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return [x for x in data if isinstance(x, dict)]
+        except Exception:
+            pass
+        return []
+
+    def _save_chat_history(self, history: List[Dict[str, Any]]) -> None:
+        if self.supabase is not None:
+            return
+        try:
+            with open(self.chat_history_file, "w", encoding="utf-8") as f:
+                json.dump(history[-500:], f, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            logger.exception("Failed to save chat history")
+
+    async def _get_chat_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        try:
+            n = int(limit)
+        except Exception:
+            n = 50
+        n = max(1, min(500, n))
+        history = self._load_chat_history()
+        return history[-n:]
+
+    async def _save_chat_message(self, role: str, content: str) -> None:
+        if self.supabase is not None:
+            try:
+                self.supabase.table("chat_messages").insert({"role": role, "content": content}).execute()
+                return
+            except Exception:
+                pass
+        history = self._load_chat_history()
+        history.append(
+            {
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self._save_chat_history(history)
 
     def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int = 800, temperature: float = 0.2) -> str:
         if not self.api_key:
@@ -148,6 +249,55 @@ class AIAgentService:
                 "risk_score": 0,
             }
 
+    def on_risk_settings_updated(self, total_trades: int, old_settings: Dict[str, Any], new_settings: Dict[str, Any]) -> None:
+        state = self._load_risk_state()
+        history = state.get("history")
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "total_trades": int(total_trades or 0),
+                "old_settings": old_settings if isinstance(old_settings, dict) else {},
+                "new_settings": new_settings if isinstance(new_settings, dict) else {},
+            }
+        )
+        state["history"] = history[-200:]
+        self._save_risk_state(state)
+
+    def get_risk_history(self) -> List[Dict[str, Any]]:
+        state = self._load_risk_state()
+        history = state.get("history")
+        if not isinstance(history, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        changed = False
+        for item in history:
+            if not isinstance(item, dict):
+                changed = True
+                continue
+            row = dict(item)
+            if not isinstance(row.get("timestamp"), str):
+                row["timestamp"] = datetime.now(timezone.utc).isoformat()
+                changed = True
+            if not isinstance(row.get("total_trades"), int):
+                try:
+                    row["total_trades"] = int(row.get("total_trades") or 0)
+                except Exception:
+                    row["total_trades"] = 0
+                changed = True
+            if not isinstance(row.get("old_settings"), dict):
+                row["old_settings"] = {}
+                changed = True
+            if not isinstance(row.get("new_settings"), dict):
+                row["new_settings"] = {}
+                changed = True
+            normalized.append(row)
+        if changed:
+            state["history"] = normalized[-200:]
+            self._save_risk_state(state)
+        return normalized
+
     async def analyze_market_sentiment(self, symbol: str, kline_data: List[Dict[str, Any]], indicators: Dict[str, float]) -> Dict[str, Any]:
         if not self.api_key:
             return {
@@ -216,6 +366,48 @@ class AIAgentService:
                 "advice": f"Ошибка анализа: {str(e)}",
                 "confidence": 0,
             }
+
+    async def chat_with_user(self, message: str, context: Optional[Dict[str, Any]] = None, log_lines: Optional[List[str]] = None) -> str:
+        user_message = str(message or "").strip()
+        await self._save_chat_message("user", user_message)
+        if not user_message:
+            reply = "Пустое сообщение."
+            await self._save_chat_message("assistant", reply)
+            return reply
+        if not self.api_key:
+            reply = "AI Agent не настроен: отсутствует OPENROUTER_API_KEY."
+            await self._save_chat_message("assistant", reply)
+            return reply
+        if not HAS_REQUESTS:
+            reply = "AI Agent недоступен: пакет requests не установлен в окружении."
+            await self._save_chat_message("assistant", reply)
+            return reply
+        payload = {
+            "message": user_message,
+            "context": context if isinstance(context, dict) else {},
+            "logs_tail": log_lines[-20:] if isinstance(log_lines, list) else [],
+        }
+        prompt = (
+            "Ты помощник торгового бота. Отвечай кратко и по делу на русском языке.\n"
+            f"{json.dumps(payload, ensure_ascii=False)}"
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            reply = await loop.run_in_executor(
+                None,
+                lambda: self._openrouter_chat(
+                    messages=[
+                        {"role": "system", "content": "You are a helpful trading bot assistant."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=700,
+                    temperature=0.3,
+                ),
+            )
+        except Exception as e:
+            reply = f"Ошибка AI: {str(e)}"
+        await self._save_chat_message("assistant", str(reply))
+        return str(reply)
 
     def validate_confirm_entry_request(self, payload: Dict[str, Any]) -> None:
         if not isinstance(payload, dict):
