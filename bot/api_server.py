@@ -732,3 +732,42 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
+
+
+async def run_api_server(
+    state,
+    bybit_client,
+    settings,
+    trading_loop=None,
+    model_manager=None,
+    tg_bot=None,
+    host: str = "0.0.0.0",
+    port: int = 8765,
+):
+    app = create_app(
+        state=state,
+        bybit_client=bybit_client,
+        settings=settings,
+        trading_loop=trading_loop,
+        model_manager=model_manager,
+        tg_bot=tg_bot,
+    )
+    try:
+        import uvicorn
+    except Exception as e:
+        raise ImportError("Установите uvicorn: pip install uvicorn") from e
+
+    config = uvicorn.Config(
+        app=app,
+        host=host,
+        port=int(port),
+        log_level="info",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    logger.info(f"[Mobile API] Starting server on {host}:{port}")
+    try:
+        await server.serve()
+    except asyncio.CancelledError:
+        server.should_exit = True
+        raise
