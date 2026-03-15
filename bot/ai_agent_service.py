@@ -1038,8 +1038,8 @@ class AIAgentService:
             process = subprocess.Popen(
                 cmd,
                 cwd=str(project_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 encoding='utf-8',
                 errors='replace'
