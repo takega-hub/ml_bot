@@ -61,6 +61,7 @@ class AIAgentService:
         self.research_processes: Dict[str, subprocess.Popen] = {}
         self.risk_state_file = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
         self.chat_history_file = Path(__file__).resolve().parent.parent / "ai_chat_history.json"
+        self.pending_chat_action: Optional[Dict[str, Any]] = None
         self.supabase = None
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_KEY")
@@ -402,6 +403,78 @@ class AIAgentService:
                 "advice": f"Ошибка анализа: {str(e)}",
                 "confidence": 0,
             }
+
+    async def plan_chat_tool_call(
+        self,
+        message: str,
+        tools_manifest: List[Dict[str, Any]],
+        has_pending_action: bool = False,
+    ) -> Dict[str, Any]:
+        user_message = str(message or "").strip()
+        if not user_message:
+            return {"intent": "chat"}
+        if not self.api_key or not HAS_REQUESTS:
+            return {"intent": "chat"}
+        safe_tools: List[Dict[str, Any]] = []
+        for item in tools_manifest:
+            if not isinstance(item, dict):
+                continue
+            safe_tools.append(
+                {
+                    "name": item.get("name"),
+                    "risk_tier": item.get("risk_tier"),
+                    "goal": item.get("goal"),
+                    "input_schema": item.get("input_schema") if isinstance(item.get("input_schema"), dict) else {},
+                }
+            )
+        prompt = (
+            "Ты диспетчер инструментов для трейдинг-бота.\n"
+            "Верни строго JSON без комментариев.\n"
+            "Если инструмент не нужен, верни {\"intent\":\"chat\"}.\n"
+            "Если нужен инструмент, верни:\n"
+            "{\"intent\":\"tool_call\",\"tool_name\":\"...\",\"arguments\":{},\"goal\":\"...\"}\n"
+            f"pending_confirmation={has_pending_action}\n"
+            f"TOOLS={json.dumps(safe_tools, ensure_ascii=False)}\n"
+            f"USER_MESSAGE={json.dumps(user_message, ensure_ascii=False)}"
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(
+                None,
+                lambda: self._openrouter_chat(
+                    messages=[
+                        {"role": "system", "content": "You are a strict JSON function router. Output valid JSON only."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=450,
+                    temperature=0.0,
+                ),
+            )
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].strip()
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                return {"intent": "chat"}
+            intent = str(data.get("intent") or "chat").strip().lower()
+            if intent != "tool_call":
+                return {"intent": "chat"}
+            tool_name = str(data.get("tool_name") or "").strip()
+            args = data.get("arguments")
+            if not isinstance(args, dict):
+                args = {}
+            goal = str(data.get("goal") or "").strip()
+            if not tool_name:
+                return {"intent": "chat"}
+            return {
+                "intent": "tool_call",
+                "tool_name": tool_name,
+                "arguments": args,
+                "goal": goal,
+            }
+        except Exception:
+            return {"intent": "chat"}
 
     async def chat_with_user(self, message: str, context: Optional[Dict[str, Any]] = None, log_lines: Optional[List[str]] = None) -> str:
         user_message = str(message or "").strip()

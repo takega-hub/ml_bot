@@ -1,0 +1,451 @@
+{
+  "contract_version": "1.0.0",
+  "agent": "ai_chat_tool_caller",
+  "description": "Whitelist-инструменты для чат-агента с risk-tier политиками и правилами подтверждения.",
+  "global_policy": {
+    "auth": {
+      "header": "X-API-Key",
+      "required": true
+    },
+    "execution": {
+      "max_tools_per_turn": 3,
+      "allow_parallel": true,
+      "timeout_seconds": 30,
+      "idempotency_required_for_write": true
+    },
+    "safety": {
+      "dry_run_for_write_default": true,
+      "mask_sensitive_fields": [
+        "api_key",
+        "token",
+        "secret",
+        "password"
+      ],
+      "deny_if_user_message_contains": [
+        "игнорируй whitelist",
+        "ignore policy",
+        "force execute",
+        "execute without approval"
+      ]
+    }
+  },
+  "risk_tiers": {
+    "low": {
+      "description": "Только чтение, не меняет состояние.",
+      "require_user_confirmation": false,
+      "allowed_execution_mode": [
+        "auto"
+      ]
+    },
+    "medium": {
+      "description": "Ограниченные изменения, не затрагивают боевую торговлю напрямую.",
+      "require_user_confirmation": false,
+      "allowed_execution_mode": [
+        "auto",
+        "dry_run_then_apply"
+      ]
+    },
+    "high": {
+      "description": "Меняет риск-параметры, стратегии или жизненный цикл экспериментов.",
+      "require_user_confirmation": true,
+      "allowed_execution_mode": [
+        "dry_run_then_apply"
+      ]
+    },
+    "critical": {
+      "description": "Боевые действия: остановка/запуск торговли, экстренное закрытие позиций.",
+      "require_user_confirmation": true,
+      "allowed_execution_mode": [
+        "explicit_confirm_phrase"
+      ]
+    }
+  },
+  "confirmation_policy": {
+    "explicit_confirm_phrase": "ПОДТВЕРЖДАЮ",
+    "high_risk_summary_required": true,
+    "high_risk_summary_template": "Действие: {tool_name}. Что изменится: {impact}. Обратимость: {reversible}.",
+    "block_if_missing_confirmation": true
+  },
+  "response_templates": {
+    "before_execute": "Планирую выполнить {tool_name}. Цель: {goal}.",
+    "after_success": "Готово: {tool_name}. Результат: {result_summary}.",
+    "after_failure": "Не удалось выполнить {tool_name}. Причина: {error}.",
+    "needs_confirmation": "Это действие уровня {risk_tier}. Для продолжения напишите: ПОДТВЕРЖДАЮ."
+  },
+  "tools": [
+    {
+      "name": "get_bot_status",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/status",
+      "goal": "Получить текущее состояние бота.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_bot_stats",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/stats",
+      "goal": "Получить агрегированные торговые метрики.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_trade_history",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/history/trades",
+      "goal": "Получить историю сделок для анализа.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_ai_research_status",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/ai/research/status",
+      "goal": "Получить список экспериментов и их состояние.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_experiment_health",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/ai/research/experiment/{experiment_id}/health",
+      "goal": "Проверить heartbeat/зависания конкретного эксперимента.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_experiment_report",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/ai/experiments/report/{experiment_id}",
+      "goal": "Получить markdown-отчёт по эксперименту.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "start_research_experiment",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/ai/research/start",
+      "goal": "Запустить новый AI research эксперимент.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "symbol",
+          "type"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "pattern": "^[A-Z0-9]{5,20}$"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "balanced",
+              "aggressive",
+              "conservative"
+            ]
+          },
+          "safe_mode": {
+            "type": "boolean"
+          },
+          "allow_duplicate": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "control_research_campaign",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/ai/research/campaign/{experiment_id}/control",
+      "goal": "Pause/resume/stop кампании автоитераций.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id",
+          "action"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "pause",
+              "resume",
+              "stop"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "start_paper_trading",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/paper/start",
+      "goal": "Запустить paper trading для эксперимента.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stop_paper_trading",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/paper/stop",
+      "goal": "Остановить paper trading для эксперимента.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_paper_metrics",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/paper/metrics",
+      "goal": "Получить метрики paper trading сессии.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_paper_realtime_chart",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/paper/realtime_chart/{experiment_id}",
+      "goal": "Получить realtime equity-данные paper trading.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_risk_settings",
+      "risk_tier": "high",
+      "method": "PUT",
+      "endpoint": "/api/risk",
+      "goal": "Обновить whitelisted риск-параметры.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "updates"
+        ],
+        "properties": {
+          "updates": {
+            "type": "object",
+            "properties": {
+              "base_order_usd": {
+                "type": "number",
+                "minimum": 5,
+                "maximum": 5000
+              },
+              "max_position_usd": {
+                "type": "number",
+                "minimum": 10,
+                "maximum": 20000
+              },
+              "stop_loss_pct": {
+                "type": "number",
+                "minimum": 0.001,
+                "maximum": 0.2
+              },
+              "take_profit_pct": {
+                "type": "number",
+                "minimum": 0.001,
+                "maximum": 0.5
+              },
+              "margin_pct_balance": {
+                "type": "number",
+                "minimum": 0.01,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false,
+            "minProperties": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Сначала выполнить get_bot_status и get_risk_snapshot",
+        "Показать diff до/после и получить подтверждение"
+      ]
+    },
+    {
+      "name": "apply_research_experiment",
+      "risk_tier": "critical",
+      "method": "POST",
+      "endpoint": "/api/ai/research/apply",
+      "goal": "Применить результаты эксперимента в рабочую стратегию.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "experiment_id"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Показать сравнение champion/challenger и OOS/drift/stress",
+        "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
+      ]
+    },
+    {
+      "name": "stop_bot",
+      "risk_tier": "critical",
+      "method": "POST",
+      "endpoint": "/api/stop",
+      "goal": "Остановить торговый бот.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
+      ]
+    },
+    {
+      "name": "emergency_stop_all",
+      "risk_tier": "critical",
+      "method": "POST",
+      "endpoint": "/api/emergency/stop_all",
+      "goal": "Экстренно остановить бот и закрыть позиции.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
+      ]
+    }
+  ],
+  "orchestration_examples": [
+    {
+      "name": "research_pipeline",
+      "steps": [
+        "get_ai_research_status",
+        "start_research_experiment",
+        "get_experiment_health"
+      ]
+    },
+    {
+      "name": "safe_apply_pipeline",
+      "steps": [
+        "get_ai_research_status",
+        "get_experiment_report",
+        "apply_research_experiment"
+      ]
+    },
+    {
+      "name": "paper_validation_pipeline",
+      "steps": [
+        "start_paper_trading",
+        "get_paper_metrics",
+        "get_paper_realtime_chart",
+        "stop_paper_trading"
+      ]
+    }
+  ]
+}

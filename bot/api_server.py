@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 import urllib.parse
 from dataclasses import asdict, is_dataclass
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Optional, Any, List, Dict
 import shutil
 import signal
+from .audit_logger import append_jsonl
 
 logger = logging.getLogger(__name__)
 
@@ -1625,6 +1627,430 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     class ChatBody(BaseModel):
         message: str
 
+    class _ChatToolExecutor:
+        def __init__(self):
+            self.contract = self._load_contract()
+            tools = self.contract.get("tools") if isinstance(self.contract, dict) else []
+            if not isinstance(tools, list):
+                tools = []
+            self.tools_map: Dict[str, Dict[str, Any]] = {}
+            for row in tools:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                self.tools_map[name] = row
+            conf = self.contract.get("confirmation_policy") if isinstance(self.contract.get("confirmation_policy"), dict) else {}
+            self.confirm_phrase = str(conf.get("explicit_confirm_phrase") or "ПОДТВЕРЖДАЮ").strip().upper()
+            self.pending_ttl_seconds = self._resolve_pending_ttl_seconds()
+            self.audit_jsonl_path = str(PROJECT_ROOT / "logs" / "tool_execution_log.jsonl")
+            self.audit_text_path = PROJECT_ROOT / "logs" / "tool_execution.log"
+
+        def _load_contract(self) -> Dict[str, Any]:
+            path = PROJECT_ROOT / "docs" / "ai_chat_tools.json"
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception as e:
+                logger.warning(f"Failed to load ai_chat_tools.json: {e}")
+            return {}
+
+        def list_manifest(self) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
+            for name, row in self.tools_map.items():
+                out.append(
+                    {
+                        "name": name,
+                        "risk_tier": row.get("risk_tier"),
+                        "goal": row.get("goal"),
+                        "input_schema": row.get("input_schema") if isinstance(row.get("input_schema"), dict) else {},
+                    }
+                )
+            return out
+
+        def _resolve_pending_ttl_seconds(self) -> int:
+            execution = self.contract.get("global_policy", {}).get("execution", {}) if isinstance(self.contract, dict) else {}
+            raw = execution.get("pending_confirmation_ttl_seconds")
+            try:
+                ttl = int(raw)
+            except Exception:
+                ttl = 300
+            return max(30, min(3600, ttl))
+
+        def _validate_against_schema(self, value: Any, schema: Dict[str, Any], path: str = "input") -> List[str]:
+            errors: List[str] = []
+            stype = schema.get("type")
+            if stype == "object":
+                if not isinstance(value, dict):
+                    return [f"{path} must be object"]
+                required = schema.get("required") if isinstance(schema.get("required"), list) else []
+                for key in required:
+                    if key not in value:
+                        errors.append(f"{path}.{key} is required")
+                props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+                allow_additional = bool(schema.get("additionalProperties", True))
+                if not allow_additional:
+                    for key in value.keys():
+                        if key not in props:
+                            errors.append(f"{path}.{key} is not allowed")
+                min_props = schema.get("minProperties")
+                if isinstance(min_props, int) and len(value) < min_props:
+                    errors.append(f"{path} must contain at least {min_props} properties")
+                for key, sub_schema in props.items():
+                    if key not in value:
+                        continue
+                    if isinstance(sub_schema, dict):
+                        errors.extend(
+                            self._validate_against_schema(value[key], sub_schema, f"{path}.{key}")
+                        )
+                return errors
+            if stype == "string":
+                if not isinstance(value, str):
+                    return [f"{path} must be string"]
+                min_len = schema.get("minLength")
+                if isinstance(min_len, int) and len(value) < min_len:
+                    errors.append(f"{path} length must be >= {min_len}")
+                pattern = schema.get("pattern")
+                if isinstance(pattern, str):
+                    import re
+                    if re.match(pattern, value) is None:
+                        errors.append(f"{path} does not match pattern")
+                enum = schema.get("enum")
+                if isinstance(enum, list) and value not in enum:
+                    errors.append(f"{path} must be one of {enum}")
+                return errors
+            if stype == "integer":
+                if not isinstance(value, int):
+                    return [f"{path} must be integer"]
+                minimum = schema.get("minimum")
+                maximum = schema.get("maximum")
+                if isinstance(minimum, (int, float)) and value < minimum:
+                    errors.append(f"{path} must be >= {minimum}")
+                if isinstance(maximum, (int, float)) and value > maximum:
+                    errors.append(f"{path} must be <= {maximum}")
+                return errors
+            if stype == "number":
+                if not isinstance(value, (int, float)):
+                    return [f"{path} must be number"]
+                minimum = schema.get("minimum")
+                maximum = schema.get("maximum")
+                n = float(value)
+                if isinstance(minimum, (int, float)) and n < float(minimum):
+                    errors.append(f"{path} must be >= {minimum}")
+                if isinstance(maximum, (int, float)) and n > float(maximum):
+                    errors.append(f"{path} must be <= {maximum}")
+                return errors
+            if stype == "boolean":
+                if not isinstance(value, bool):
+                    return [f"{path} must be boolean"]
+                return errors
+            enum = schema.get("enum")
+            if isinstance(enum, list) and value not in enum:
+                errors.append(f"{path} must be one of {enum}")
+            return errors
+
+        def parse_manual_tool_command(self, message: str) -> Optional[Dict[str, Any]]:
+            text = str(message or "").strip()
+            if not text.lower().startswith("/tool "):
+                return None
+            payload = text[6:].strip()
+            if not payload:
+                return None
+            tool_name = payload
+            args: Dict[str, Any] = {}
+            if " " in payload:
+                tool_name, args_raw = payload.split(" ", 1)
+                args_raw = args_raw.strip()
+                if args_raw:
+                    try:
+                        parsed = json.loads(args_raw)
+                        if isinstance(parsed, dict):
+                            args = parsed
+                    except Exception:
+                        return None
+            return {
+                "intent": "tool_call",
+                "tool_name": tool_name.strip(),
+                "arguments": args,
+                "goal": "manual_tool_command",
+            }
+
+        def is_confirmation_message(self, message: str) -> bool:
+            text = str(message or "").strip().upper()
+            return bool(text) and text == self.confirm_phrase
+
+        def is_cancel_message(self, message: str) -> bool:
+            text = str(message or "").strip().lower()
+            return text in {"/cancel", "cancel", "отмена", "отменить", "отбой"}
+
+        def get_pending_action(self) -> Optional[Dict[str, Any]]:
+            pending = ai_agent.pending_chat_action
+            if not isinstance(pending, dict):
+                return None
+            return pending
+
+        def clear_pending_action(self) -> None:
+            ai_agent.pending_chat_action = None
+
+        def expire_pending_if_needed(self) -> Optional[Dict[str, Any]]:
+            pending = self.get_pending_action()
+            if not pending:
+                return None
+            expires_at = pending.get("expires_at_ts")
+            try:
+                expires = float(expires_at)
+            except Exception:
+                expires = 0.0
+            now = time.time()
+            if expires > 0 and now > expires:
+                self.log_tool_event(
+                    event_type="pending_expired",
+                    tool_name=str(pending.get("tool_name") or ""),
+                    goal=str(pending.get("goal") or ""),
+                    risk_tier=str(pending.get("risk_tier") or ""),
+                    ok=False,
+                    summary=f"Pending action expired after {self.pending_ttl_seconds}s",
+                    arguments=pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {},
+                )
+                self.clear_pending_action()
+                return pending
+            return None
+
+        def pending_summary_text(self, pending: Dict[str, Any]) -> str:
+            now = time.time()
+            expires_at = pending.get("expires_at_ts")
+            try:
+                ttl_left = int(max(0, float(expires_at) - now))
+            except Exception:
+                ttl_left = self.pending_ttl_seconds
+            return (
+                f"Ожидается подтверждение действия {pending.get('tool_name')} "
+                f"(уровень {pending.get('risk_tier')}, осталось {ttl_left}с). "
+                f"Для выполнения: {self.confirm_phrase}. Для отмены: /cancel"
+            )
+
+        def _sanitize_result(self, payload: Any) -> Any:
+            text = json.dumps(payload, ensure_ascii=False, default=str) if not isinstance(payload, str) else payload
+            if len(text) > 4000:
+                text = text[:4000] + "...(truncated)"
+            return text
+
+        async def execute(self, tool_name: str, arguments: Dict[str, Any], goal: str = "", confirmed: bool = False) -> Dict[str, Any]:
+            tool = self.tools_map.get(str(tool_name or "").strip())
+            if not tool:
+                return {"ok": False, "error": f"Tool not allowed: {tool_name}", "tool_name": tool_name}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else {"type": "object"}
+            validation_errors = self._validate_against_schema(arguments, schema, "arguments")
+            if validation_errors:
+                return {
+                    "ok": False,
+                    "tool_name": tool_name,
+                    "error": "Invalid tool arguments",
+                    "validation_errors": validation_errors,
+                }
+            risk_tier = str(tool.get("risk_tier") or "low").lower()
+            requires_confirmation = risk_tier in {"high", "critical"}
+            if requires_confirmation and not confirmed:
+                created_at = time.time()
+                ai_agent.pending_chat_action = {
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "goal": goal,
+                    "risk_tier": risk_tier,
+                    "created_at_ts": created_at,
+                    "expires_at_ts": created_at + self.pending_ttl_seconds,
+                }
+                preview = self._preview_impact(tool_name, arguments)
+                self.log_tool_event(
+                    event_type="pending_created",
+                    tool_name=tool_name,
+                    goal=goal,
+                    risk_tier=risk_tier,
+                    ok=False,
+                    summary=preview,
+                    arguments=arguments,
+                )
+                return {
+                    "ok": False,
+                    "tool_name": tool_name,
+                    "risk_tier": risk_tier,
+                    "requires_confirmation": True,
+                    "confirmation_phrase": self.confirm_phrase,
+                    "preview": preview,
+                    "ttl_seconds": self.pending_ttl_seconds,
+                }
+            result = await self._run_tool(tool_name, arguments)
+            ai_agent.pending_chat_action = None
+            result["tool_name"] = tool_name
+            result["risk_tier"] = risk_tier
+            self.log_tool_event(
+                event_type="tool_executed",
+                tool_name=tool_name,
+                goal=goal,
+                risk_tier=risk_tier,
+                ok=bool(result.get("ok")),
+                summary=self._sanitize_result(result.get("result") if result.get("ok") else result.get("error")),
+                arguments=arguments,
+            )
+            return result
+
+        def log_tool_event(
+            self,
+            event_type: str,
+            tool_name: str,
+            goal: str,
+            risk_tier: str,
+            ok: bool,
+            summary: Any,
+            arguments: Dict[str, Any],
+        ) -> None:
+            timestamp_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            summary_str = str(summary or "")
+            if len(summary_str) > 1200:
+                summary_str = summary_str[:1200] + "...(truncated)"
+            record = {
+                "event_type": event_type,
+                "timestamp_utc": timestamp_utc,
+                "tool_name": tool_name,
+                "goal": goal,
+                "risk_tier": risk_tier,
+                "ok": ok,
+                "summary": summary_str,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+            }
+            append_jsonl(self.audit_jsonl_path, record)
+            try:
+                self.audit_text_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.audit_text_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"{timestamp_utc} | {event_type.upper()} | tool={tool_name} | risk={risk_tier} | ok={ok} | goal={goal} | {summary_str}\n"
+                    )
+            except Exception:
+                pass
+
+        def _preview_impact(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+            if tool_name == "update_risk_settings":
+                updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
+                before = _risk_to_dict(settings.risk)
+                changed = []
+                for k, v in updates.items():
+                    old_v = before.get(k)
+                    if old_v != v:
+                        changed.append(f"{k}: {old_v} -> {v}")
+                if not changed:
+                    return "Изменений не обнаружено."
+                return "; ".join(changed)
+            if tool_name == "apply_research_experiment":
+                return f"Будет применён эксперимент {arguments.get('experiment_id')} в рабочую стратегию."
+            if tool_name == "stop_bot":
+                return "Будет остановлена торговля бота."
+            if tool_name == "emergency_stop_all":
+                return "Бот будет остановлен, открытые позиции будут закрыты."
+            return f"Будет выполнено действие {tool_name}."
+
+        async def _run_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                if tool_name == "get_bot_status":
+                    return {"ok": True, "result": _get_status_data(state, bybit_client, settings, trading_loop)}
+                if tool_name == "get_bot_stats":
+                    return {"ok": True, "result": get_stats()}
+                if tool_name == "get_trade_history":
+                    limit = int(arguments.get("limit") or 50)
+                    limit = max(1, min(200, limit))
+                    return {"ok": True, "result": get_history_trades(limit=limit)}
+                if tool_name == "get_ai_research_status":
+                    return {"ok": True, "result": get_research_status()}
+                if tool_name == "get_experiment_health":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    return {"ok": True, "result": get_research_experiment_health(experiment_id)}
+                if tool_name == "get_experiment_report":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    return {"ok": True, "result": get_experiment_report(experiment_id)}
+                if tool_name == "start_research_experiment":
+                    symbol = str(arguments.get("symbol") or "").upper()
+                    experiment_type = str(arguments.get("type") or "balanced")
+                    metadata = arguments.get("metadata") if isinstance(arguments.get("metadata"), dict) else None
+                    allow_duplicate = bool(arguments.get("allow_duplicate", False))
+                    safe_mode = bool(arguments.get("safe_mode", True))
+                    result = ai_agent.start_research_experiment(
+                        symbol=symbol,
+                        experiment_type=experiment_type,
+                        metadata=metadata,
+                        allow_duplicate=allow_duplicate,
+                        safe_mode=safe_mode,
+                    )
+                    if not result.get("ok"):
+                        return {"ok": False, "error": result.get("error", "Failed to start research"), "result": result}
+                    return {"ok": True, "result": result}
+                if tool_name == "control_research_campaign":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    action = str(arguments.get("action") or "")
+                    return {
+                        "ok": True,
+                        "result": control_research_campaign(
+                            experiment_id,
+                            CampaignControlBody(action=action),
+                        ),
+                    }
+                if tool_name == "start_paper_trading":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    if not paper_trading_manager:
+                        return {"ok": False, "error": "Paper trading manager not available"}
+                    session = paper_trading_manager.start_session(experiment_id)
+                    if not session:
+                        return {"ok": False, "error": f"Failed to start paper trading for {experiment_id}"}
+                    return {"ok": True, "result": {"experiment_id": experiment_id, "symbol": session.symbol}}
+                if tool_name == "stop_paper_trading":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    if not paper_trading_manager:
+                        return {"ok": False, "error": "Paper trading manager not available"}
+                    success = paper_trading_manager.stop_session(experiment_id)
+                    if not success:
+                        return {"ok": False, "error": f"Paper trading session not found for {experiment_id}"}
+                    return {"ok": True, "result": {"experiment_id": experiment_id, "stopped": True}}
+                if tool_name == "get_paper_metrics":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    return {"ok": True, "result": get_paper_metrics(experiment_id=experiment_id)}
+                if tool_name == "get_paper_realtime_chart":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    return {"ok": True, "result": await get_paper_realtime_chart(experiment_id)}
+                if tool_name == "update_risk_settings":
+                    updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
+                    return {"ok": True, "result": put_risk(updates)}
+                if tool_name == "apply_research_experiment":
+                    experiment_id = str(arguments.get("experiment_id") or "")
+                    return {"ok": True, "result": await post_apply_experiment(ApplyExperimentBody(experiment_id=experiment_id))}
+                if tool_name == "stop_bot":
+                    return {"ok": True, "result": await post_stop()}
+                if tool_name == "emergency_stop_all":
+                    return {"ok": True, "result": post_emergency_stop_all()}
+                return {"ok": False, "error": f"Tool handler not implemented: {tool_name}"}
+            except HTTPException as e:
+                return {"ok": False, "error": f"HTTP {e.status_code}: {e.detail}"}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        def render_response_text(self, execution: Dict[str, Any]) -> str:
+            if execution.get("requires_confirmation"):
+                return (
+                    f"Это действие уровня {execution.get('risk_tier')}. "
+                    f"Предпросмотр: {execution.get('preview')}\n"
+                    f"TTL: {execution.get('ttl_seconds')}с. "
+                    f"Для выполнения напишите: {execution.get('confirmation_phrase')}. "
+                    f"Для отмены: /cancel"
+                )
+            if execution.get("ok"):
+                payload = execution.get("result")
+                return f"Инструмент {execution.get('tool_name')} выполнен успешно.\n{self._sanitize_result(payload)}"
+            return f"Не удалось выполнить {execution.get('tool_name')}: {execution.get('error')}"
+
+    chat_tool_executor = _ChatToolExecutor()
+
     @app.get("/api/ai/chat/history", dependencies=[Depends(verify_api_key)])
     async def get_chat_history(limit: int = 50):
         """Возвращает историю чата."""
@@ -1637,40 +2063,93 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             logger.error(f"Chat history error: {e}", exc_info=True)
             return {"history": []}
 
+    @app.get("/api/ai/chat/tools", dependencies=[Depends(verify_api_key)])
+    def get_chat_tools():
+        pending = chat_tool_executor.get_pending_action()
+        return {
+            "contract_version": chat_tool_executor.contract.get("contract_version"),
+            "tools": chat_tool_executor.list_manifest(),
+            "pending_confirmation_ttl_seconds": chat_tool_executor.pending_ttl_seconds,
+            "confirmation_phrase": chat_tool_executor.confirm_phrase,
+            "pending_action": pending,
+        }
+
+    @app.get("/api/ai/chat/tool_execution_log", dependencies=[Depends(verify_api_key)])
+    def get_chat_tool_execution_log(
+        limit: int = 50,
+        event_type: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        risk_tier: Optional[str] = None,
+        ok: Optional[bool] = None,
+    ):
+        n = max(1, min(500, int(limit or 50)))
+        path = PROJECT_ROOT / "logs" / "tool_execution_log.jsonl"
+        if not path.exists():
+            return {"events": [], "path": str(path), "limit": n}
+        rows: List[Dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            et = str(event_type or "").strip().lower()
+            tn = str(tool_name or "").strip().lower()
+            rt = str(risk_tier or "").strip().lower()
+            for line in reversed(lines):
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    rec = json.loads(s)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if et and str(rec.get("event_type") or "").strip().lower() != et:
+                    continue
+                if tn and str(rec.get("tool_name") or "").strip().lower() != tn:
+                    continue
+                if rt and str(rec.get("risk_tier") or "").strip().lower() != rt:
+                    continue
+                if ok is not None and bool(rec.get("ok")) != bool(ok):
+                    continue
+                rows.append(rec)
+                if len(rows) >= n:
+                    break
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read tool execution log: {e}")
+        return {
+            "events": rows,
+            "path": str(path),
+            "limit": n,
+            "filters": {
+                "event_type": event_type,
+                "tool_name": tool_name,
+                "risk_tier": risk_tier,
+                "ok": ok,
+            },
+        }
+
     @app.post("/api/ai/chat", dependencies=[Depends(verify_api_key)])
     async def post_chat(body: ChatBody):
-        """
-        Эндпоинт для чата с AI-агентом.
-        Агент получает доступ к логам, состоянию и настройкам.
-        """
         try:
-            # Read last 20 lines of main log
             log_lines = []
             log_path = PROJECT_ROOT / "logs" / "bot.log"
             if log_path.exists():
                 try:
-                    # Efficiently read last lines
                     import collections
                     with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                         log_lines = collections.deque(f, maxlen=20)
                     log_lines = list(log_lines)
                 except Exception:
                     pass
-            
-            # Collect context
+
             from dataclasses import asdict
             active_positions_count = len([t for t in state.trades if t.status == "open"])
-            
-            # BotState does not track open orders directly in this version
             open_orders_count = 0 
-            
             recent_trades_data = []
             for t in state.trades[-5:]:
                 try:
-                    # Use asdict for dataclasses
                     recent_trades_data.append(asdict(t))
                 except Exception:
-                    # Fallback if asdict fails or it's not a dataclass
                     recent_trades_data.append(str(t))
 
             context = {
@@ -1681,8 +2160,95 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "bot_status": "RUNNING" if state.is_running else "STOPPED",
                 "last_notification": asdict(state.notifications[-1]) if state.notifications else "None"
             }
-            
-            response = await ai_agent.chat_with_user(body.message, context, log_lines)
+
+            user_message = str(body.message or "").strip()
+            if not user_message:
+                response = await ai_agent.chat_with_user(user_message, context, log_lines)
+                return {"response": response}
+
+            if user_message.lower() in {"/tools", "tools", "инструменты"}:
+                manifest = chat_tool_executor.list_manifest()
+                preview = []
+                for row in manifest[:20]:
+                    preview.append(
+                        f"- {row.get('name')} [{row.get('risk_tier')}] — {row.get('goal')}"
+                    )
+                response_text = "Доступные инструменты:\n" + ("\n".join(preview) if preview else "нет инструментов")
+                await ai_agent._save_chat_message("user", user_message)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "tools": manifest}
+
+            expired = chat_tool_executor.expire_pending_if_needed()
+            if expired:
+                response_text = (
+                    f"Ожидание подтверждения для {expired.get('tool_name')} истекло. "
+                    f"Сформулируйте команду заново, если действие всё ещё актуально."
+                )
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text}
+
+            pending = chat_tool_executor.get_pending_action()
+            if user_message.lower() in {"/pending", "pending", "ожидающее"}:
+                await ai_agent._save_chat_message("user", user_message)
+                if pending:
+                    response_text = chat_tool_executor.pending_summary_text(pending)
+                else:
+                    response_text = "Ожидающих подтверждений нет."
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "pending_action": pending}
+            if pending and chat_tool_executor.is_cancel_message(user_message):
+                await ai_agent._save_chat_message("user", user_message)
+                chat_tool_executor.log_tool_event(
+                    event_type="pending_cancelled",
+                    tool_name=str(pending.get("tool_name") or ""),
+                    goal=str(pending.get("goal") or ""),
+                    risk_tier=str(pending.get("risk_tier") or ""),
+                    ok=False,
+                    summary="Pending action cancelled by user",
+                    arguments=pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {},
+                )
+                chat_tool_executor.clear_pending_action()
+                response_text = "Ожидающее действие отменено."
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text}
+
+            if pending and chat_tool_executor.is_confirmation_message(user_message):
+                await ai_agent._save_chat_message("user", user_message)
+                execution = await chat_tool_executor.execute(
+                    tool_name=str(pending.get("tool_name") or ""),
+                    arguments=pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {},
+                    goal=str(pending.get("goal") or ""),
+                    confirmed=True,
+                )
+                response_text = chat_tool_executor.render_response_text(execution)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "tool_execution": execution}
+            if pending:
+                response_text = chat_tool_executor.pending_summary_text(pending)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text}
+
+            plan = chat_tool_executor.parse_manual_tool_command(user_message)
+            if plan is None:
+                plan = await ai_agent.plan_chat_tool_call(
+                    message=user_message,
+                    tools_manifest=chat_tool_executor.list_manifest(),
+                    has_pending_action=bool(pending),
+                )
+
+            if isinstance(plan, dict) and str(plan.get("intent") or "").lower() == "tool_call":
+                await ai_agent._save_chat_message("user", user_message)
+                execution = await chat_tool_executor.execute(
+                    tool_name=str(plan.get("tool_name") or ""),
+                    arguments=plan.get("arguments") if isinstance(plan.get("arguments"), dict) else {},
+                    goal=str(plan.get("goal") or ""),
+                    confirmed=False,
+                )
+                response_text = chat_tool_executor.render_response_text(execution)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "tool_execution": execution}
+
+            response = await ai_agent.chat_with_user(user_message, context, log_lines)
             return {"response": response}
         except Exception as e:
             logger.error(f"Chat error: {e}", exc_info=True)
