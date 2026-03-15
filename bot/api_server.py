@@ -554,7 +554,27 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.get("/api/ai/risk_history", dependencies=[Depends(verify_api_key)])
     def get_ai_risk_history():
         """Returns the history of risk setting changes."""
-        return {"history": ai_agent.get_risk_history()}
+        history = ai_agent.get_risk_history()
+        normalized: List[Dict[str, Any]] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            changes = item.get("changes") if isinstance(item.get("changes"), dict) else {}
+            if not changes:
+                continue
+            normalized.append(
+                {
+                    "timestamp": item.get("timestamp"),
+                    "trade_count": item.get("total_trades"),
+                    "total_trades": item.get("total_trades"),
+                    "changes": changes,
+                }
+            )
+        return {"history": normalized[-200:]}
+
+    @app.post("/api/ai/risk_history/clear", dependencies=[Depends(verify_api_key)])
+    def post_ai_risk_history_clear():
+        return ai_agent.clear_risk_history(clear_last_analysis=True)
 
     # --- ML settings (read + write) ---
     def _ml_to_dict(m):

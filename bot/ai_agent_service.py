@@ -250,6 +250,16 @@ class AIAgentService:
             }
 
     def on_risk_settings_updated(self, total_trades: int, old_settings: Dict[str, Any], new_settings: Dict[str, Any]) -> None:
+        old_payload = old_settings if isinstance(old_settings, dict) else {}
+        new_payload = new_settings if isinstance(new_settings, dict) else {}
+        changed_settings: Dict[str, Any] = {}
+        for key in sorted(set(old_payload.keys()) | set(new_payload.keys())):
+            old_val = old_payload.get(key)
+            new_val = new_payload.get(key)
+            if old_val != new_val:
+                changed_settings[key] = {"old": old_val, "new": new_val}
+        if not changed_settings:
+            return
         state = self._load_risk_state()
         history = state.get("history")
         if not isinstance(history, list):
@@ -258,8 +268,9 @@ class AIAgentService:
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "total_trades": int(total_trades or 0),
-                "old_settings": old_settings if isinstance(old_settings, dict) else {},
-                "new_settings": new_settings if isinstance(new_settings, dict) else {},
+                "old_settings": old_payload,
+                "new_settings": new_payload,
+                "changes": changed_settings,
             }
         )
         state["history"] = history[-200:]
@@ -292,11 +303,36 @@ class AIAgentService:
             if not isinstance(row.get("new_settings"), dict):
                 row["new_settings"] = {}
                 changed = True
+            if not isinstance(row.get("changes"), dict):
+                old_payload = row.get("old_settings") if isinstance(row.get("old_settings"), dict) else {}
+                new_payload = row.get("new_settings") if isinstance(row.get("new_settings"), dict) else {}
+                diff: Dict[str, Any] = {}
+                for key in sorted(set(old_payload.keys()) | set(new_payload.keys())):
+                    old_val = old_payload.get(key)
+                    new_val = new_payload.get(key)
+                    if old_val != new_val:
+                        diff[key] = {"old": old_val, "new": new_val}
+                row["changes"] = diff
+                changed = True
             normalized.append(row)
         if changed:
             state["history"] = normalized[-200:]
             self._save_risk_state(state)
         return normalized
+
+    def clear_risk_history(self, clear_last_analysis: bool = True) -> Dict[str, Any]:
+        state = self._load_risk_state()
+        history = state.get("history")
+        cleared_count = len(history) if isinstance(history, list) else 0
+        state["history"] = []
+        if clear_last_analysis and "last_analysis" in state:
+            state.pop("last_analysis", None)
+        self._save_risk_state(state)
+        return {
+            "ok": True,
+            "cleared_history_count": int(cleared_count),
+            "cleared_last_analysis": bool(clear_last_analysis),
+        }
 
     async def analyze_market_sentiment(self, symbol: str, kline_data: List[Dict[str, Any]], indicators: Dict[str, float]) -> Dict[str, Any]:
         if not self.api_key:
