@@ -1,55 +1,166 @@
-"""
-Модуль для создания фичей (признаков) из исторических данных для ML-моделей.
-ИСПРАВЛЕННАЯ ВЕРСИЯ с защитой от ошибок в pandas_ta.
-"""
-from typing import List, Optional, Tuple, Dict, Any
-import os
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 import warnings
 
-# Подавляем предупреждения
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+    PANDAS_TA_AVAILABLE = True
+except Exception:
+    ta = None
+    PANDAS_TA_AVAILABLE = False
+
+
+def _sma(series: pd.Series, length: int) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").rolling(window=length, min_periods=1).mean()
+
+
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").ewm(span=length, adjust=False, min_periods=1).mean()
+
+
+def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    close = pd.to_numeric(series, errors="coerce")
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out = 100 - (100 / (1 + rs))
+    return out.fillna(50.0)
+
+
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    h = pd.to_numeric(high, errors="coerce")
+    l = pd.to_numeric(low, errors="coerce")
+    c = pd.to_numeric(close, errors="coerce")
+    prev_close = c.shift(1)
+    tr = pd.concat(
+        [
+            (h - l).abs(),
+            (h - prev_close).abs(),
+            (l - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean().fillna(0.0)
+
+
+def _bbands(close: pd.Series, length: int = 20, std: float = 2.0) -> pd.DataFrame:
+    c = pd.to_numeric(close, errors="coerce")
+    mid = c.rolling(window=length, min_periods=1).mean()
+    dev = c.rolling(window=length, min_periods=1).std(ddof=0).fillna(0.0)
+    upper = mid + std * dev
+    lower = mid - std * dev
+    return pd.DataFrame(
+        {
+            "BBU_20_2.0": upper,
+            "BBM_20_2.0": mid,
+            "BBL_20_2.0": lower,
+        },
+        index=c.index,
+    )
+
+
+def _macd(close: pd.Series) -> pd.DataFrame:
+    c = pd.to_numeric(close, errors="coerce")
+    ema12 = _ema(c, 12)
+    ema26 = _ema(c, 26)
+    macd_line = ema12 - ema26
+    signal = macd_line.ewm(span=9, adjust=False, min_periods=1).mean()
+    hist = macd_line - signal
+    return pd.DataFrame(
+        {
+            "MACD_12_26_9": macd_line,
+            "MACDs_12_26_9": signal,
+            "MACDh_12_26_9": hist,
+        },
+        index=c.index,
+    )
+
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.DataFrame:
+    h = pd.to_numeric(high, errors="coerce")
+    l = pd.to_numeric(low, errors="coerce")
+    c = pd.to_numeric(close, errors="coerce")
+    up_move = h.diff()
+    down_move = -l.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=h.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=h.index)
+    atr = _atr(h, l, c, length).replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean() / atr
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+    adx = dx.ewm(alpha=1 / max(length, 1), adjust=False, min_periods=length).mean()
+    return pd.DataFrame(
+        {
+            "ADX_14": adx.fillna(0.0),
+            "DMP_14": plus_di.fillna(0.0),
+            "DMN_14": minus_di.fillna(0.0),
+        },
+        index=h.index,
+    )
+
+
+class _TAFallback:
+    @staticmethod
+    def sma(series: pd.Series, length: int = 20):
+        return _sma(series, length)
+
+    @staticmethod
+    def ema(series: pd.Series, length: int = 20):
+        return _ema(series, length)
+
+    @staticmethod
+    def rsi(series: pd.Series, length: int = 14):
+        return _rsi(series, length)
+
+    @staticmethod
+    def atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
+        return _atr(high, low, close, length)
+
+    @staticmethod
+    def bbands(series: pd.Series, length: int = 20, std: float = 2.0):
+        return _bbands(series, length, std)
+
+    @staticmethod
+    def macd(series: pd.Series):
+        return _macd(series)
+
+    @staticmethod
+    def adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
+        return _adx(high, low, close, length)
+
+
+if not PANDAS_TA_AVAILABLE:
+    ta = _TAFallback()
 
 
 def compute_orderbook_imbalance(ob_response: Dict[str, Any], depth: int = 10) -> float:
-    """
-    Вычисляет Order Book Imbalance из ответа Bybit REST API (/v5/market/orderbook).
-    
-    Formula: (bid_volume - ask_volume) / (bid_volume + ask_volume)
-    Результат в диапазоне [-1, 1]: положительный — перевес покупателей, отрицательный — продавцов.
-    
-    Args:
-        ob_response: Сырой ответ от Bybit (get_orderbook). Ожидается result с ключами "b" и "a".
-        depth: Количество уровней стакана для суммирования объёма (по умолчанию 10).
-    
-    Returns:
-        Imbalance в [-1, 1] или 0.0 при ошибке/пустом стакане.
-    """
     if not ob_response or not isinstance(ob_response, dict):
         return 0.0
     result = ob_response.get("result") if ob_response.get("retCode") == 0 else ob_response.get("result")
     if not result or not isinstance(result, dict):
         return 0.0
-    
-    def sum_volume(levels: List, n: int) -> float:
-        if not levels or not isinstance(levels, list):
-            return 0.0
-        total = 0.0
-        for i, level in enumerate(levels[:n]):
-            if isinstance(level, (list, tuple)) and len(level) >= 2:
+
+    bids = result.get("b", []) or []
+    asks = result.get("a", []) or []
+
+    def _sum(levels):
+        s = 0.0
+        for lvl in levels[:depth]:
+            if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
                 try:
-                    total += float(level[1])  # size
-                except (TypeError, ValueError):
+                    s += float(lvl[1])
+                except Exception:
                     pass
-        return total
-    
-    bids = result.get("b", [])
-    asks = result.get("a", [])
-    bid_vol = sum_volume(bids, depth)
-    ask_vol = sum_volume(asks, depth)
+        return s
+
+    bid_vol = _sum(bids)
+    ask_vol = _sum(asks)
     total = bid_vol + ask_vol
     if total <= 0:
         return 0.0
@@ -57,686 +168,207 @@ def compute_orderbook_imbalance(ob_response: Dict[str, Any], depth: int = 10) ->
 
 
 class FeatureEngineer:
-    """
-    Создает технические индикаторы и другие фичи из OHLCV данных.
-    """
-    
     def __init__(self):
         self.feature_names: List[str] = []
-    
+
     def safe_ta_indicator(self, df: pd.DataFrame, indicator_func, **kwargs):
-        """Безопасное вычисление индикатора с обработкой ошибок."""
         try:
-            result = indicator_func(**kwargs)
-            if result is None:
-                return None
-            return result
-        except Exception as e:
-            print(f"[WARNING] Индикатор {indicator_func.__name__} не сработал: {e}")
+            return indicator_func(**kwargs)
+        except Exception:
             return None
-    
+
     def create_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Создает технические индикаторы из OHLCV данных.
-        Упрощенная и оптимизированная версия с защитой от ошибок.
-        """
-        if df.empty or df is None:
+        if df is None or df.empty:
             return pd.DataFrame()
-        
-        df = df.copy()
-        
-        # Проверяем необходимые колонки
-        required_cols = ["open", "high", "low", "close", "volume"]
-        for col in required_cols:
-            if col not in df.columns:
-                print(f"[ERROR] Отсутствует колонка {col} в данных")
+
+        out = df.copy()
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col not in out.columns:
                 return pd.DataFrame()
-        
-        # Устанавливаем timestamp как индекс если он есть
-        if "timestamp" in df.columns:
-            df = df.set_index("timestamp")
-        
-        # === 1. ПРОСТЫЕ ИНДИКАТОРЫ (гарантированно работают) ===
-        
-        # Moving Averages
-        df["sma_20"] = ta.sma(df["close"], length=20)
-        df["sma_50"] = ta.sma(df["close"], length=50)
-        df["ema_12"] = ta.ema(df["close"], length=12)
-        df["ema_26"] = ta.ema(df["close"], length=26)
-        
-        # RSI
-        df["rsi"] = ta.rsi(df["close"], length=14)
-        
-        # ATR
-        df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
-        df["atr_pct"] = (df["atr"] / df["close"]) * 100
-        
-        # Volume features
-        df["volume_sma_20"] = ta.sma(df["volume"], length=20)
-        df["volume_ratio"] = np.where(
-            df["volume_sma_20"] > 0,
-            df["volume"] / df["volume_sma_20"],
-            1.0
-        )
-        
-        # Price changes
-        df["price_change"] = df["close"].pct_change()
-        df["price_change_abs"] = df["price_change"].abs()
-        
-        # === 2. ИНДИКАТОРЫ С ЗАЩИТОЙ ОТ ОШИБОК ===
-        
-        # Bollinger Bands (с защитой от разных имен колонок)
-        try:
-            bb_result = ta.bbands(df["close"], length=20, std=2)
-            if bb_result is not None and not bb_result.empty:
-                # Проверяем возможные имена колонок
-                possible_names = {
-                    'upper': ['BBU_20_2.0', 'BBU_20_2', 'BB_upper', 'upper'],
-                    'middle': ['BBM_20_2.0', 'BBM_20_2', 'BB_middle', 'middle'],
-                    'lower': ['BBL_20_2.0', 'BBL_20_2', 'BB_lower', 'lower']
-                }
-                
-                for band, names in possible_names.items():
-                    for name in names:
-                        if name in bb_result.columns:
-                            if band == 'upper':
-                                df["bb_upper"] = bb_result[name]
-                            elif band == 'middle':
-                                df["bb_middle"] = bb_result[name]
-                            elif band == 'lower':
-                                df["bb_lower"] = bb_result[name]
-                            break
-                
-                # Если все еще нет, создаем простые
-                if "bb_upper" not in df.columns and len(bb_result.columns) >= 3:
-                    df["bb_upper"] = bb_result.iloc[:, 0] if len(bb_result.columns) > 0 else df["close"]
-                    df["bb_middle"] = bb_result.iloc[:, 1] if len(bb_result.columns) > 1 else df["close"]
-                    df["bb_lower"] = bb_result.iloc[:, 2] if len(bb_result.columns) > 2 else df["close"]
-        except Exception as e:
-            print(f"[WARNING] Bollinger Bands не сработали: {e}")
-            df["bb_upper"] = df["close"]
-            df["bb_middle"] = df["close"]
-            df["bb_lower"] = df["close"]
-        
-        # MACD
-        try:
-            macd_result = ta.macd(df["close"])
-            if macd_result is not None:
-                df["macd"] = macd_result.iloc[:, 0] if len(macd_result.columns) > 0 else 0
-                df["macd_signal"] = macd_result.iloc[:, 1] if len(macd_result.columns) > 1 else 0
-        except:
-            df["macd"] = 0
-            df["macd_signal"] = 0
-        
-        # ADX
-        try:
-            adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
-            if adx_result is not None:
-                df["adx"] = adx_result.iloc[:, 0] if len(adx_result.columns) > 0 else 0
-        except:
-            df["adx"] = 0
-        
-        # === 3. БАЗОВЫЕ ФИЧИ ===
-        
-        # Лаговые фичи
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+        if "timestamp" in out.columns:
+            out = out.set_index("timestamp")
+
+        out["sma_20"] = ta.sma(out["close"], length=20)
+        out["sma_50"] = ta.sma(out["close"], length=50)
+        out["ema_12"] = ta.ema(out["close"], length=12)
+        out["ema_26"] = ta.ema(out["close"], length=26)
+        out["rsi"] = ta.rsi(out["close"], length=14)
+        out["atr"] = ta.atr(out["high"], out["low"], out["close"], length=14)
+        out["atr_pct"] = (out["atr"] / out["close"].replace(0, np.nan)) * 100
+        out["volume_sma_20"] = ta.sma(out["volume"], length=20)
+        out["volume_ratio"] = np.where(out["volume_sma_20"] > 0, out["volume"] / out["volume_sma_20"], 1.0)
+
+        bb = ta.bbands(out["close"], length=20, std=2)
+        if bb is not None and not bb.empty:
+            out["bb_upper"] = bb.iloc[:, 0]
+            out["bb_middle"] = bb.iloc[:, 1]
+            out["bb_lower"] = bb.iloc[:, 2]
+        else:
+            out["bb_upper"] = out["close"]
+            out["bb_middle"] = out["close"]
+            out["bb_lower"] = out["close"]
+
+        macd = ta.macd(out["close"])
+        if macd is not None and not macd.empty:
+            out["macd"] = macd.iloc[:, 0]
+            out["macd_signal"] = macd.iloc[:, 1] if len(macd.columns) > 1 else 0.0
+        else:
+            out["macd"] = 0.0
+            out["macd_signal"] = 0.0
+
+        adx_df = ta.adx(out["high"], out["low"], out["close"], length=14)
+        if adx_df is not None and not adx_df.empty:
+            out["adx"] = adx_df.iloc[:, 0]
+            out["di_plus"] = adx_df.iloc[:, 1] if len(adx_df.columns) > 1 else 0.0
+            out["di_minus"] = adx_df.iloc[:, 2] if len(adx_df.columns) > 2 else 0.0
+        else:
+            out["adx"] = 0.0
+            out["di_plus"] = 0.0
+            out["di_minus"] = 0.0
+
+        out["adx_trend_up"] = (pd.to_numeric(out["di_plus"], errors="coerce").fillna(0.0) > pd.to_numeric(out["di_minus"], errors="coerce").fillna(0.0)).astype(int)
+        out["price_change"] = out["close"].pct_change()
+        out["price_change_abs"] = out["price_change"].abs()
+        out["volatility_10"] = out["close"].rolling(window=10, min_periods=3).std()
+        out["realized_volatility_20"] = out["price_change"].rolling(window=20, min_periods=5).std()
+        out["momentum_3"] = out["close"].pct_change(periods=3)
+        out["momentum_5"] = out["close"].pct_change(periods=5)
+        out["momentum_10"] = out["close"].pct_change(periods=10)
+        out["dist_to_sma20_pct"] = ((out["close"] - out["sma_20"]) / out["sma_20"].replace(0, np.nan)) * 100
+        out["dist_to_ema12_pct"] = ((out["close"] - out["ema_12"]) / out["ema_12"].replace(0, np.nan)) * 100
+        out["bb_position"] = (out["close"] - out["bb_lower"]) / (out["bb_upper"] - out["bb_lower"]).replace(0, np.nan)
+        out["near_bb_upper"] = (out["close"] > out["bb_upper"] * 0.95).astype(int)
+        out["near_bb_lower"] = (out["close"] < out["bb_lower"] * 1.05).astype(int)
+        out["rsi_oversold"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) < 30).astype(int)
+        out["rsi_overbought"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) > 70).astype(int)
+        out["ema12_above_ema26"] = (pd.to_numeric(out["ema_12"], errors="coerce").fillna(0.0) > pd.to_numeric(out["ema_26"], errors="coerce").fillna(0.0)).astype(int)
+        out["ob_imbalance"] = 0.0
+        out["ob_imbalance_5"] = 0.0
+        out["ob_imbalance_20"] = 0.0
+
+        if isinstance(out.index, pd.DatetimeIndex):
+            out["hour"] = out.index.hour
+            out["day_of_week"] = out.index.dayofweek
+            out["hour_sin"] = np.sin(2 * np.pi * out["hour"] / 24.0)
+            out["hour_cos"] = np.cos(2 * np.pi * out["hour"] / 24.0)
+            out["dow_sin"] = np.sin(2 * np.pi * out["day_of_week"] / 7.0)
+            out["dow_cos"] = np.cos(2 * np.pi * out["day_of_week"] / 7.0)
+
         for lag in [1, 2, 3]:
-            df[f"close_lag_{lag}"] = df["close"].shift(lag)
-            df[f"volume_lag_{lag}"] = df["volume"].shift(lag)
-            df[f"price_change_lag_{lag}"] = df["price_change"].shift(lag)
-        
-        # Волатильность
-        df["volatility_10"] = df["close"].rolling(window=10, min_periods=3).std()
-        
-        # Дистанция до MA
-        df["dist_to_sma20_pct"] = ((df["close"] - df["sma_20"]) / df["sma_20"]) * 100
-        df["dist_to_ema12_pct"] = ((df["close"] - df["ema_12"]) / df["ema_12"]) * 100
-        
-        # === 4. ВРЕМЕННЫЕ ФИЧИ ===
-        if isinstance(df.index, pd.DatetimeIndex):
-            df["hour"] = df.index.hour
-            df["day_of_week"] = df.index.dayofweek
-            # Циклические фичи
-            df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24.0)
-            df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24.0)
-            df["dow_sin"] = np.sin(2 * np.pi * df["day_of_week"] / 7.0)
-            df["dow_cos"] = np.cos(2 * np.pi * df["day_of_week"] / 7.0)
-        
-        # === 5. ВЗАИМОДЕЙСТВИЯ ИНДИКАТОРОВ ===
-        
-        # RSI уровни (очищаем от None перед сравнением)
-        rsi_clean = pd.to_numeric(df["rsi"], errors='coerce').fillna(50.0)
-        df["rsi_oversold"] = (rsi_clean < 30).astype(int)
-        df["rsi_overbought"] = (rsi_clean > 70).astype(int)
-        
-        # Тренд по MA (очищаем от None перед сравнением)
-        ema12_clean = pd.to_numeric(df["ema_12"], errors='coerce').fillna(0.0)
-        ema26_clean = pd.to_numeric(df["ema_26"], errors='coerce').fillna(0.0)
-        df["ema12_above_ema26"] = (ema12_clean > ema26_clean).astype(int)
-        
-        # ББ положение (очищаем от None перед сравнением)
-        if all(col in df.columns for col in ["bb_upper", "bb_lower", "close"]):
-            bb_upper_clean = pd.to_numeric(df["bb_upper"], errors='coerce').fillna(df["close"])
-            bb_lower_clean = pd.to_numeric(df["bb_lower"], errors='coerce').fillna(df["close"])
-            close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
-            
-            bb_range = (bb_upper_clean - bb_lower_clean).replace(0, 1)
-            df["bb_position"] = (close_clean - bb_lower_clean) / bb_range
-            df["near_bb_upper"] = (close_clean > bb_upper_clean * 0.95).astype(int)
-            df["near_bb_lower"] = (close_clean < bb_lower_clean * 1.05).astype(int)
-        
-        # === 6. НОВЫЕ ФИЧИ: ВОЛАТИЛЬНОСТЬ ===
-        
-        # Realized volatility (rolling std returns)
-        df["realized_volatility_10"] = df["price_change"].rolling(window=10, min_periods=3).std()
-        df["realized_volatility_20"] = df["price_change"].rolling(window=20, min_periods=5).std()
-        
-        # Parkinson volatility (high-low based)
-        df["parkinson_vol"] = np.sqrt((1 / (4 * np.log(2))) * (np.log(df["high"] / df["low"])) ** 2)
-        df["parkinson_vol_pct"] = (df["parkinson_vol"] / df["close"]) * 100
-        
-        # Volatility ratio (short-term / long-term)
-        vol10_clean = pd.to_numeric(df["realized_volatility_10"], errors='coerce').fillna(0.0)
-        vol20_clean = pd.to_numeric(df["realized_volatility_20"], errors='coerce').fillna(0.0)
-        df["volatility_ratio"] = np.where(
-            vol20_clean > 0,
-            vol10_clean / vol20_clean,
-            1.0
-        )
-        
-        # === 7. НОВЫЕ ФИЧИ: МИКРОСТРУКТУРА РЫНКА ===
-        
-        # Bid-ask spread proxy (high - low) / close
-        df["spread_proxy"] = ((df["high"] - df["low"]) / df["close"]) * 100
-        
-        # Volume imbalance за последние N свечей
-        for window in [5, 10]:
-            df[f"volume_imbalance_{window}"] = (
-                df["volume"].rolling(window=window, min_periods=2).apply(
-                    lambda x: (x.iloc[-1] - x.mean()) / x.mean() if x.mean() > 0 else 0
-                )
-            )
-        
-        # Price momentum на разных таймфреймах
-        for period in [3, 5, 10]:
-            df[f"momentum_{period}"] = df["close"].pct_change(periods=period)
-        
-        # === 8. НОВЫЕ ФИЧИ: ТРЕНДОВЫЕ ===
-        
-        # ADX + DI направление (если доступно)
-        try:
-            # Сначала убеждаемся, что входные данные не содержат None
-            high_clean = df["high"].fillna(0.0).replace([None], 0.0)
-            low_clean = df["low"].fillna(0.0).replace([None], 0.0)
-            close_clean = df["close"].fillna(0.0).replace([None], 0.0)
-            
-            adx_full = ta.adx(high_clean, low_clean, close_clean, length=14)
-            if adx_full is not None and len(adx_full.columns) >= 3:
-                di_plus_raw = adx_full.iloc[:, 1] if len(adx_full.columns) > 1 else pd.Series([0.0] * len(df), index=df.index)
-                di_minus_raw = adx_full.iloc[:, 2] if len(adx_full.columns) > 2 else pd.Series([0.0] * len(df), index=df.index)
-                
-                # Заполняем и NaN, и None перед сравнением
-                df["di_plus"] = di_plus_raw.fillna(0.0).replace([None], 0.0)
-                df["di_minus"] = di_minus_raw.fillna(0.0).replace([None], 0.0)
-                
-                # Убеждаемся, что это числовые значения (не None)
-                df["di_plus"] = pd.to_numeric(df["di_plus"], errors='coerce').fillna(0.0)
-                df["di_minus"] = pd.to_numeric(df["di_minus"], errors='coerce').fillna(0.0)
-                
-                # Теперь безопасное сравнение
-                df["adx_trend_up"] = (df["di_plus"] > df["di_minus"]).astype(int)
-            else:
-                df["di_plus"] = 0.0
-                df["di_minus"] = 0.0
-                df["adx_trend_up"] = 0
-        except Exception as e:
-            print(f"[WARNING] Ошибка при создании ADX фичей: {e}")
-            df["di_plus"] = 0.0
-            df["di_minus"] = 0.0
-            df["adx_trend_up"] = 0
-        
-        # === 9. НОВЫЕ ФИЧИ: ПАТТЕРНЫ СВЕЧЕЙ ===
-        
-        # ВАЖНО: Очищаем OHLCV от None перед вычислениями
-        for col in ['open', 'high', 'low', 'close']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).replace([None], 0.0)
-        
-        # Body и wick размеры
-        df["body_size"] = abs(df["close"] - df["open"]).fillna(0.0)
-        df["upper_wick"] = (df["high"] - df[["open", "close"]].max(axis=1)).fillna(0.0)
-        df["lower_wick"] = (df[["open", "close"]].min(axis=1) - df["low"]).fillna(0.0)
-        df["total_range"] = (df["high"] - df["low"]).fillna(0.0)
-        
-        # Защита от деления на ноль
-        df["total_range"] = df["total_range"].replace(0.0, 1.0)  # Минимум 1.0 для избежания деления на 0
-        
-        # Body/wick ratio
-        wick_sum = (df["upper_wick"] + df["lower_wick"]).fillna(0.0)
-        df["body_wick_ratio"] = np.where(
-            wick_sum > 0,
-            df["body_size"] / wick_sum,
-            0.0
-        )
-        
-        # Doji (body < 20% от range)
-        range_ratio = (df["body_size"] / df["total_range"]).fillna(0.0)
-        df["is_doji"] = (range_ratio < 0.2).astype(int)
-        
-        # Hammer (маленький body, длинная нижняя тень, короткая верхняя)
-        body_size_clean = df["body_size"].fillna(0.0)
-        lower_wick_clean = df["lower_wick"].fillna(0.0)
-        upper_wick_clean = df["upper_wick"].fillna(0.0)
-        df["is_hammer"] = (
-            (range_ratio < 0.3) &
-            (lower_wick_clean > body_size_clean * 2) &
-            (upper_wick_clean < body_size_clean)
-        ).astype(int)
-        
-        # Shooting Star (маленький body, длинная верхняя тень, короткая нижняя)
-        df["is_shooting_star"] = (
-            (range_ratio < 0.3) &
-            (upper_wick_clean > body_size_clean * 2) &
-            (lower_wick_clean < body_size_clean)
-        ).astype(int)
-        
-        # Bullish/Bearish Engulfing
-        close_clean = df["close"].fillna(0.0)
-        open_clean = df["open"].fillna(0.0)
-        close_prev = df["close"].shift(1).fillna(0.0)
-        open_prev = df["open"].shift(1).fillna(0.0)
-        
-        df["is_bullish_engulfing"] = (
-            (close_clean > open_clean) &  # Текущая свеча бычья
-            (close_prev < open_prev) &  # Предыдущая медвежья
-            (open_clean < close_prev) &  # Текущий open ниже предыдущего close
-            (close_clean > open_prev)  # Текущий close выше предыдущего open
-        ).astype(int)
-        
-        df["is_bearish_engulfing"] = (
-            (close_clean < open_clean) &  # Текущая свеча медвежья
-            (close_prev > open_prev) &  # Предыдущая бычья
-            (open_clean > close_prev) &  # Текущий open выше предыдущего close
-            (close_clean < open_prev)  # Текущий close ниже предыдущего open
-        ).astype(int)
-        
-        # === 10. НОВЫЕ ФИЧИ: УРОВНИ ПОДДЕРЖКИ/СОПРОТИВЛЕНИЯ ===
-        
-        # Расстояние до nearest S/R level (упрощенная версия)
-        # Используем локальные минимумы/максимумы как S/R
-        lookback = 20
-        df["local_low"] = df["low"].rolling(window=lookback, min_periods=5).min()
-        df["local_high"] = df["high"].rolling(window=lookback, min_periods=5).max()
-        
-        # Расстояние до поддержки (в %)
-        local_low_clean = pd.to_numeric(df["local_low"], errors='coerce').fillna(0.0)
-        close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
-        df["dist_to_support_pct"] = np.where(
-            (local_low_clean > 0) & (close_clean > 0),
-            ((close_clean - local_low_clean) / close_clean) * 100,
-            0.0
-        )
-        
-        # Расстояние до сопротивления (в %)
-        local_high_clean = pd.to_numeric(df["local_high"], errors='coerce').fillna(0.0)
-        df["dist_to_resistance_pct"] = np.where(
-            (local_high_clean > 0) & (close_clean > 0),
-            ((local_high_clean - close_clean) / close_clean) * 100,
-            0.0
-        )
-        
-        # Расстояние до S/R в ATR
-        atr_clean = pd.to_numeric(df["atr"], errors='coerce').fillna(0.0)
-        df["dist_to_support_atr"] = np.where(
-            atr_clean > 0,
-            (close_clean - local_low_clean) / atr_clean,
-            0.0
-        )
-        df["dist_to_resistance_atr"] = np.where(
-            atr_clean > 0,
-            (local_high_clean - close_clean) / atr_clean,
-            0.0
-        )
-        
-        # === УЛУЧШЕННЫЕ S/R ФИЧИ: Количество касаний и сила уровня ===
-        # Оптимизированная версия с использованием векторных операций
-        lookback_sr = 50  # Окно для поиска S/R уровней
-        tolerance_pct = 0.5  # Допуск для касания уровня (0.5%)
-        
-        # Инициализируем фичи
-        df["support_touches"] = 0.0
-        df["resistance_touches"] = 0.0
-        df["support_strength"] = 0.0
-        df["resistance_strength"] = 0.0
-        
-        # Векторные вычисления для касаний
-        low_clean = pd.to_numeric(df["low"], errors='coerce').fillna(0.0)
-        high_clean = pd.to_numeric(df["high"], errors='coerce').fillna(0.0)
-        close_clean = pd.to_numeric(df["close"], errors='coerce').fillna(0.0)
-        
-        fast_backtest = str(os.getenv("FAST_BACKTEST", "")).strip().lower() in ("1", "true", "yes", "on")
-        if not fast_backtest:
-            for i in range(lookback_sr, len(df)):
-                window_start = max(0, i - lookback_sr)
-                window_end = i + 1
-                
-                current_support = local_low_clean.iloc[i]
-                current_resistance = local_high_clean.iloc[i]
-                
-                if current_support > 0 and current_resistance > 0:
-                    support_tolerance = current_support * (tolerance_pct / 100)
-                    resistance_tolerance = current_resistance * (tolerance_pct / 100)
-                    
-                    window_low = low_clean.iloc[window_start:window_end]
-                    window_high = high_clean.iloc[window_start:window_end]
-                    window_close = close_clean.iloc[window_start:window_end]
-                    
-                    support_touches_mask = (
-                        (window_low >= (current_support - support_tolerance)) & 
-                        (window_low <= (current_support + support_tolerance))
-                    )
-                    support_touches = support_touches_mask.sum()
-                    
-                    resistance_touches_mask = (
-                        (window_high >= (current_resistance - resistance_tolerance)) & 
-                        (window_high <= (current_resistance + resistance_tolerance))
-                    )
-                    resistance_touches = resistance_touches_mask.sum()
-                    
-                    if support_touches > 0:
-                        touch_indices = window_low[support_touches_mask].index
-                        support_bounces = 0
-                        for touch_idx in touch_indices:
-                            touch_pos = df.index.get_loc(touch_idx)
-                            if touch_pos < len(df) - 1:
-                                if close_clean.iloc[touch_pos + 1] > close_clean.iloc[touch_pos]:
-                                    support_bounces += 1
-                    else:
-                        support_bounces = 0
-                    
-                    if resistance_touches > 0:
-                        touch_indices = window_high[resistance_touches_mask].index
-                        resistance_bounces = 0
-                        for touch_idx in touch_indices:
-                            touch_pos = df.index.get_loc(touch_idx)
-                            if touch_pos < len(df) - 1:
-                                if close_clean.iloc[touch_pos + 1] < close_clean.iloc[touch_pos]:
-                                    resistance_bounces += 1
-                    else:
-                        resistance_bounces = 0
-                    
-                    df.loc[df.index[i], "support_touches"] = float(support_touches)
-                    df.loc[df.index[i], "resistance_touches"] = float(resistance_touches)
-                    df.loc[df.index[i], "support_strength"] = float(support_bounces)
-                    df.loc[df.index[i], "resistance_strength"] = float(resistance_bounces)
-        
-        # Нормализуем силу (относительно количества касаний)
-        support_touches_clean = pd.to_numeric(df["support_touches"], errors='coerce').fillna(0.0)
-        resistance_touches_clean = pd.to_numeric(df["resistance_touches"], errors='coerce').fillna(0.0)
-        support_strength_clean = pd.to_numeric(df["support_strength"], errors='coerce').fillna(0.0)
-        resistance_strength_clean = pd.to_numeric(df["resistance_strength"], errors='coerce').fillna(0.0)
-        
-        # Сила = процент успешных отскоков от общего количества касаний
-        df["support_strength_ratio"] = np.where(
-            support_touches_clean > 0,
-            support_strength_clean / support_touches_clean,
-            0.0
-        )
-        df["resistance_strength_ratio"] = np.where(
-            resistance_touches_clean > 0,
-            resistance_strength_clean / resistance_touches_clean,
-            0.0
-        )
-        
-        # Добавляем в список фичей
-        self.feature_names.extend([
-            "support_touches", "resistance_touches",
-            "support_strength", "resistance_strength",
-            "support_strength_ratio", "resistance_strength_ratio"
-        ])
-        
-        # === ORDER BOOK IMBALANCE (стакан заявок) ===
-        # В исторических данных нет стакана — заполняем 0 (нейтрально).
-        # В live можно подставить реальное значение через set_orderbook_imbalance_last_row().
-        df["ob_imbalance"] = 0.0
-        df["ob_imbalance_5"] = 0.0
-        df["ob_imbalance_20"] = 0.0
-        
-        # === 11. ОБРАБОТКА NaN ===
-        
-        # Сначала forward fill, потом backward fill
-        df = df.ffill().bfill()
-        
-        # Заполняем оставшиеся NaN нулями
-        df = df.fillna(0)
-        # Восстанавливаем типы после fillna
-        df = df.infer_objects()
-        
-        # Удаляем строки где основные цены NaN
-        price_cols = ["open", "high", "low", "close"]
-        df = df.dropna(subset=price_cols, how='any')
-        
-        # Сохраняем имена фичей
-        original_cols = ["open", "high", "low", "close", "volume", "timestamp"]
-        self.feature_names = [col for col in df.columns if col not in original_cols]
-        
-        # Логирование отключено для производительности (вызывается тысячи раз в бэктесте)
-        # Раскомментируйте для отладки:
-        # if not hasattr(self, '_features_logged'):
-        #     print(f"[INFO] Создано {len(self.feature_names)} фичей (включая новые: волатильность, микроструктура, паттерны, S/R)")
-        #     self._features_logged = True
-        
-        return df
-    
-    def add_mtf_features(
-        self,
-        df_features: pd.DataFrame,
-        higher_timeframes: Dict[str, pd.DataFrame],
-    ) -> pd.DataFrame:
-        """
-        Упрощенная версия добавления MTF фичей.
-        """
-        if not higher_timeframes or df_features is None or df_features.empty:
+            out[f"close_lag_{lag}"] = out["close"].shift(lag)
+            out[f"volume_lag_{lag}"] = out["volume"].shift(lag)
+            out[f"price_change_lag_{lag}"] = out["price_change"].shift(lag)
+
+        out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+
+        base_cols = {"open", "high", "low", "close", "volume", "timestamp"}
+        self.feature_names = [c for c in out.columns if c not in base_cols]
+        return out
+
+    def add_mtf_features(self, df_features: pd.DataFrame, higher_timeframes: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        if df_features is None or df_features.empty or not higher_timeframes:
             return df_features
-        
-        df = df_features.copy()
-        
-        # Базовые фичи для MTF (гарантированно работающие)
-        mtf_features = ["rsi", "atr_pct", "adx", "volume_ratio"]
-        
+        out = df_features.copy()
         for tf_name, htf_df in higher_timeframes.items():
             if htf_df is None or htf_df.empty:
                 continue
-            
-            try:
-                # Вычисляем фичи для HTF
-                # ВАЖНО: Сначала проверяем и очищаем входные данные от None
-                htf_df_clean = htf_df.copy()
-                # Заполняем все None/NaN в OHLCV перед созданием фичей
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    if col in htf_df_clean.columns:
-                        htf_df_clean[col] = htf_df_clean[col].fillna(0.0)
-                        # Заменяем None на 0.0
-                        htf_df_clean[col] = htf_df_clean[col].replace([None], 0.0)
-                
-                fe_htf = FeatureEngineer()
-                htf_with_features = fe_htf.create_technical_indicators(htf_df_clean)
-                
-                if htf_with_features is None or htf_with_features.empty:
-                    continue
-                
-                # Дополнительная очистка: заменяем все None на 0.0 во всех колонках
-                htf_with_features = htf_with_features.fillna(0.0)
-                for col in htf_with_features.columns:
-                    htf_with_features[col] = htf_with_features[col].replace([None], 0.0)
-                
-                # Выбираем нужные фичи
-                for feature in mtf_features:
-                    if feature in htf_with_features.columns:
-                        col_name = f"{feature}_{tf_name}"
-                        htf_series = htf_with_features[feature].copy()
-                        
-                        # Заполняем NaN перед использованием
-                        htf_series = htf_series.fillna(0.0)
-                        
-                        # Ресемплируем на базовый ТФ
-                        if isinstance(df.index, pd.DatetimeIndex) and isinstance(htf_series.index, pd.DatetimeIndex):
-                            # Переиндексируем с forward fill
-                            try:
-                                htf_aligned = htf_series.reindex(df.index, method='ffill')
-                                # Заполняем оставшиеся NaN
-                                htf_aligned = htf_aligned.fillna(0.0)
-                                df[col_name] = htf_aligned
-                            except Exception as e:
-                                print(f"[WARNING] Ошибка при реиндексации {col_name}: {e}")
-                                # Fallback: просто заполняем нулями
-                                df[col_name] = 0.0
-                        else:
-                            # Просто берем значения
-                            if len(htf_series) >= len(df):
-                                df[col_name] = htf_series.values[:len(df)]
-                            else:
-                                # Дополняем нулями если не хватает данных
-                                values = list(htf_series.values) + [0.0] * (len(df) - len(htf_series))
-                                df[col_name] = values[:len(df)]
-                        
-                        # Заполняем финальные NaN
-                        df[col_name] = df[col_name].fillna(0.0)
-                        
-                        if col_name not in self.feature_names:
-                            self.feature_names.append(col_name)
-                            
-            except Exception as e:
-                print(f"[WARNING] Ошибка при добавлении MTF фичей для {tf_name}: {e}")
-                continue
-        
-        # Заполняем NaN
-        df = df.ffill().bfill().fillna(0)
-        df = df.infer_objects()
-        
-        return df
-    
+            htf_feat = FeatureEngineer().create_technical_indicators(htf_df)
+            for col in ["rsi", "atr_pct", "adx", "volume_ratio"]:
+                if col in htf_feat.columns:
+                    src = htf_feat[col]
+                    if isinstance(out.index, pd.DatetimeIndex) and isinstance(src.index, pd.DatetimeIndex):
+                        out[f"{col}_{tf_name}"] = src.reindex(out.index, method="ffill").fillna(0.0)
+                    else:
+                        vals = list(src.values)
+                        if len(vals) < len(out):
+                            vals += [0.0] * (len(out) - len(vals))
+                        out[f"{col}_{tf_name}"] = vals[: len(out)]
+        out = out.ffill().bfill().fillna(0.0)
+        return out
+
     def create_target_variable(
         self,
         df: pd.DataFrame,
-        forward_periods: int = 4,  # 4 * 15m = 1 час
+        forward_periods: int = 4,
         threshold_pct: float = 0.5,
         use_atr_threshold: bool = True,
-        use_risk_adjusted: bool = False,  # ОТКЛЮЧЕНО для больше сигналов
+        use_risk_adjusted: bool = False,
         min_risk_reward_ratio: float = 1.5,
-        max_hold_periods: int = 96,  # 24 часа
+        max_hold_periods: int = 96,
         min_profit_pct: float = 0.3,
+        threshold: Optional[float] = None,
+        min_profit_for_signal: Optional[float] = None,
+        risk_reward_ratio: Optional[float] = None,
     ) -> pd.DataFrame:
-        """
-        ИСПРАВЛЕННАЯ версия создания целевой переменной.
-        """
+        _ = use_risk_adjusted, min_risk_reward_ratio, max_hold_periods, risk_reward_ratio
         if df is None or df.empty or "close" not in df.columns:
             return pd.DataFrame()
-        
-        df = df.copy()
-        
-        # 1. Базовое вычисление будущей цены
-        current_price = df["close"].values
-        future_idx = min(forward_periods, len(df) - 1)
-        
-        # Создаем массив будущих цен
+
+        out = df.copy()
+        if threshold is not None:
+            threshold_pct = float(threshold)
+        if min_profit_for_signal is not None:
+            min_profit_pct = float(min_profit_for_signal)
+
+        current_price = pd.to_numeric(out["close"], errors="coerce").fillna(0.0).values
         future_price = np.zeros_like(current_price)
         for i in range(len(current_price)):
             if i + forward_periods < len(current_price):
                 future_price[i] = current_price[i + forward_periods]
             else:
-                future_price[i] = current_price[-1]  # Последняя известная цена
-        
-        # 2. Процентное изменение
-        with np.errstate(divide='ignore', invalid='ignore'):
-            price_change_pct = np.where(
-                current_price > 0,
-                (future_price - current_price) / current_price * 100,
-                0
-            )
-        
-        # 3. Динамический порог на основе ATR
-        if use_atr_threshold and "atr_pct" in df.columns:
-            atr_pct = df["atr_pct"].values
-            dynamic_threshold = np.minimum(threshold_pct, atr_pct * 0.8)
+                future_price[i] = current_price[-1]
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            pct_change = np.where(current_price > 0, (future_price - current_price) / current_price * 100, 0.0)
+
+        if use_atr_threshold and "atr_pct" in out.columns:
+            dyn = np.minimum(float(threshold_pct), pd.to_numeric(out["atr_pct"], errors="coerce").fillna(0.0).values * 0.8)
         else:
-            dynamic_threshold = np.full(len(df), threshold_pct)
-        
-        # 4. Классификация (ПРОСТАЯ)
-        target = np.zeros(len(df), dtype=int)
-        
-        for i in range(len(df) - forward_periods):
-            change = price_change_pct[i]
-            threshold = dynamic_threshold[i]
-            
-            # LONG: прибыль больше порога И больше минимальной прибыли
-            if change > threshold and change >= min_profit_pct:
+            dyn = np.full(len(out), float(threshold_pct))
+
+        target = np.zeros(len(out), dtype=int)
+        for i in range(max(0, len(out) - forward_periods)):
+            ch = pct_change[i]
+            thr = dyn[i]
+            if ch > thr and ch >= float(min_profit_pct):
                 target[i] = 1
-            # SHORT: убыток больше порога И больше минимальной прибыли
-            elif change < -threshold and abs(change) >= min_profit_pct:
+            elif ch < -thr and abs(ch) >= float(min_profit_pct):
                 target[i] = -1
-        
-        df["target"] = target
-        
-        # 5. Удаляем последние forward_periods строк (где нет будущей цены)
-        if len(df) > forward_periods:
-            df = df.iloc[:-forward_periods]
-        
-        # 6. Анализ распределения
-        unique, counts = np.unique(target, return_counts=True)
-        print(f"[TARGET] Распределение классов:")
-        for val, cnt in zip(unique, counts):
-            pct = cnt / len(target) * 100
-            name = {1: "LONG", -1: "SHORT", 0: "HOLD"}.get(val, f"UNK({val})")
-            print(f"  {name}: {cnt} ({pct:.1f}%)")
-        
-        return df
-    
-    def set_orderbook_imbalance_last_row(
-        self, df: pd.DataFrame, ob_response: Dict[str, Any], depth: int = 10
-    ) -> None:
-        """
-        Заполняет Order Book Imbalance для последней строки DataFrame (для live).
-        Модифицирует df in-place.
-        
-        Args:
-            df: DataFrame с уже созданными фичами (должны быть колонки ob_imbalance, ob_imbalance_5, ob_imbalance_20).
-            ob_response: Ответ Bybit get_orderbook(symbol, limit=25 или больше).
-            depth: Глубина стакана для основного ob_imbalance (10); для ob_imbalance_5 и ob_imbalance_20 используются 5 и 20.
-        """
+
+        out["target"] = target
+        if len(out) > forward_periods:
+            out = out.iloc[:-forward_periods]
+        return out
+
+    def set_orderbook_imbalance_last_row(self, df: pd.DataFrame, ob_response: Dict[str, Any], depth: int = 10) -> None:
         if df is None or df.empty:
             return
-        imb = compute_orderbook_imbalance(ob_response, depth=depth)
-        imb_5 = compute_orderbook_imbalance(ob_response, depth=5)
-        imb_20 = compute_orderbook_imbalance(ob_response, depth=20)
+        main = compute_orderbook_imbalance(ob_response, depth=depth)
+        d5 = compute_orderbook_imbalance(ob_response, depth=5)
+        d20 = compute_orderbook_imbalance(ob_response, depth=20)
         if "ob_imbalance" in df.columns:
-            df.iloc[-1, df.columns.get_loc("ob_imbalance")] = imb
+            df.iloc[-1, df.columns.get_loc("ob_imbalance")] = main
         if "ob_imbalance_5" in df.columns:
-            df.iloc[-1, df.columns.get_loc("ob_imbalance_5")] = imb_5
+            df.iloc[-1, df.columns.get_loc("ob_imbalance_5")] = d5
         if "ob_imbalance_20" in df.columns:
-            df.iloc[-1, df.columns.get_loc("ob_imbalance_20")] = imb_20
-    
+            df.iloc[-1, df.columns.get_loc("ob_imbalance_20")] = d20
+
     def get_feature_names(self) -> List[str]:
-        """Возвращает список названий всех созданных фичей."""
         return self.feature_names.copy()
-    
+
     def prepare_features_for_ml(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Подготавливает данные для обучения ML-модели.
-        """
         if df is None or df.empty:
             return np.array([]), np.array([])
-        
-        # Выбираем только фичи (исключаем исходные колонки и target)
-        exclude_cols = ["open", "high", "low", "close", "volume", "timestamp", "target"]
-        feature_cols = [col for col in df.columns if col not in exclude_cols]
-        
-        # Если нет фичей, создаем простые
+        exclude = {"open", "high", "low", "close", "volume", "timestamp", "target"}
+        feature_cols = [c for c in df.columns if c not in exclude]
         if not feature_cols:
             feature_cols = ["sma_20", "rsi", "atr_pct", "price_change"]
-        
-        X = df[feature_cols].values if feature_cols else np.zeros((len(df), 1))
+            for col in feature_cols:
+                if col not in df.columns:
+                    df[col] = 0.0
+        X = df[feature_cols].values
         y = df["target"].values if "target" in df.columns else np.zeros(len(df))
-        
-        print(f"[ML PREP] X shape: {X.shape}, y shape: {y.shape}")
-        
+        self.feature_names = feature_cols
         return X, y

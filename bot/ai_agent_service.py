@@ -1,88 +1,69 @@
-import os
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-import asyncio
+import os
+import subprocess
+import sys
 import time
 import uuid
-from typing import Dict, Any, List, Optional
-from pathlib import Path
-from dotenv import load_dotenv
 from datetime import datetime, timezone
-
-logger = logging.getLogger(__name__)
-
-# Explicitly load .env to ensure keys are available
-env_path = Path(__file__).resolve().parent.parent / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path, override=True)
-else:
-    logger.warning(f".env file not found at {env_path}")
-
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
-    logger.warning("OpenAI library not installed. AI Agent features will be disabled. Run 'pip install openai'")
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 try:
     import requests
     HAS_REQUESTS = True
-except ImportError:
+except Exception:
+    requests = None
     HAS_REQUESTS = False
-    logger.warning("requests library not installed. AI Agent features will be disabled. Run 'pip install requests'")
 
-try:
-    from supabase import create_client, Client
-    HAS_SUPABASE = True
-except ImportError:
-    HAS_SUPABASE = False
-    logger.warning("Supabase library not installed. Chat history will not be saved. Run 'pip install supabase'")
+from .experiment_management import (
+    ExperimentAnalyzer,
+    ExperimentCriteria,
+    ExperimentStore,
+    HypothesisGenerator,
+    build_param_signature,
+    build_regime_plan_context,
+    derive_market_regime_from_metrics,
+    get_code_version,
+)
+
+logger = logging.getLogger(__name__)
+
 
 class AIAgentService:
-    def __init__(self, api_key: str = None, model: str = "anthropic/claude-3.5-sonnet"):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
-        self.model = model
-        self.base_url = "https://openrouter.ai/api/v1"
-        self.client = None
-        self.http_timeout_s = float(os.getenv("OPENROUTER_HTTP_TIMEOUT_S", "30"))
-        
-        # Supabase setup
-        self.supabase: Optional[Client] = None
-        self.supabase_url = os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("SUPABASE_KEY")
-        
-        self._init_supabase()
-        self.research_processes: Dict[str, Any] = {}
+    def __init__(self):
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        self.model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        self.research_processes: Dict[str, subprocess.Popen] = {}
+        self.risk_state_file = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
 
-        # Debug logging for API Key (masked)
-        if self.api_key:
-            masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}"
-            logger.info(f"AI Agent: API Key found ({masked_key})")
-        else:
-            logger.warning("AI Agent: API Key NOT found in environment or arguments")
+    def _load_risk_state(self) -> Dict[str, Any]:
+        try:
+            if self.risk_state_file.exists():
+                with open(self.risk_state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
 
-        if self.api_key and HAS_REQUESTS:
-            logger.info(f"AI Agent initialized with model: {self.model}")
-        elif not HAS_REQUESTS:
-            logger.warning("AI Agent disabled: requests module missing")
-        else:
-            logger.warning("AI Agent initialized without API Key. Analysis will be disabled.")
-        
-        if self.api_key and HAS_OPENAI:
-            try:
-                self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-            except Exception as e:
-                self.client = None
-                logger.error(f"AI Agent: failed to initialize OpenAI client: {e}")
+    def _save_risk_state(self, data: Dict[str, Any]) -> None:
+        try:
+            with open(self.risk_state_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            logger.exception("Failed to save AI risk state")
 
-    def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int, temperature: float) -> str:
+    def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int = 800, temperature: float = 0.2) -> str:
         if not self.api_key:
             raise RuntimeError("OPENROUTER_API_KEY is not configured")
         if not HAS_REQUESTS:
-            raise RuntimeError("requests is not installed")
-
-        url = f"{self.base_url}/chat/completions"
+            raise RuntimeError("requests package is not available")
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -90,289 +71,120 @@ class AIAgentService:
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": int(max_tokens),
-            "temperature": float(temperature),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
         }
-        r = requests.post(url, headers=headers, json=payload, timeout=self.http_timeout_s)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("OpenRouter returned no choices")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise RuntimeError("OpenRouter returned invalid content")
+        return content
 
-    def _init_supabase(self):
-        """Attempts to initialize Supabase client."""
-        if self.supabase:
-            return
-
-        # Reload env vars to be sure
-        self.supabase_url = self.supabase_url or os.getenv("SUPABASE_URL")
-        self.supabase_key = self.supabase_key or os.getenv("SUPABASE_KEY")
-
-        if HAS_SUPABASE and self.supabase_url and self.supabase_key:
-            try:
-                self.supabase = create_client(self.supabase_url, self.supabase_key)
-                logger.info("Supabase client initialized.")
-            except Exception as e:
-                logger.error(f"Failed to initialize Supabase: {e}")
-        else:
-             # Only log if we have partial config to avoid noise if user doesn't want supabase
-             if self.supabase_url or self.supabase_key:
-                 logger.warning(f"Supabase init skipped: HAS_SUPABASE={HAS_SUPABASE}, URL={bool(self.supabase_url)}, KEY={bool(self.supabase_key)}")
-
-    def _load_risk_state(self) -> Dict[str, Any]:
-        """Loads the last risk analysis state from file."""
-        state_path = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
-        if state_path.exists():
-            try:
-                with open(state_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Failed to load risk state: {e}")
-        return {}
-
-    def _save_risk_state(self, state: Dict[str, Any]):
-        """Saves the risk analysis state to file."""
-        state_path = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
-        try:
-            with open(state_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save risk state: {e}")
-
-    def get_risk_history(self) -> List[Dict[str, Any]]:
-        """Returns the history of risk setting changes."""
+    async def analyze_risk_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         state = self._load_risk_state()
-        history = state.get("history", [])
-        # Sort by timestamp descending (newest first)
-        return sorted(history, key=lambda x: x.get("timestamp", ""), reverse=True)
-
-    def on_risk_settings_updated(self, current_trades_count: int, old_settings: Dict[str, Any] = None, new_settings: Dict[str, Any] = None):
-        """Called when risk settings are updated by user."""
-        from datetime import datetime
-        state = self._load_risk_state()
-        
-        # Update last update info
-        state["last_update_trade_count"] = current_trades_count
-        state["last_update_time"] = datetime.now().isoformat()
-        state["status"] = "monitoring"
-        
-        # Record history
-        if old_settings and new_settings:
-            changes = {}
-            for k, v in new_settings.items():
-                if k in old_settings and old_settings[k] != v:
-                    changes[k] = {"old": old_settings[k], "new": v}
-            
-            if changes:
-                history_entry = {
-                    "timestamp": state["last_update_time"],
-                    "trade_count": current_trades_count,
-                    "changes": changes,
-                    "full_snapshot": new_settings
-                }
-                
-                if "history" not in state:
-                    state["history"] = []
-                
-                # Keep last 20 changes
-                state["history"].append(history_entry)
-                if len(state["history"]) > 20:
-                    state["history"] = state["history"][-20:]
-                    
-        self._save_risk_state(state)
-        logger.info(f"AI Risk Agent: Entered monitoring mode at trade count {current_trades_count}. Changes recorded: {len(changes) if 'changes' in locals() else 0}")
-
-    async def analyze_risk_settings(self, trades: List[Dict[str, Any]], current_risk: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Анализирует историю сделок и текущие настройки риска.
-        Предлагает оптимизации.
-        """
         if not self.api_key:
             return {
                 "analysis": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
                 "suggestions": [],
                 "risk_score": 0,
-                "status": "unavailable",
             }
         if not HAS_REQUESTS:
             return {
                 "analysis": "AI Agent недоступен: пакет requests не установлен в окружении.",
                 "suggestions": [],
                 "risk_score": 0,
-                "status": "unavailable",
             }
-
-        # Check monitoring status
-        state = self._load_risk_state()
-        last_count = state.get("last_update_trade_count", 0)
-        current_count = len(trades)
-        
-        # Minimum trades required to evaluate new settings
-        MIN_TRADES_TO_EVALUATE = 10 
-        
-        trades_diff = current_count - last_count
-        
-        if trades_diff < MIN_TRADES_TO_EVALUATE and state.get("status") == "monitoring":
-            remaining = MIN_TRADES_TO_EVALUATE - trades_diff
-            return {
-                "analysis": f"Настройки были недавно изменены. Агент наблюдает за результатами. Необходимо еще {remaining} сделок для нового анализа.",
-                "suggestions": [],
-                "risk_score": 85, # Neutral score while waiting
-                "status": "monitoring",
-                "progress": trades_diff / MIN_TRADES_TO_EVALUATE
-            }
-
-        # Prepare context
-        recent_trades = trades[-50:] if len(trades) > 50 else trades
-        trades_summary = []
-        for t in recent_trades:
-            trades_summary.append({
-                "symbol": t.get("symbol"),
-                "side": t.get("side"),
-                "pnl": t.get("pnl_usd"),
-                "exit_reason": t.get("exit_reason", "unknown"),
-                "duration": t.get("duration_minutes", 0)
-            })
-            
-        # Prepare history context
-        history_context = ""
-        if "history" in state and state["history"]:
-            history_context = "История изменений настроек (последние 5):\n"
-            for entry in state["history"][-5:]:
-                changes_str = ", ".join([f"{k}: {v['old']} -> {v['new']}" for k, v in entry["changes"].items()])
-                history_context += f"- Trade #{entry['trade_count']}: {changes_str}\n"
-        
-        prompt = f"""
-        Ты — профессиональный риск-менеджер в алгоритмическом трейдинге.
-        
-        Твоя задача: проанализировать последние 50 сделок бота и текущие настройки риска.
-        Если ты видишь системные проблемы (серия убытков, слишком большие просадки, ранние выходы), предложи изменения в настройках.
-        
-        Текущие настройки риска (JSON):
-        {json.dumps(current_risk, indent=2)}
-        
-        {history_context}
-        
-        История сделок (JSON, последние 50):
-        {json.dumps(trades_summary, indent=2)}
-        
-        Ответь строго в формате JSON:
-        {{
-            "analysis": "Твое текстовое резюме анализа (макс 100 слов). Учитывай историю изменений, если она есть.",
-            "suggestions": [
-                {{
-                    "setting_key": "stop_loss_pct",
-                    "current_value": 0.015,
-                    "suggested_value": 0.02,
-                    "reason": "Высокая волатильность выбивает стопы слишком часто."
-                }}
-            ],
-            "risk_score": 75 (0-100, где 100 - безопасно, 0 - критический риск)
-        }}
-        Не добавляй никакого текста до или после JSON.
-        """
-
+        prompt = (
+            "Ты AI риск-аналитик для крипто-бота. Оцени настройки риска и историю изменений. "
+            "Верни строго JSON с полями analysis, suggestions, risk_score.\n\n"
+            f"PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}\n\n"
+            f"STATE:\n{json.dumps(state, ensure_ascii=False)}"
+        )
         try:
             loop = asyncio.get_event_loop()
-            
-            # Simple retry mechanism
             max_retries = 3
             last_exception = None
-            
             for attempt in range(max_retries):
                 try:
                     content = await loop.run_in_executor(
                         None,
                         lambda: self._openrouter_chat(
                             messages=[
-                                {"role": "system", "content": "You are an expert algorithmic trading risk manager. Output valid JSON only."},
+                                {"role": "system", "content": "You are an expert risk analyst. Output valid JSON only."},
                                 {"role": "user", "content": prompt},
                             ],
-                            max_tokens=1000,
-                            temperature=0.1,
+                            max_tokens=600,
+                            temperature=0.2,
                         ),
                     )
-                    # Clean up potential markdown blocks
                     if "```json" in content:
                         content = content.split("```json")[1].split("```")[0].strip()
                     elif "```" in content:
                         content = content.split("```")[1].strip()
-                        
                     result = json.loads(content)
-                    
-                    # Save successful analysis to state for caching
                     state["last_analysis"] = result
                     self._save_risk_state(state)
-                    
                     return result
-                    
                 except Exception as e:
                     last_exception = e
-                    logger.warning(f"AI Risk Analysis attempt {attempt+1} failed: {e}")
-                    await asyncio.sleep(1) # Wait a bit before retry
-            
-            # If all retries failed, try to return cached analysis
+                    logger.warning(f"AI Risk Analysis attempt {attempt + 1} failed: {e}")
+                    await asyncio.sleep(1)
             if "last_analysis" in state:
-                logger.info("Returning cached risk analysis due to API failure")
                 cached = state["last_analysis"]
-                # Append a note about cache
                 cached["analysis"] = f"[OFFLINE MODE] {cached.get('analysis', '')} (Cached data)"
                 return cached
-                
             raise last_exception
-            
         except Exception as e:
             logger.error(f"AI Risk Analysis failed after retries: {e}")
             return {
                 "analysis": f"Ошибка анализа: {str(e)}. Проверьте настройки прокси/VPN.",
                 "suggestions": [],
-                "risk_score": 0
+                "risk_score": 0,
             }
 
     async def analyze_market_sentiment(self, symbol: str, kline_data: List[Dict[str, Any]], indicators: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Анализирует рыночные данные и дает комментарий по ситуации.
-        """
         if not self.api_key:
             return {
                 "trend": "neutral",
                 "volatility": "normal",
                 "advice": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
-                "confidence": 0
+                "confidence": 0,
             }
         if not HAS_REQUESTS:
             return {
                 "trend": "neutral",
                 "volatility": "normal",
                 "advice": "AI Agent недоступен: пакет requests не установлен в окружении.",
-                "confidence": 0
+                "confidence": 0,
             }
-            
         prompt = f"""
         Ты — AI трейдер. Проанализируй рынок {symbol} на основе свечей и индикаторов.
-        
+
         Последние 20 свечей (OHLCV):
         {json.dumps(kline_data[-20:], indent=2)}
-        
+
         Текущие индикаторы:
         {json.dumps(indicators, indent=2)}
-        
+
         Дай краткую сводку по рынку.
         Ответь строго в формате JSON:
         {{
             "trend": "bullish" | "bearish" | "sideways",
             "volatility": "high" | "low" | "normal",
-            "advice": "Твой совет (например: 'Лучше воздержаться от лонгов, ждем пробоя уровня').",
+            "advice": "Твой совет.",
             "confidence": 0.85
         }}
         """
-
         try:
             loop = asyncio.get_event_loop()
-            
-            # Simple retry mechanism
             max_retries = 3
             last_exception = None
-            
             for attempt in range(max_retries):
                 try:
                     content = await loop.run_in_executor(
@@ -386,27 +198,23 @@ class AIAgentService:
                             temperature=0.2,
                         ),
                     )
-                     # Clean up potential markdown blocks
                     if "```json" in content:
                         content = content.split("```json")[1].split("```")[0].strip()
                     elif "```" in content:
                         content = content.split("```")[1].strip()
-        
                     return json.loads(content)
                 except Exception as e:
                     last_exception = e
-                    logger.warning(f"AI Market Analysis attempt {attempt+1} failed: {e}")
+                    logger.warning(f"AI Market Analysis attempt {attempt + 1} failed: {e}")
                     await asyncio.sleep(1)
-            
             raise last_exception
-            
         except Exception as e:
             logger.error(f"AI Market Analysis failed: {e}")
             return {
                 "trend": "neutral",
                 "volatility": "normal",
                 "advice": f"Ошибка анализа: {str(e)}",
-                "confidence": 0
+                "confidence": 0,
             }
 
     def validate_confirm_entry_request(self, payload: Dict[str, Any]) -> None:
@@ -429,7 +237,6 @@ class AIAgentService:
             raise ValueError("bot_context must be an object")
         if not isinstance(payload.get("market_context"), dict):
             raise ValueError("market_context must be an object")
-
         s = payload["signal"]
         for k in ("action", "price"):
             if k not in s:
@@ -441,518 +248,535 @@ class AIAgentService:
 
     async def confirm_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.validate_confirm_entry_request(payload)
-
-        decision_id = payload.get("request_id") or str(uuid.uuid4())
-        now_utc = datetime.now(timezone.utc).isoformat()
-
-        force_fallback = bool(payload.get("bot_context", {}).get("ai_fallback_policy", {}).get("force_enabled", False))
-        llm_available = bool(self.api_key) and HAS_REQUESTS
-
-        if force_fallback or not llm_available:
-            try:
-                ob = payload.get("market_context", {}).get("orderbook", {})
-                tr = payload.get("market_context", {}).get("recent_trades", {})
-                pol = payload.get("bot_context", {}).get("ai_fallback_policy", {})
-                spread_pct = ob.get("spread_pct")
-                bid_vol_5 = ob.get("bid_vol_5")
-                ask_vol_5 = ob.get("ask_vol_5")
-                imbalance_20 = ob.get("imbalance_20")
-                buy_sell_ratio = tr.get("buy_sell_ratio")
-                spread_reduce_pct = pol.get("spread_reduce_pct", 0.10)
-                spread_veto_pct = pol.get("spread_veto_pct", 0.25)
-                min_depth_usd_5 = pol.get("min_depth_usd_5", 0.0)
-                imbalance_abs_reduce = pol.get("imbalance_abs_reduce", 0.60)
-                orderflow_ratio_low = pol.get("orderflow_ratio_low", 0.40)
-                orderflow_ratio_high = pol.get("orderflow_ratio_high", 2.50)
-
-                if force_fallback:
-                    reason_codes: List[str] = ["FORCED_FALLBACK"]
-                elif not llm_available:
-                    reason_codes = ["AI_UNAVAILABLE"]
-                else:
-                    reason_codes = ["AI_UNAVAILABLE"]
-                size_multiplier = 1.0
-                decision = "allow"
-
-                if isinstance(spread_pct, (int, float)):
-                    if spread_pct >= float(spread_veto_pct):
-                        decision = "veto"
-                        reason_codes.append("SPREAD_TOO_WIDE")
-                    elif spread_pct >= float(spread_reduce_pct):
-                        decision = "reduce"
-                        size_multiplier = min(size_multiplier, 0.25)
-                        reason_codes.append("SPREAD_WIDE")
-                else:
-                    reason_codes.append("SPREAD_UNKNOWN")
-
-                if isinstance(bid_vol_5, (int, float)) and isinstance(ask_vol_5, (int, float)):
-                    if (bid_vol_5 + ask_vol_5) <= float(min_depth_usd_5):
-                        decision = "reduce" if decision != "veto" else decision
-                        size_multiplier = min(size_multiplier, 0.25)
-                        reason_codes.append("LOW_DEPTH")
-                else:
-                    reason_codes.append("DEPTH_UNKNOWN")
-
-                if isinstance(imbalance_20, (int, float)):
-                    if imbalance_20 <= -float(imbalance_abs_reduce) or imbalance_20 >= float(imbalance_abs_reduce):
-                        decision = "reduce" if decision != "veto" else decision
-                        size_multiplier = min(size_multiplier, 0.50)
-                        reason_codes.append("IMBALANCE_EXTREME")
-                else:
-                    reason_codes.append("IMBALANCE_UNKNOWN")
-
-                if isinstance(buy_sell_ratio, (int, float)):
-                    if buy_sell_ratio <= float(orderflow_ratio_low) or buy_sell_ratio >= float(orderflow_ratio_high):
-                        decision = "reduce" if decision != "veto" else decision
-                        size_multiplier = min(size_multiplier, 0.50)
-                        reason_codes.append("ORDERFLOW_SKEW")
-                else:
-                    reason_codes.append("ORDERFLOW_UNKNOWN")
-
-                if decision == "reduce" and size_multiplier >= 1.0:
-                    size_multiplier = 0.25
-
-                return {
-                    "decision": decision,
-                    "confidence": 0.0,
-                    "risk_score": 50 if decision != "veto" else 25,
-                    "size_multiplier": float(size_multiplier),
-                    "reason_codes": reason_codes,
-                    "notes": "Offline fallback decision",
-                    "decision_id": decision_id,
-                    "timestamp_utc": now_utc,
-                    "latency_ms": 0,
-                }
-            except Exception:
-                return {
-                    "decision": "allow",
-                    "confidence": 0.0,
-                    "risk_score": 50,
-                    "size_multiplier": 1.0,
-                    "reason_codes": ["AI_UNAVAILABLE", "FALLBACK_ERROR"],
-                    "notes": "AI Agent not configured",
-                    "decision_id": decision_id,
-                    "timestamp_utc": now_utc,
-                    "latency_ms": 0,
-                }
-
-        prompt = f"""
-Ты — риск-менеджер и трейдер по крипторынку. Твоя задача: подтвердить или запретить вход по сигналу ML.
-
-Контекст (JSON):
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-
-Ответь строго валидным JSON без markdown и без текста до/после.
-Правила выбора:
-- decision="allow": вход нормального качества.
-- decision="reduce": вход допустим, но есть риск исполнения/ликвидности/шума; тогда size_multiplier должен быть одним из [0.1, 0.25, 0.5].
-- decision="veto": вход нельзя открывать (критический риск).
-- Ориентируйся на orderbook.spread_pct, глубину bid_vol_5/ask_vol_5, imbalance_20 и recent_trades.buy_sell_ratio.
-- Если данных мало или они противоречивы — выбирай reduce (не veto).
-Формат ответа:
-{{
-  "decision": "allow" | "reduce" | "veto",
-  "confidence": 0.0,
-  "risk_score": 0,
-  "size_multiplier": 1.0,
-  "reason_codes": ["..."],
-  "notes": "Коротко (до 30 слов)"
-}}
-"""
-
-        loop = asyncio.get_event_loop()
-        max_retries = 3
-        last_exception = None
-        started = time.time()
-
-        for attempt in range(max_retries):
-            try:
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: self._openrouter_chat(
-                        messages=[
-                            {"role": "system", "content": "You are an expert crypto trading risk manager. Output valid JSON only."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        max_tokens=600,
-                        temperature=0.1,
-                    )
-                )
-                content = response
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0].strip()
-                elif "```" in content:
-                    content = content.split("```")[1].strip()
-                result = json.loads(content)
-                if not isinstance(result, dict):
-                    raise ValueError("AI response is not an object")
-                decision = result.get("decision")
-                if decision == "allow_reduced":
-                    decision = "reduce"
-                    result["decision"] = "reduce"
-                if decision not in ("allow", "reduce", "veto"):
-                    raise ValueError("AI response decision must be allow, reduce, or veto")
-
-                latency_ms = int((time.time() - started) * 1000)
-                result["decision_id"] = decision_id
-                result["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
-                result["latency_ms"] = latency_ms
-                if "reason_codes" not in result or not isinstance(result["reason_codes"], list):
-                    result["reason_codes"] = []
-                if "confidence" not in result:
-                    result["confidence"] = 0.0
-                if "risk_score" not in result:
-                    result["risk_score"] = 50
-                if "size_multiplier" not in result:
-                    result["size_multiplier"] = 1.0
-                try:
-                    result["size_multiplier"] = float(result["size_multiplier"])
-                except Exception:
-                    result["size_multiplier"] = 1.0
-                if result["size_multiplier"] <= 0:
-                    result["size_multiplier"] = 1.0
-                if result.get("decision") == "reduce":
-                    allowed = (0.1, 0.25, 0.5)
-                    if result["size_multiplier"] not in allowed:
-                        result["size_multiplier"] = 0.25
-                else:
-                    if result["size_multiplier"] > 2.0:
-                        result["size_multiplier"] = 2.0
-                if "notes" not in result:
-                    result["notes"] = ""
-                return result
-            except Exception as e:
-                last_exception = e
-                logger.warning(f"AI confirm_entry attempt {attempt+1} failed: {e}")
-                await asyncio.sleep(1)
-
-        logger.error(f"AI confirm_entry failed: {last_exception}")
-        return {
-            "decision": "allow",
-            "confidence": 0.0,
-            "risk_score": 50,
-            "size_multiplier": 1.0,
-            "reason_codes": ["AI_ERROR"],
-            "notes": f"confirm_entry error: {str(last_exception)}",
-            "decision_id": decision_id,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "latency_ms": int((time.time() - started) * 1000),
-        }
-
-    async def _get_chat_history(self, limit: int = 10) -> List[Dict[str, str]]:
-        """Retrieves chat history from Supabase."""
-        if not self.supabase:
-            return []
-        
-        try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: 
-                self.supabase.table("chat_messages")
-                .select("role, content")
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            # Reverse to chronological order
-            data = response.data
-            return data[::-1] if data else []
-        except Exception as e:
-            logger.warning(f"Failed to fetch chat history: {e}")
-            return []
-
-    async def _save_chat_message(self, role: str, content: str):
-        """Saves a chat message to Supabase."""
-        if not self.supabase:
-            self._init_supabase()
-            
-        if not self.supabase:
-            logger.warning("Supabase client not initialized, skipping save.")
-            return
-
-        logger.info(f"Saving chat message to Supabase: {role} - {content[:20]}...")
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: 
-                self.supabase.table("chat_messages")
-                .insert({"role": role, "content": content})
-                .execute()
-            )
-            logger.info("Chat message saved successfully.")
-        except Exception as e:
-            logger.error(f"Failed to save chat message: {e}", exc_info=True)
-
-    def _load_recent_candles(self, symbol: str, interval: str = "15m", limit: int = 24) -> str:
-        """Loads recent candle data from CSV in ml_data directory."""
-        try:
-            # Map interval to filename format
-            # Filename example: ADAUSDT_15_cache.csv
-            interval_map = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-            file_interval = interval_map.get(interval, "15")
-            
-            project_root = Path(__file__).resolve().parent.parent
-            ml_data_dir = project_root / "ml_data"
-            
-            # Try cache file first
-            cache_file = ml_data_dir / f"{symbol}_{file_interval}_cache.csv"
-            
-            target_file = None
-            if cache_file.exists():
-                target_file = cache_file
-            else:
-                # Try to find any file matching pattern
-                files = list(ml_data_dir.glob(f"{symbol}_{file_interval}_*.csv"))
-                if files:
-                    # Sort by modification time, newest first
-                    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                    target_file = files[0]
-            
-            if not target_file:
-                return f"No historical data found for {symbol} ({interval})"
-                
-            # Read last N lines
-            lines = []
-            with open(target_file, "r", encoding="utf-8") as f:
-                # Read header
-                header = f.readline().strip()
-                # Read all lines
-                all_lines = f.readlines()
-                
-            last_lines = all_lines[-limit:] if len(all_lines) > limit else all_lines
-            
-            data_str = f"Market Data ({symbol} {interval}, last {len(last_lines)} candles):\n"
-            data_str += header + "\n"
-            data_str += "".join(last_lines)
-            
-            return data_str
-            
-        except Exception as e:
-            logger.error(f"Error loading candles for {symbol}: {e}")
-            return f"Error loading data: {str(e)}"
-
-    def _get_models_info(self) -> str:
-        """
-        Collects information about available ML models and their performance.
-        """
-        try:
-            project_root = Path(__file__).resolve().parent.parent
-            models_dir = project_root / "ml_models"
-            
-            info = "=== ML Models Information ===\n"
-            
-            # 1. List available model files
-            if models_dir.exists():
-                model_files = list(models_dir.glob("*.pkl"))
-                info += f"Available Model Files ({len(model_files)}):\n"
-                for mf in model_files[:10]: # Limit to 10 to avoid huge prompt
-                    info += f"- {mf.name}\n"
-                if len(model_files) > 10:
-                    info += f"... and {len(model_files) - 10} more.\n"
-            else:
-                info += "Models directory (ml_models) not found.\n"
-            
-            # 2. Get active models from runtime state
-            state_path = project_root / "runtime_state.json"
-            if state_path.exists():
-                try:
-                    with open(state_path, "r", encoding="utf-8") as f:
-                        state = json.load(f)
-                        active_models = state.get("symbol_models", {})
-                        if active_models:
-                            info += "\nActive Models (Currently Used):\n"
-                            for sym, model_path in active_models.items():
-                                info += f"- {sym}: {Path(model_path).name}\n"
-                except Exception as e:
-                    info += f"Error reading runtime state: {e}\n"
-            
-            # 3. Get performance metrics from analysis results
-            analysis_path = project_root / "analysis_results.json"
-            if analysis_path.exists():
-                try:
-                    with open(analysis_path, "r", encoding="utf-8") as f:
-                        analysis = json.load(f)
-                        recommendations = analysis.get("recommendations", {})
-                        
-                        info += "\nRecent Performance Analysis (Backtest/Live):\n"
-                        for sym, data in recommendations.items():
-                            best_mtf = data.get("best_mtf_actual", {})
-                            if best_mtf:
-                                pnl = best_mtf.get("pnl", 0)
-                                wr = best_mtf.get("wr", 0)
-                                info += f"- {sym}: Best MTF Model -> PnL: {pnl:.2f}%, WinRate: {wr:.1f}%\n"
-                                info += f"  (Model 1H: {best_mtf.get('model_1h')}, Model 15M: {best_mtf.get('model_15m')})\n"
-                            
-                            # Also check single models if MTF not available or for context
-                            best_single = data.get("best_single_15m", {})
-                            if best_single:
-                                info += f"  (Best Single 15m: {best_single.get('model')} -> PnL: {best_single.get('pnl',0):.2f}%, WR: {best_single.get('wr',0):.1f}%)\n"
-                except Exception as e:
-                    info += f"Error reading analysis results: {e}\n"
-            
-            return info + "\n"
-        except Exception as e:
-            logger.error(f"Error getting models info: {e}")
-            return "Error retrieving models information.\n"
-
-    async def chat_with_user(self, message: str, context: Dict[str, Any], logs: List[str]) -> str:
-        """
-        Handles chat interaction with the user.
-        """
         if not self.api_key:
-            return "AI Agent is not configured (OPENROUTER_API_KEY missing)."
+            return {
+                "decision": "REJECT",
+                "confidence": 0.0,
+                "reason": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
+                "risk_flags": ["ai_unavailable"],
+                "tp_adjustment": None,
+                "sl_adjustment": None,
+            }
         if not HAS_REQUESTS:
-            return "AI Agent is not configured (requests missing)."
-
-        # 1. Save user message (fire and forget task to speed up response, or await if consistency needed)
-        # We await it to ensure order if messages come fast
-        await self._save_chat_message("user", message)
-
-        # 2. Get history
-        history = await self._get_chat_history(limit=10)
-        
-        # Format history for prompt
-        history_str = ""
-        if history:
-            history_str = "История диалога:\n"
-            for msg in history:
-                history_str += f"{msg['role'].upper()}: {msg['content']}\n"
-        
-        # Check for symbol in message (simple regex)
-        import re
-        symbol_match = re.search(r'\b([A-Z0-9]+USDT)\b', message.upper())
-        market_context = ""
-        
-        if symbol_match:
-            symbol = symbol_match.group(1)
-            # Load 15m and 1h data
-            data_15m = self._load_recent_candles(symbol, "15m", limit=15)
-            data_1h = self._load_recent_candles(symbol, "1h", limit=15)
-            market_context = f"\n=== Market Data for {symbol} (CSV History) ===\n{data_15m}\n{data_1h}\n"
-        else:
-            # If no symbol found but user asks about market/candles, give a hint
-            keywords = ["СВЕЧ", "CANDLE", "MARKET", "РЫНОК", "ЦЕНА", "PRICE", "ПРОГНОЗ", "FORECAST", "ANALYSIS", "АНАЛИЗ"]
-            if any(k in message.upper() for k in keywords):
-                market_context = "\n[SYSTEM NOTE: User asked about market/candles but didn't provide a symbol. Tell them you can analyze it if they provide a pair like BTCUSDT.]\n"
-        
-        log_text = "".join(logs)
-        context_str = json.dumps(context, indent=2, default=str)
-        
-        # Get models info
-        models_info = self._get_models_info()
-
-        prompt = f"""
-        Ты — умный ассистент торгового бота.
-        Твоя цель: помогать пользователю понимать, что происходит с ботом, анализировать логи и давать советы.
-        
-        ВАЖНО: У тебя ЕСТЬ доступ к историческим данным свечей (CSV), если пользователь укажет конкретную торговую пару (например, BTCUSDT).
-        Если пользователь спрашивает, есть ли у тебя доступ к данным свечей, отвечай: "Да, я могу загрузить и проанализировать данные свечей, если вы укажете конкретную пару (например, BTCUSDT)".
-        
-        ТАКЖЕ ВАЖНО: У тебя есть информация о ML моделях и их эффективности.
-        {models_info}
-        
-        Контекст бота:
-        {context_str}
-        
-        Последние логи:
-        {log_text}
-        
-        {market_context}
-        
-        {history_str}
-        
-        Вопрос пользователя:
-        {message}
-        
-        Отвечай кратко, по делу и на русском языке. 
-        Если пользователь спрашивает о рынке или прогнозе по конкретной паре, используй предоставленные исторические данные (Market Data) для анализа тренда и волатильности.
-        Если видишь ошибку в логах, объясни её простыми словами и предложи решение.
-        """
-        
+            return {
+                "decision": "REJECT",
+                "confidence": 0.0,
+                "reason": "AI Agent недоступен: пакет requests не установлен в окружении.",
+                "risk_flags": ["ai_unavailable"],
+                "tp_adjustment": None,
+                "sl_adjustment": None,
+            }
+        prompt = (
+            "Ты — AI фильтр входа для крипто-бота. Оцени вход и верни строго JSON с полями "
+            "decision, confidence, reason, risk_flags, tp_adjustment, sl_adjustment.\n\n"
+            f"PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}"
+        )
         try:
             loop = asyncio.get_event_loop()
-            ai_response = await loop.run_in_executor(
+            content = await loop.run_in_executor(
                 None,
                 lambda: self._openrouter_chat(
                     messages=[
-                        {"role": "system", "content": "You are a helpful trading bot assistant."},
+                        {"role": "system", "content": "You are an expert trading gatekeeper. Output valid JSON only."},
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=800,
-                    temperature=0.3,
+                    max_tokens=500,
+                    temperature=0.1,
                 ),
             )
-            
-            # 3. Save AI response
-            await self._save_chat_message("assistant", ai_response)
-            
-            return ai_response
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].strip()
+            result = json.loads(content)
+            decision = str(result.get("decision") or "REJECT").upper()
+            if decision not in {"APPROVE", "REJECT", "WAIT"}:
+                decision = "REJECT"
+            result["decision"] = decision
+            result["confidence"] = float(result.get("confidence") or 0.0)
+            if not isinstance(result.get("risk_flags"), list):
+                result["risk_flags"] = []
+            return result
         except Exception as e:
-            logger.error(f"Chat failed: {e}")
-            return f"Error: {str(e)}"
+            logger.error(f"AI confirm_entry failed: {e}")
+            return {
+                "decision": "REJECT",
+                "confidence": 0.0,
+                "reason": f"Ошибка AI анализа: {e}",
+                "risk_flags": ["ai_error"],
+                "tp_adjustment": None,
+                "sl_adjustment": None,
+            }
+
+    def _build_research_ai_plan(
+        self,
+        symbol: str,
+        experiment_type: str,
+        summary: Dict[str, Any],
+        impact: Dict[str, Any],
+        hypotheses: List[Dict[str, Any]],
+        regime_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        regime_context = regime_context if isinstance(regime_context, dict) else {}
+        plan_defaults = regime_context.get("plan_defaults") if isinstance(regime_context.get("plan_defaults"), dict) else {}
+        market_regime = regime_context.get("market_regime") if isinstance(regime_context.get("market_regime"), dict) else derive_market_regime_from_metrics(symbol)
+        regime_memory = regime_context.get("regime_memory") if isinstance(regime_context.get("regime_memory"), dict) else None
+
+        defaults: Dict[str, Any] = {
+            "interval": str(plan_defaults.get("interval") or "15m"),
+            "use_mtf": bool(plan_defaults.get("use_mtf", True)),
+            "safe_mode": bool(plan_defaults.get("safe_mode", True)),
+            "backtest_days": int(plan_defaults.get("backtest_days") or 7),
+            "experiment_description": f"AI-driven optimization run for {symbol}",
+            "hypothesis": "Уточнить параметры модели под текущую рыночную структуру с фокусом на рост PnL при контроле drawdown.",
+            "expected_outcome": "Рост total_pnl_pct при сопоставимом или меньшем max_drawdown_pct.",
+            "rationale": "План основан на предыдущих экспериментах и их метриках устойчивости.",
+            "param_changes": dict(plan_defaults.get("param_changes") or {}),
+            "hyperparams": dict(plan_defaults.get("hyperparams") or {}),
+            "next_experiments": list(plan_defaults.get("next_experiments") or [
+                "Вариант с более строгими порогами confidence",
+                "Вариант с увеличенным окном бэктеста",
+            ]),
+            "tags": list(plan_defaults.get("tags") or ["ai_planner", "auto_optimization", experiment_type]),
+            "market_regime": market_regime,
+            "regime_memory": regime_memory,
+        }
+        if experiment_type == "aggressive":
+            defaults.update({"interval": defaults.get("interval") or "15m", "use_mtf": False, "safe_mode": False, "backtest_days": min(int(defaults.get("backtest_days") or 7), 10)})
+        elif experiment_type == "conservative":
+            defaults.update({"interval": "1h" if market_regime.get("regime", "").startswith("sideways") else defaults.get("interval") or "1h", "use_mtf": True, "safe_mode": True, "backtest_days": max(int(defaults.get("backtest_days") or 14), 14)})
+        else:
+            defaults.update({"interval": defaults.get("interval") or "15m", "use_mtf": bool(defaults.get("use_mtf", True)), "safe_mode": bool(defaults.get("safe_mode", True)), "backtest_days": max(int(defaults.get("backtest_days") or 10), 10)})
+
+        best = summary.get("best") if isinstance(summary, dict) else None
+        if isinstance(best, dict):
+            best_pnl = float(best.get("total_pnl_pct") or 0.0)
+            best_dd = float(best.get("max_drawdown_pct") or 0.0)
+            if best_pnl > 6 and best_dd < 15:
+                defaults["expected_outcome"] = "Стабилизировать достигнутый профит и снизить волатильность кривой капитала."
+            if best_pnl < 0:
+                defaults["param_changes"].update({"regularization": "increase", "confidence_thresholds": "tighten"})
+
+        if market_regime.get("regime"):
+            defaults["rationale"] = (
+                f"План учитывает режим рынка {market_regime.get('regime')}"
+                + (" и накопленную память по этому режиму." if regime_memory else ".")
+            )
+
+        if hypotheses and isinstance(hypotheses[0], dict):
+            h = hypotheses[0]
+            if h.get("title"):
+                defaults["hypothesis"] = str(h.get("title"))
+            if h.get("description"):
+                defaults["experiment_description"] = str(h.get("description"))
+
+        prompt = f"""
+Ты проектируешь следующий AI research experiment для торгового бота.
+
+SYMBOL: {symbol}
+EXPERIMENT_TYPE: {experiment_type}
+SUMMARY:
+{json.dumps(summary, ensure_ascii=False)}
+
+PARAM_IMPACT:
+{json.dumps(impact, ensure_ascii=False)}
+
+HYPOTHESES:
+{json.dumps(hypotheses, ensure_ascii=False)}
+
+MARKET_REGIME:
+{json.dumps(market_regime, ensure_ascii=False)}
+
+REGIME_MEMORY:
+{json.dumps(regime_memory, ensure_ascii=False)}
+
+Верни строго JSON:
+{{
+  "interval": "15m|1h",
+  "use_mtf": true,
+  "safe_mode": true,
+  "backtest_days": 7,
+  "experiment_description": "краткое описание",
+  "hypothesis": "гипотеза",
+  "expected_outcome": "ожидаемый эффект",
+  "rationale": "почему выбран такой план",
+  "param_changes": {{}},
+  "hyperparams": {{}},
+  "next_experiments": ["...", "..."],
+  "tags": ["...", "..."],
+  "market_regime": {{}},
+  "risk_profile": {{}},
+  "execution_realism": {{}}
+}}
+Без текста вокруг JSON.
+"""
+        try:
+            content = self._openrouter_chat(
+                messages=[
+                    {"role": "system", "content": "You are a quantitative research planner. Output valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=900,
+                temperature=0.2,
+            )
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].strip()
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                raise ValueError("Planner returned non-object JSON")
+            merged = {**defaults, **data}
+            interval = str(merged.get("interval") or defaults["interval"]).lower()
+            merged["interval"] = "1h" if interval in {"1h", "60m"} else "15m"
+            merged["use_mtf"] = bool(merged.get("use_mtf"))
+            merged["safe_mode"] = bool(merged.get("safe_mode"))
+            days = int(merged.get("backtest_days") or defaults["backtest_days"])
+            merged["backtest_days"] = max(3, min(120, days))
+            if not isinstance(merged.get("param_changes"), dict):
+                merged["param_changes"] = defaults["param_changes"]
+            if not isinstance(merged.get("hyperparams"), dict):
+                merged["hyperparams"] = defaults["hyperparams"]
+            if not isinstance(merged.get("next_experiments"), list):
+                merged["next_experiments"] = defaults["next_experiments"]
+            if not isinstance(merged.get("tags"), list):
+                merged["tags"] = defaults["tags"]
+            if not isinstance(merged.get("market_regime"), dict):
+                merged["market_regime"] = defaults["market_regime"]
+            if not isinstance(merged.get("regime_memory"), dict) and defaults.get("regime_memory") is not None:
+                merged["regime_memory"] = defaults["regime_memory"]
+            return merged
+        except Exception as e:
+            logger.warning(f"AI planner fallback to heuristic defaults: {e}")
+            return defaults
+
+    def _build_risk_guard(
+        self,
+        symbol: str,
+        experiment_type: str,
+        ai_plan: Dict[str, Any],
+        regime_context: Optional[Dict[str, Any]] = None,
+        safe_mode_requested: bool = True,
+        allow_regime_memory_soft_block: bool = False,
+    ) -> Dict[str, Any]:
+        regime_context = regime_context if isinstance(regime_context, dict) else {}
+        market_regime = regime_context.get("market_regime") if isinstance(regime_context.get("market_regime"), dict) else ai_plan.get("market_regime")
+        regime_memory = regime_context.get("regime_memory") if isinstance(regime_context.get("regime_memory"), dict) else ai_plan.get("regime_memory")
+        if not isinstance(market_regime, dict):
+            market_regime = derive_market_regime_from_metrics(symbol)
+        risk_profile = ai_plan.get("risk_profile") if isinstance(ai_plan.get("risk_profile"), dict) else {}
+        execution_realism = ai_plan.get("execution_realism") if isinstance(ai_plan.get("execution_realism"), dict) else {}
+
+        interval = str(ai_plan.get("interval") or "15m").lower()
+        interval = "1h" if interval in {"1h", "60m"} else "15m"
+        use_mtf = bool(ai_plan.get("use_mtf"))
+        safe_mode_effective = bool(ai_plan.get("safe_mode", safe_mode_requested))
+        requested_backtest_days = int(ai_plan.get("backtest_days") or 7)
+        backtest_days = max(3, min(120, requested_backtest_days))
+
+        max_leverage = 2 if safe_mode_effective else 3
+        max_drawdown_pct = 18.0 if safe_mode_effective else 22.0
+        stop_after_losses = 3 if safe_mode_effective else 4
+        min_trades = 30 if safe_mode_effective else 20
+        slippage_bps = 8 if interval == "15m" else 5
+        spread_bps = 4 if interval == "15m" else 3
+        funding_bps_daily = 3
+        blocked_reasons: List[str] = []
+        warnings: List[str] = []
+
+        regime_name = str((market_regime or {}).get("regime") or "unknown")
+        volatility = str((market_regime or {}).get("volatility") or "normal")
+        if volatility == "high":
+            max_leverage = min(max_leverage, 2)
+            max_drawdown_pct = min(max_drawdown_pct, 16.0 if safe_mode_effective else 18.0)
+            stop_after_losses = min(stop_after_losses, 2 if safe_mode_effective else 3)
+            backtest_days = max(backtest_days, 14)
+            slippage_bps = max(slippage_bps, 12)
+            spread_bps = max(spread_bps, 6)
+            warnings.append("high_volatility_regime")
+        if regime_name.startswith("sideways"):
+            max_leverage = min(max_leverage, 2)
+            backtest_days = max(backtest_days, 14)
+            warnings.append("sideways_requires_longer_validation")
+        if experiment_type == "aggressive" and volatility == "high":
+            blocked_reasons.append("aggressive_mode_blocked_in_high_volatility")
+        if experiment_type == "aggressive" and not safe_mode_effective:
+            warnings.append("aggressive_without_safe_mode")
+
+        if isinstance(regime_memory, dict):
+            failed = int(regime_memory.get("failed") or 0)
+            successful = int(regime_memory.get("successful") or 0)
+            if failed > successful:
+                max_drawdown_pct = min(max_drawdown_pct, 14.0)
+                max_leverage = min(max_leverage, 2)
+                backtest_days = max(backtest_days, 21)
+                warnings.append("regime_memory_negative_bias")
+            if failed >= max(3, successful + 2):
+                if allow_regime_memory_soft_block and safe_mode_effective and experiment_type != "aggressive":
+                    backtest_days = max(backtest_days, 30)
+                    max_drawdown_pct = min(max_drawdown_pct, 12.0)
+                    stop_after_losses = min(stop_after_losses, 2)
+                    min_trades = max(min_trades, 45)
+                    warnings.append("regime_memory_soft_block_applied")
+                else:
+                    blocked_reasons.append("regime_memory_shows_repeated_failures")
+
+        if isinstance(risk_profile.get("max_leverage"), (int, float)):
+            if float(risk_profile.get("max_leverage") or 0.0) > max_leverage:
+                blocked_reasons.append("requested_leverage_above_guardrail")
+        if isinstance(risk_profile.get("max_drawdown_pct"), (int, float)):
+            if float(risk_profile.get("max_drawdown_pct") or 0.0) > max_drawdown_pct:
+                blocked_reasons.append("requested_drawdown_limit_above_guardrail")
+        if isinstance(risk_profile.get("stop_after_consecutive_losses"), (int, float)):
+            if int(risk_profile.get("stop_after_consecutive_losses") or 0) > stop_after_losses:
+                blocked_reasons.append("stop_after_losses_too_loose")
+
+        normalized_risk_profile = {
+            "safe_mode_required": bool(safe_mode_effective or blocked_reasons),
+            "max_leverage": max_leverage,
+            "max_drawdown_pct": max_drawdown_pct,
+            "stop_after_consecutive_losses": stop_after_losses,
+            "min_total_trades": min_trades,
+            "regime": regime_name,
+        }
+        normalized_execution_realism = {
+            "spread_bps": max(int(execution_realism.get("spread_bps") or 0), spread_bps),
+            "slippage_bps": max(int(execution_realism.get("slippage_bps") or 0), slippage_bps),
+            "funding_bps_daily": max(int(execution_realism.get("funding_bps_daily") or 0), funding_bps_daily),
+            "latency_ms": max(int(execution_realism.get("latency_ms") or 0), 150 if interval == "15m" else 100),
+        }
+
+        return {
+            "allowed": not blocked_reasons,
+            "blocked_reasons": blocked_reasons,
+            "warnings": warnings,
+            "safe_mode": bool(safe_mode_effective or blocked_reasons),
+            "backtest_days": backtest_days,
+            "risk_profile": normalized_risk_profile,
+            "execution_realism": normalized_execution_realism,
+        }
 
     def start_research_experiment(
         self,
         symbol: str,
-        experiment_type: str,
+        experiment_type: str = "balanced",
         metadata: Optional[Dict[str, Any]] = None,
         allow_duplicate: bool = False,
         safe_mode: bool = True,
+        goal: Optional[str] = None,
+        constraints: Optional[Dict[str, Any]] = None,
+        budget: Optional[Dict[str, Any]] = None,
+        auto_iterate: bool = True,
+        max_steps: int = 3,
+        campaign_parallel_limit: int = 2,
     ) -> Dict[str, Any]:
-        """
-        Starts a research experiment (Training + Backtest)
-        experiment_type: 'aggressive' | 'conservative' | 'balanced'
-        """
         try:
-            import sys
-            import subprocess
-            from pathlib import Path
-            import uuid
-            import json
-            from datetime import datetime
-            from typing import Dict, Any
-            from .experiment_management import (
-                ExperimentCriteria,
-                ExperimentStore,
-                build_param_signature,
-                get_code_version,
-            )
-            
             project_root = Path(__file__).resolve().parent.parent
-            # Use the new research runner script
+            store = ExperimentStore(project_root / "experiments.json")
             script_path = project_root / "run_research.py"
-            
             if not script_path.exists():
-                 logger.error(f"Research script not found: {script_path}")
-                 return {"ok": False, "error": f"Script not found: {script_path.name}"}
-            
-            experiment_id = f"exp_{int(asyncio.get_event_loop().time())}_{str(uuid.uuid4())[:8]}"
-            
-            # Define parameters based on type
-            params = []
-            
-            # Map types to supported arguments
-            if experiment_type == 'aggressive':
-                params = ["--interval", "15m", "--no-mtf"] 
-            elif experiment_type == 'conservative':
-                # Conservative uses 1h models
-                params = ["--interval", "1h", "--no-mtf"]
-            else:
-                # Balanced - default 15m
-                params = ["--interval", "15m", "--no-mtf"]
-            
+                return {"ok": False, "error": f"run_research.py not found at {script_path}"}
+
+            symbol = symbol.upper().strip()
+            if not symbol:
+                return {"ok": False, "error": "symbol is required"}
+            experiment_type = (experiment_type or "balanced").strip().lower()
+            if experiment_type not in {"balanced", "aggressive", "conservative"}:
+                experiment_type = "balanced"
+
+            meta = dict(metadata or {})
+            if goal is not None and "goal" not in meta:
+                meta["goal"] = goal
+            if constraints is not None and "constraints" not in meta:
+                meta["constraints"] = constraints
+            if budget is not None and "budget" not in meta:
+                meta["budget"] = budget
+            if "auto_iterate" not in meta:
+                meta["auto_iterate"] = bool(auto_iterate)
+
+            all_experiments = store.list()
+            requested_steps = meta.get("max_steps", max_steps)
+            try:
+                requested_steps = int(requested_steps)
+            except Exception:
+                requested_steps = 3
+            requested_steps = max(1, min(50, requested_steps))
+            meta["max_steps"] = requested_steps
+            try:
+                parallel_limit = int(campaign_parallel_limit)
+            except Exception:
+                parallel_limit = 2
+            parallel_limit = max(1, min(20, parallel_limit))
+            meta["campaign_parallel_limit"] = parallel_limit
+
+            running_statuses = {"starting", "training", "training_completed", "backtesting"}
+            root_ids = set()
+            for e in all_experiments:
+                if not isinstance(e, dict):
+                    continue
+                if str(e.get("status") or "") not in running_statuses:
+                    continue
+                c = e.get("ai_campaign") if isinstance(e.get("ai_campaign"), dict) else {}
+                if not c:
+                    continue
+                if not bool(c.get("auto_chain", True)):
+                    continue
+                rid = str(c.get("root_experiment_id") or e.get("id") or "")
+                if rid:
+                    root_ids.add(rid)
+            if bool(meta.get("auto_iterate", True)) and len(root_ids) >= parallel_limit:
+                return {
+                    "ok": False,
+                    "error": f"Campaign parallel limit reached ({parallel_limit})",
+                    "active_campaigns": len(root_ids),
+                    "campaign_parallel_limit": parallel_limit,
+                }
+
+            experiment_id = f"exp_{int(time.time())}_{str(uuid.uuid4())[:8]}"
+            analyzer = ExperimentAnalyzer(all_experiments)
+            summary = analyzer.summarize(symbol=symbol)
+            impact = analyzer.compute_param_impact(symbol=symbol)
+            regime_memory = analyzer.summarize_regime_memory(symbol=symbol)
+            hypotheses = HypothesisGenerator(ExperimentCriteria()).propose(summary)
+            meta_market_regime = meta.get("market_regime") if isinstance(meta.get("market_regime"), dict) else None
+            regime_context = build_regime_plan_context(
+                symbol=symbol,
+                experiment_type=experiment_type,
+                summary=summary,
+                regime_memory=regime_memory,
+                market_regime=meta_market_regime,
+            )
+            ai_plan = meta.get("ai_plan") if isinstance(meta.get("ai_plan"), dict) else None
+            allow_regime_memory_soft_block = bool(meta.get("allow_regime_memory_soft_block", False))
+            if not ai_plan:
+                ai_plan = self._build_research_ai_plan(
+                    symbol=symbol,
+                    experiment_type=experiment_type,
+                    summary=summary,
+                    impact=impact,
+                    hypotheses=hypotheses,
+                    regime_context=regime_context,
+                )
+            interval = str(ai_plan.get("interval") or "15m").lower()
+            interval = "1h" if interval in {"1h", "60m"} else "15m"
+            use_mtf = bool(ai_plan.get("use_mtf"))
+            safe_mode_effective = bool(ai_plan.get("safe_mode", safe_mode))
+            risk_guard = self._build_risk_guard(
+                symbol=symbol,
+                experiment_type=experiment_type,
+                ai_plan=ai_plan,
+                regime_context=regime_context,
+                safe_mode_requested=safe_mode_effective,
+                allow_regime_memory_soft_block=allow_regime_memory_soft_block,
+            )
+            if not risk_guard.get("allowed"):
+                return {
+                    "ok": False,
+                    "error": "Experiment blocked by AI risk guard",
+                    "experiment_id": experiment_id,
+                    "blocked_reasons": risk_guard.get("blocked_reasons") or [],
+                    "market_regime": regime_context.get("market_regime") or ai_plan.get("market_regime"),
+                    "risk_profile": risk_guard.get("risk_profile"),
+                }
+            safe_mode_effective = bool(risk_guard.get("safe_mode", safe_mode_effective))
+            backtest_days = int(risk_guard.get("backtest_days") or ai_plan.get("backtest_days") or 7)
+            backtest_days = max(3, min(120, backtest_days))
+            params = ["--interval", interval]
+            if not use_mtf:
+                params.append("--no-mtf")
             cmd = [
-                sys.executable, str(script_path), 
-                "--symbol", symbol, 
-                "--type", experiment_type,
-                "--experiment-id", experiment_id
+                sys.executable,
+                str(script_path),
+                "--symbol",
+                symbol,
+                "--type",
+                experiment_type,
+                "--experiment-id",
+                experiment_id,
             ] + params
 
-            store = ExperimentStore(project_root / "experiments.json")
-            meta = metadata if isinstance(metadata, dict) else {}
+            meta["ai_enabled"] = True
+            meta["ai_plan"] = ai_plan
+            meta.setdefault("experiment_description", ai_plan.get("experiment_description"))
+            meta.setdefault("hypothesis", ai_plan.get("hypothesis"))
+            meta.setdefault("expected_outcome", ai_plan.get("expected_outcome"))
+            meta.setdefault("rationale", ai_plan.get("rationale"))
+            meta.setdefault("param_changes", ai_plan.get("param_changes"))
+            if isinstance(ai_plan.get("hyperparams"), dict):
+                meta.setdefault("hyperparams", ai_plan.get("hyperparams"))
+            meta.setdefault("next_experiments", ai_plan.get("next_experiments"))
+            meta.setdefault("tags", ai_plan.get("tags"))
+            meta.setdefault("market_regime", ai_plan.get("market_regime") or regime_context.get("market_regime"))
+            if ai_plan.get("regime_memory") is not None:
+                meta.setdefault("regime_memory", ai_plan.get("regime_memory"))
+            if regime_memory:
+                meta.setdefault("regime_memory_summary", regime_memory)
+            meta.setdefault("risk_profile", risk_guard.get("risk_profile"))
+            meta.setdefault("execution_realism", risk_guard.get("execution_realism"))
+            meta.setdefault("ai_risk_guard", {
+                "allowed": bool(risk_guard.get("allowed")),
+                "warnings": list(risk_guard.get("warnings") or []),
+                "blocked_reasons": list(risk_guard.get("blocked_reasons") or []),
+            })
+            meta["backtest_days"] = backtest_days
+
+            ai_campaign = meta.get("ai_campaign") if isinstance(meta.get("ai_campaign"), dict) else {}
+            if not ai_campaign:
+                ai_campaign = {
+                    "auto_chain": bool(meta.get("auto_iterate", True)),
+                    "remaining_steps": max(0, requested_steps - 1),
+                    "iteration": 1,
+                    "max_steps": requested_steps,
+                }
+            ai_campaign["auto_chain"] = bool(ai_campaign.get("auto_chain", True))
+            try:
+                ai_campaign["remaining_steps"] = max(0, min(20, int(ai_campaign.get("remaining_steps", 2))))
+            except Exception:
+                ai_campaign["remaining_steps"] = 2
+            try:
+                ai_campaign["iteration"] = max(1, min(50, int(ai_campaign.get("iteration", 1))))
+            except Exception:
+                ai_campaign["iteration"] = 1
+            try:
+                ai_campaign["max_steps"] = max(1, min(50, int(ai_campaign.get("max_steps", ai_campaign["iteration"] + ai_campaign["remaining_steps"]))))
+            except Exception:
+                ai_campaign["max_steps"] = ai_campaign["iteration"] + ai_campaign["remaining_steps"]
+            ai_campaign["root_experiment_id"] = str(ai_campaign.get("root_experiment_id") or experiment_id)
+            if ai_campaign["iteration"] > ai_campaign["max_steps"]:
+                ai_campaign["iteration"] = ai_campaign["max_steps"]
+            parent_experiment_id = ai_campaign.get("parent_experiment_id")
+            if parent_experiment_id:
+                for e in all_experiments:
+                    if not isinstance(e, dict):
+                        continue
+                    c = e.get("ai_campaign") if isinstance(e.get("ai_campaign"), dict) else {}
+                    if not c:
+                        continue
+                    if str(c.get("parent_experiment_id") or "") != str(parent_experiment_id):
+                        continue
+                    if int(c.get("iteration") or 0) != int(ai_campaign.get("iteration") or 0):
+                        continue
+                    existing_id = e.get("id")
+                    if isinstance(existing_id, str) and existing_id:
+                        return {
+                            "ok": True,
+                            "experiment_id": existing_id,
+                            "symbol": symbol,
+                            "type": experiment_type,
+                            "idempotent_reused": True,
+                            "ai_campaign": c,
+                            "message": f"Reused existing campaign experiment {existing_id}",
+                        }
+            meta["ai_campaign"] = ai_campaign
+
             exp_params = {
-                "primary_interval": (params[1] if len(params) >= 2 and params[0] == "--interval" else "15m"),
+                "primary_interval": interval,
                 "train_intervals": ["15m", "1h"],
-                "no_mtf": "--no-mtf" in params,
-                "safe_mode": bool(safe_mode),
+                "no_mtf": not use_mtf,
+                "safe_mode": safe_mode_effective,
+                "backtest_days": backtest_days,
+                "risk_profile": meta.get("risk_profile") if isinstance(meta.get("risk_profile"), dict) else None,
+                "execution_realism": meta.get("execution_realism") if isinstance(meta.get("execution_realism"), dict) else None,
             }
             signature = build_param_signature(
                 symbol=symbol,
@@ -960,12 +784,20 @@ class AIAgentService:
                 params=exp_params,
                 hyperparams=meta.get("hyperparams") if isinstance(meta.get("hyperparams"), dict) else None,
             )
+            avoid_signatures = []
+            regime_memory_row = meta.get("regime_memory") if isinstance(meta.get("regime_memory"), dict) else None
+            if isinstance(regime_memory_row, dict) and isinstance(regime_memory_row.get("avoid_signatures"), list):
+                avoid_signatures = [str(x) for x in regime_memory_row.get("avoid_signatures") if isinstance(x, str)]
+            if signature in avoid_signatures and not allow_duplicate:
+                return {
+                    "ok": False,
+                    "error": "Experiment blocked by regime memory",
+                    "experiment_id": experiment_id,
+                    "param_signature": signature,
+                    "market_regime": meta.get("market_regime"),
+                }
 
-            existing = [
-                e
-                for e in store.list()
-                if isinstance(e, dict) and e.get("param_signature") == signature
-            ]
+            existing = [e for e in store.list() if isinstance(e, dict) and e.get("param_signature") == signature]
             criteria = ExperimentCriteria()
             if existing and not allow_duplicate:
                 def _is_ineffective(e: Dict[str, Any]) -> bool:
@@ -985,7 +817,6 @@ class AIAgentService:
                         and pnl >= criteria.min_total_pnl_pct
                         and dd <= criteria.max_drawdown_pct
                     )
-
                 if any(_is_ineffective(e) for e in existing):
                     return {
                         "ok": False,
@@ -1007,6 +838,7 @@ class AIAgentService:
                 "params": exp_params,
                 "param_signature": signature,
                 "code_version": code_version,
+                "ai_enabled": True,
             }
             for k in [
                 "baseline",
@@ -1015,12 +847,27 @@ class AIAgentService:
                 "expected_outcome",
                 "rationale",
                 "hyperparams",
+                "hyperparameter_search",
                 "criteria",
                 "tags",
+                "ai_plan",
+                "next_experiments",
+                "experiment_description",
+                "backtest_days",
+                "ai_enabled",
+                "ai_campaign",
+                "market_regime",
+                "regime_memory",
+                "regime_memory_summary",
+                "risk_profile",
+                "execution_realism",
+                "ai_risk_guard",
+                "goal",
+                "constraints",
+                "budget",
             ]:
                 if k in meta:
                     record[k] = meta[k]
-
             store.upsert(experiment_id, record)
 
             meta_dir = project_root / "experiment_meta"
@@ -1029,64 +876,68 @@ class AIAgentService:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(record, f, ensure_ascii=False, indent=2, default=str)
             cmd += ["--metadata-path", str(meta_path)]
-            if safe_mode:
+            if safe_mode_effective:
                 cmd.append("--safe-mode")
-            
             logger.info(f"Starting research experiment: {' '.join(cmd)}")
-            
-            # Run in background
             process = subprocess.Popen(
                 cmd,
                 cwd=str(project_root),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                encoding='utf-8',
-                errors='replace'
+                encoding="utf-8",
+                errors="replace",
             )
-
-            try:
-                self.research_processes[experiment_id] = process
-                store.upsert(
-                    experiment_id,
-                    {
-                        "runner_pid": process.pid,
-                        "started_at": datetime.utcnow().isoformat() + "Z",
-                    },
-                )
-            except Exception:
-                pass
-            
+            self.research_processes[experiment_id] = process
+            store.upsert(
+                experiment_id,
+                {
+                    "pid": process.pid,
+                    "status": "starting",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return {
-                "ok": True, 
-                "pid": process.pid, 
+                "ok": True,
                 "experiment_id": experiment_id,
-                "symbol": symbol, 
+                "symbol": symbol,
                 "type": experiment_type,
-                "param_signature": signature,
-                "effective_params": exp_params,
-                "message": f"Experiment {experiment_type} started for {symbol}"
+                "pid": process.pid,
+                "ai_plan": ai_plan,
+                "market_regime": meta.get("market_regime"),
+                "regime_memory": meta.get("regime_memory"),
+                "risk_profile": meta.get("risk_profile"),
+                "execution_realism": meta.get("execution_realism"),
+                "ai_risk_guard": meta.get("ai_risk_guard"),
             }
-            
         except Exception as e:
-            logger.error(f"Failed to start experiment: {e}", exc_info=True)
+            logger.exception("Failed to start research experiment")
             return {"ok": False, "error": str(e)}
 
     def get_research_experiments(self) -> List[Dict[str, Any]]:
-        """Returns list of experiments from experiments.json"""
+        project_root = Path(__file__).resolve().parent.parent
+        store = ExperimentStore(project_root / "experiments.json")
+        return store.list()
+
+    def stop_research_experiment(self, experiment_id: str) -> Dict[str, Any]:
+        process = self.research_processes.get(experiment_id)
+        if process is None:
+            return {"ok": False, "error": "Experiment process not found"}
         try:
-            file_path = Path(__file__).resolve().parent.parent / "experiments.json"
-            if not file_path.exists():
-                return []
-            
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                
-            # Convert dict to list and sort by created_at desc
-            experiments = list(data.values())
-            experiments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-            return experiments
-            
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except Exception:
+                process.kill()
+            project_root = Path(__file__).resolve().parent.parent
+            store = ExperimentStore(project_root / "experiments.json")
+            store.upsert(
+                experiment_id,
+                {
+                    "status": "interrupted",
+                    "stopped_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return {"ok": True, "experiment_id": experiment_id}
         except Exception as e:
-            logger.error(f"Failed to get experiments: {e}")
-            return []
+            return {"ok": False, "error": str(e)}

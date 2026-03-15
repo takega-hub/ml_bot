@@ -1,0 +1,9 @@
+{
+  "training_days_15m": 35,
+  "forward_periods_15m": 6,
+  "threshold_pct_15m": 0.38,
+  "min_profit_pct_15m": 0.32,
+  "rf_n_estimators": 150,
+  "xgb_n_estimators": 180,
+  "xgb_learning_rate": 0.07
+}

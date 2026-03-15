@@ -1,0 +1,15 @@
+{
+  "training_days_15m": 45,
+  "training_days_1h": 180,
+  "forward_periods_15m": 5,
+  "forward_periods_1h": 8,
+  "threshold_pct_15m": 0.24000000000000002,
+  "threshold_pct_1h": 0.8,
+  "min_profit_pct_15m": 0.25,
+  "min_profit_pct_1h": 0.8,
+  "rf_n_estimators": 160,
+  "rf_max_depth": 12,
+  "xgb_n_estimators": 180,
+  "xgb_max_depth": 6,
+  "xgb_learning_rate": 0.06999999999999999
+}

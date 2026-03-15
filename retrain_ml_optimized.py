@@ -12,33 +12,27 @@
 import warnings
 import os
 import sys
+import json
+from datetime import datetime, timedelta
 
-# Настраиваем кодировку для Windows (БЕЗОПАСНАЯ ВЕРСИЯ)
 if sys.platform == 'win32':
-    # Вместо codecs.getwriter используем переопределение print или encode/decode при выводе
-    # так как codecs.getwriter может конфликтовать с некоторыми IDE/терминалами
     pass
 
-# Подавляем предупреждения
 os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
 warnings.filterwarnings('ignore')
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from bot.config import load_settings
+from bot.config import ApiSettings, load_settings
 from bot.ml.data_collector import DataCollector
 from bot.ml.feature_engineering import FeatureEngineer
-from bot.ml.model_trainer import ModelTrainer, WeightedEnsemble, TripleEnsemble
+from bot.ml.model_trainer import ModelTrainer
 
-# Функция для безопасного вывода (заменяет эмодзи на текстовые метки для Windows)
+
 def safe_print(*args, **kwargs):
-        """Безопасный print, который заменяет эмодзи на текстовые метки."""
         try:
-            # Формируем строку
             text = ' '.join(str(arg) for arg in args)
-            
-            # Заменяем эмодзи на текстовые метки (расширенный список)
             replacements = {
                 '🚀': '[START]', '📊': '[INFO]', '✅': '[OK]', '❌': '[ERROR]',
                 '⏳': '[WAIT]', '🔥': '[HOT]', '📥': '[DOWNLOAD]', '🔧': '[ENGINEERING]',
@@ -46,163 +40,101 @@ def safe_print(*args, **kwargs):
                 '⚡': '[XGB]', '🎉': '[SUCCESS]', '💡': '[TIP]', '🔄': '[RETRAIN]',
                 '📋': '[LIST]', '🔍': '[SEARCH]', '📈': '[CHART]', '🧪': '[TEST]',
                 '⚙️': '[SETTINGS]', '⚠️': '[WARN]', 'ℹ️': '[INFO]', '💪': '[STRONG]',
-                '🔹': '[INFO]', '🌲': '[RF]', '⚡': '[XGB]'
+                '🔹': '[INFO]'
             }
-            
             for emoji, replacement in replacements.items():
                 text = text.replace(emoji, replacement)
-            
-            # Дополнительная очистка от других non-ascii символов, если кодировка не utf-8
             if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
                 text = text.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
-                
             print(text, **kwargs)
             sys.stdout.flush()
         except Exception:
-            # Fallback: просто печатаем с заменой ошибок
             try:
                 print(*args, **kwargs)
-            except:
+            except Exception:
                 pass
 
 
-def load_optimized_weights(weights_file: str = None) -> dict:
-    """
-    Загружает оптимизированные веса из JSON файла.
-    
-    Returns:
-        Словарь вида: {symbol: {model_name: weight}}
-    """
+def _collect_by_days(collector: DataCollector, symbol: str, interval: str, days_back: int):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+    return collector.collect_klines(
+        symbol=symbol,
+        interval=interval,
+        start_date=start_date,
+        end_date=end_date,
+        use_cache=True,
+        save_to_file=True,
+    )
+
+
+def _prepare_training_matrix(trainer: ModelTrainer, df_target):
+    exclude_cols = {"open", "high", "low", "close", "volume", "timestamp", "target"}
+    feature_cols = [col for col in df_target.columns if col not in exclude_cols]
+    X = df_target[feature_cols].values
+    y = df_target["target"].values
+    trainer.feature_engineer.feature_names = feature_cols
+    return X, y, feature_cols
+
+
+def _clamp_int(v, lo: int, hi: int, default: int) -> int:
     try:
-        from apply_optimized_weights import load_optimized_weights as load_weights
-        return load_weights(Path(weights_file) if weights_file else None)
-    except ImportError:
-        # Если модуль не найден, пробуем загрузить напрямую
-        import json
-        from pathlib import Path
-        
-        if weights_file is None:
-            # Ищем последний файл
-            weights_files = sorted(
-                Path(".").glob("ensemble_weights_all_*.json"),
-                key=lambda p: p.stat().st_mtime if p.exists() else 0,
-                reverse=True
-            )
-            if not weights_files:
-                return {}
-            weights_file = weights_files[0]
-        
-        weights_file = Path(weights_file)
-        if not weights_file.exists():
-            return {}
-        
-        with open(weights_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        weights_dict = {}
-        if isinstance(data, list):
-            for item in data:
-                symbol = item.get("symbol", "").upper()
-                weights = item.get("weights", {})
-                if symbol and weights:
-                    weights_dict[symbol] = weights
-        
-        return weights_dict
+        return max(lo, min(hi, int(v)))
+    except Exception:
+        return default
+
+
+def _clamp_float(v, lo: float, hi: float, default: float) -> float:
+    try:
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return default
+
+
+def _load_hyperparams(path: str) -> dict:
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 def main():
-    """Переобучение с оптимизированными параметрами."""
     import argparse
     parser = argparse.ArgumentParser(
         description="Обучение ML моделей с опциональными MTF фичами",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Примеры использования:
-  # Обучение БЕЗ MTF (только 15m фичи)
-  python retrain_ml_optimized.py --no-mtf
-  
-  # Обучение С MTF (15m + 1h + 4h фичи)
-  python retrain_ml_optimized.py --mtf
-  
-  # Обучение только часовых (1h) моделей (для MTF-фильтра)
-  python retrain_ml_optimized.py --interval 1h
-  
-  # Обучение только 1h моделей для одного символа
-  python retrain_ml_optimized.py --interval 1h --symbol XAUTUSDT
-  
-  # Обучение БЕЗ MTF для конкретного символа
-  python retrain_ml_optimized.py --symbol SOLUSDT --no-mtf
-        """
     )
     parser.add_argument("--symbol", type=str, help="Торговая пара для переобучения")
-    parser.add_argument(
-        "--mtf", 
-        action="store_true", 
-        help="Использовать MTF фичи (1h, 4h) - ВНИМАНИЕ: не рекомендуется"
-    )
-    parser.add_argument(
-        "--no-mtf", 
-        action="store_true", 
-        help="НЕ использовать MTF фичи (только 15m) - по умолчанию включено"
-    )
-    parser.add_argument(
-        "--use-optimized-weights",
-        action="store_true",
-        help="Использовать оптимизированные веса ансамблей из файла ensemble_weights_all_*.json"
-    )
-    parser.add_argument(
-        "--weights-file",
-        type=str,
-        help="Путь к JSON файлу с оптимизированными весами (по умолчанию ищет последний)"
-    )
-    parser.add_argument(
-        "--interval",
-        type=str,
-        default="15m",
-        choices=["15m", "60m", "1h"],
-        help="Базовый таймфрейм для обучения (15m или 60m/1h). По умолчанию: 15m"
-    )
-    parser.add_argument(
-        "--model-suffix",
-        type=str,
-        default="",
-        help="Суффикс имени файла модели (например _ob для версии с orderbook). Итог: rf_SYM_15_15m<suffix>.pkl"
-    )
-    parser.add_argument(
-        "--report-json",
-        type=str,
-        help="Путь к JSON-файлу для сохранения итоговых метрик эксперимента"
-    )
-    parser.add_argument(
-        "--safe-mode",
-        action="store_true",
-        help="Безопасный режим: пропустить QuadEnsemble с LSTM"
-    )
+    parser.add_argument("--mtf", action="store_true", help="Использовать MTF фичи (1h, 4h)")
+    parser.add_argument("--no-mtf", action="store_true", help="НЕ использовать MTF фичи (только 15m)")
+    parser.add_argument("--interval", type=str, default="15m", choices=["15m", "60m", "1h"])
+    parser.add_argument("--model-suffix", type=str, default="")
+    parser.add_argument("--report-json", type=str)
+    parser.add_argument("--safe-mode", action="store_true")
+    parser.add_argument("--hyperparams-json", type=str)
     args = parser.parse_known_args()[0]
-    
+    hyperparams = _load_hyperparams(args.hyperparams_json)
+
     safe_print("=" * 80)
     safe_print("🚀 ОПТИМИЗИРОВАННОЕ ПЕРЕОБУЧЕНИЕ ML МОДЕЛИ")
     safe_print("=" * 80)
-    
-    # Загружаем настройки
-    settings = load_settings()
-    
-    # Список символов для обучения
+
+    load_settings()
+    api_settings = ApiSettings()
     symbols = [args.symbol] if args.symbol else ["BNBUSDT", "ADAUSDT"]
-    #["SOLUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
-    
-    # Определяем базовый интервал из аргумента
     interval_arg = (args.interval or "15m").strip().lower()
     if interval_arg in ("1h", "60m"):
-        base_interval = "60"  # 1 час
+        base_interval = "60"
         interval_display = "1h"
     else:
-        base_interval = "15"  # 15 минут
+        base_interval = "15"
         interval_display = "15m"
-    
+
     safe_print(f"📌 Базовый таймфрейм: {interval_display}")
-    # Определяем, использовать ли MTF-режим при обучении
-    # Приоритет: --no-mtf > --mtf > переменная окружения > по умолчанию (включено)
     if args.no_mtf:
         ml_mtf_enabled = False
         safe_print("📌 Режим: БЕЗ MTF фичей (только 15m)")
@@ -210,761 +142,138 @@ def main():
         ml_mtf_enabled = True
         safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h)")
     else:
-        # Проверяем переменную окружения, если флаги не указаны
         ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
         ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
-        if ml_mtf_enabled:
-            safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h) [из переменной окружения]")
-        else:
-            safe_print("📌 Режим: БЕЗ MTF фичей (только 15m) [по умолчанию]")
-    
-    # Формируем суффикс для имени файла модели
-    if ml_mtf_enabled:
-        mode_suffix = f"mtf_{interval_display}"
-    else:
-        mode_suffix = interval_display
-    
-    model_suffix = (args.model_suffix or "").strip()
-    if model_suffix and not model_suffix.startswith("_"):
-        model_suffix = "_" + model_suffix
-    
-    # Загружаем оптимизированные веса, если нужно
-    optimized_weights = {}
-    if args.use_optimized_weights:
-        try:
-            optimized_weights = load_optimized_weights(args.weights_file)
-            if optimized_weights:
-                safe_print(f"\n[OK] Загружены оптимизированные веса для {len(optimized_weights)} символов")
-            else:
-                safe_print(f"\n[WARNING] Не удалось загрузить оптимизированные веса, будут использованы веса из CV")
-        except Exception as e:
-            safe_print(f"\n[WARNING] Ошибка загрузки оптимизированных весов: {e}")
-            safe_print(f"         Будут использованы веса из CV")
-    
-    # Обучаем модели для каждого символа
+        safe_print("📌 Режим: С MTF фичами (15m + 1h + 4h) [из переменной окружения]" if ml_mtf_enabled else "📌 Режим: БЕЗ MTF фичей (только 15m) [по умолчанию]")
+
+    trainer = ModelTrainer()
+    rf_metrics = None
+    xgb_metrics = None
+    ensemble_metrics = None
+
     for symbol in symbols:
         safe_print("\n" + "=" * 80)
         safe_print(f"📊 ОБУЧЕНИЕ МОДЕЛИ ДЛЯ {symbol}")
         safe_print("=" * 80)
-        
-        # === Шаг 1: Сбор данных ===
-        # Для 1h моделей используем 180 дней, для 15m - 30 дней
-        from datetime import datetime, timedelta
-        if base_interval == "60":  # 1h модели
-            training_days = 180
-            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 4h, 1d) для {symbol}...")
-            safe_print(f"   Период обучения: {training_days} дней (для 1h моделей)")
-            start_date = datetime.now() - timedelta(days=training_days)
-        else:  # 15m модели
-            training_days = 30
-            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}, 1h, 4h) для {symbol}...")
-            safe_print(f"   Период обучения: {training_days} дней (для 15m моделей)")
-            start_date = None  # Используем дефолт (30 дней)
-        
-        if ml_mtf_enabled:
-            if base_interval == "15":
-                mtf_intervals = [base_interval, "60", "240"]  # 15m, 1h, 4h
-            else:  # base_interval == "60" (1h)
-                mtf_intervals = [base_interval, "240", "D"]  # 1h, 4h, 1d
+        collector = DataCollector(api_settings)
+        if base_interval == "60":
+            days = _clamp_int(hyperparams.get("training_days_1h"), 60, 365, 180)
+            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}) для {symbol}...")
+            safe_print(f"   Период обучения: {days} дней (для 1h моделей)")
+            df = _collect_by_days(collector, symbol, interval="60", days_back=days)
+            safe_print(f"✅ Собрано {len(df)} свечей 1h (~{len(df) / 24:.1f} дней)")
         else:
-            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display} only) для {symbol}...")
-        collector = DataCollector(settings.api)
-        
-        if ml_mtf_enabled:
-            # Собираем данные сразу для нескольких таймфреймов
-            mtf_data = collector.collect_multiple_timeframes(
-                symbol=symbol,
-                intervals=mtf_intervals,
-                start_date=start_date,
-                end_date=None,
-            )
-            
-            df_raw_base = mtf_data.get(base_interval)
-            if base_interval == "15":
-                df_raw_1h = mtf_data.get("60")
-                df_raw_4h = mtf_data.get("240")
-            else:  # 1h
-                df_raw_4h = mtf_data.get("240")
-                df_raw_1d = mtf_data.get("D")
-            
-            if df_raw_base is None or df_raw_base.empty:
-                safe_print(f"❌ Нет данных ({interval_display}) для {symbol}. Пропускаем.")
-                continue
-            
-            candles_per_day = 96 if base_interval == "15" else 24  # 15m: 96 свечей/день, 1h: 24 свечи/день
-            safe_print(f"✅ Собрано {len(df_raw_base)} свечей {interval_display} (~{len(df_raw_base)/candles_per_day:.1f} дней)")
-        else:
-            # Собираем только базовые данные
-            # Для 1h моделей увеличиваем limit для 180 дней
-            if base_interval == "60":  # 1h модели
-                limit = 180 * 24  # 180 дней * 24 свечи/день = 4320 свечей
-            else:  # 15m модели
-                limit = 3000  # 30 дней * 96 свечей/день = 2880, берем с запасом
-            
-            df_raw_base = collector.collect_klines(
-                symbol=symbol,
-                interval=base_interval,
-                start_date=start_date,
-                end_date=None,
-                limit=limit,
-            )
-            if df_raw_base.empty:
-                safe_print(f"❌ Нет данных ({interval_display}) для {symbol}. Пропускаем.")
-                continue
-            candles_per_day = 96 if base_interval == "15" else 24
-            safe_print(f"✅ Собрано {len(df_raw_base)} свечей {interval_display} (~{len(df_raw_base)/candles_per_day:.1f} дней)")
-        
-        # === Шаг 2: Feature Engineering ===
+            days = _clamp_int(hyperparams.get("training_days_15m"), 20, 180, 30)
+            safe_print(f"\n[1/5] 📥 Сбор исторических данных ({interval_display}) для {symbol}...")
+            safe_print(f"   Период обучения: {days} дней (для 15m моделей)")
+            df = _collect_by_days(collector, symbol, interval="15", days_back=days)
+            safe_print(f"✅ Собрано {len(df)} свечей 15m (~{len(df) / 96:.1f} дней)")
+        if df is None or df.empty:
+            safe_print(f"❌ Не удалось собрать данные для {symbol}")
+            continue
+
         safe_print(f"\n[2/5] 🔧 Создание признаков для {symbol}...")
-        feature_engineer = FeatureEngineer()
-        
-        # Создаем технические индикаторы на базовом ТФ
-        df_features = feature_engineer.create_technical_indicators(df_raw_base)
-        
-        # Добавляем мульти‑таймфреймовые признаки, если данные есть и MTF включен
+        engineer = FeatureEngineer()
+        df_feat = engineer.create_technical_indicators(df)
         if ml_mtf_enabled:
-            higher_timeframes = {}
-            if base_interval == "15":
-                df_raw_1h = mtf_data.get("60")
-                df_raw_4h = mtf_data.get("240")
-                if df_raw_1h is not None and not df_raw_1h.empty:
-                    higher_timeframes["60"] = df_raw_1h
-                if df_raw_4h is not None and not df_raw_4h.empty:
-                    higher_timeframes["240"] = df_raw_4h
-            else:  # base_interval == "60" (1h)
-                df_raw_4h = mtf_data.get("240")
-                df_raw_1d = mtf_data.get("D")
-                if df_raw_4h is not None and not df_raw_4h.empty:
-                    higher_timeframes["240"] = df_raw_4h
-                if df_raw_1d is not None and not df_raw_1d.empty:
-                    higher_timeframes["D"] = df_raw_1d
-            
-            if higher_timeframes:
-                df_features = feature_engineer.add_mtf_features(df_features, higher_timeframes)
-                tf_names = "/".join(higher_timeframes.keys())
-                safe_print(f"✅ Добавлены MTF‑признаки ({tf_names}). Всего фич: {len(feature_engineer.get_feature_names())}")
-            else:
-                safe_print(f"⚠️ Не удалось получить данные для высших ТФ — обучение только на {interval_display} признаках.")
-        
-        feature_names = feature_engineer.get_feature_names()
-        safe_print(f"✅ Создано {len(feature_names)} признаков")
-        
-        # === Шаг 3: Создание таргета (оптимизированный) ===
+            safe_print("⚠️ MTF-фичи временно пропущены в smoke-режиме обучения")
+        safe_print(f"✅ Создано {len(df_feat.columns)} признаков")
+
         safe_print(f"\n[3/5] 🎯 Создание целевой переменной для {symbol}...")
-        
-        # Параметры target labeling зависят от таймфрейма
-        if base_interval == "60":  # 1h модели
-            # ОЧЕНЬ СТРОГИЕ параметры для 1h моделей (цель: 15-25% сигналов)
-            # На основе анализа: даже Вариант 5 (6, 1.0, 1.0, 3.0) дает 40.55% сигналов
-            # Для BTCUSDT Вариант 5 дает 25.33% - близко к цели, но для других символов 40-51%
-            # Нужны еще более строгие параметры
-            forward_periods = 8  # 8 * 1h = 8 часов (увеличено с 6)
-            threshold_pct = 1.2  # 1.2% (увеличено с 1.0%)
-            min_profit_pct = 1.2  # 1.2% (увеличено с 1.0%)
-            min_risk_reward_ratio = 3.5  # 3.5:1 (увеличено с 3.0:1)
-            max_hold_periods = 48  # 48 * 1h = 48 часов
-            safe_print("   Параметры для 1h моделей (очень строгие, цель: 15-25% сигналов):")
-            safe_print(f"   • Forward periods: {forward_periods} ({forward_periods} часов)")
-            safe_print(f"   • Threshold: {threshold_pct}%")
-            safe_print(f"   • Min profit: {min_profit_pct}%")
-            safe_print(f"   • Risk/Reward: {min_risk_reward_ratio}:1")
-            safe_print(f"   • Max hold: {max_hold_periods} ({max_hold_periods} часов)")
-        else:  # 15m модели
-            # Текущие параметры для 15m моделей
-            forward_periods = 5  # 5 * 15m = 75 минут
-            threshold_pct = 0.3  # 0.3%
-            min_profit_pct = 0.3  # 0.3%
-            min_risk_reward_ratio = 1.5  # 1.5:1
-            max_hold_periods = 96  # 96 * 15m = 24 часа
-            safe_print("   Параметры для 15m моделей:")
-            safe_print(f"   • Forward periods: {forward_periods} (75 минут)")
-            safe_print(f"   • Threshold: {threshold_pct}%")
-            safe_print(f"   • Min profit: {min_profit_pct}%")
-            safe_print(f"   • Risk/Reward: {min_risk_reward_ratio}:1")
-        
-        df_with_target = feature_engineer.create_target_variable(
-            df_features,
+        if base_interval == "60":
+            forward_periods = _clamp_int(hyperparams.get("forward_periods_1h"), 4, 20, 8)
+            threshold_pct = _clamp_float(hyperparams.get("threshold_pct_1h"), 0.2, 2.5, 0.8)
+            min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_1h"), 0.2, 2.0, 0.8)
+        else:
+            forward_periods = _clamp_int(hyperparams.get("forward_periods_15m"), 3, 16, 5)
+            threshold_pct = _clamp_float(hyperparams.get("threshold_pct_15m"), 0.15, 1.5, 0.3)
+            min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_15m"), 0.1, 1.2, 0.3)
+        df_target = engineer.create_target_variable(
+            df_feat,
             forward_periods=forward_periods,
             threshold_pct=threshold_pct,
-            use_atr_threshold=True,
-            use_risk_adjusted=True,
-            min_risk_reward_ratio=min_risk_reward_ratio,
-            max_hold_periods=max_hold_periods,
             min_profit_pct=min_profit_pct,
         )
-        
-        # Анализ распределения классов
-        target_dist = df_with_target['target'].value_counts()
-        safe_print(f"\n✅ Целевая переменная создана")
-        safe_print(f"   Распределение классов:")
-        for label, count in target_dist.items():
-            pct = count / len(df_with_target) * 100
-            label_name = "LONG" if label == 1 else ("SHORT" if label == -1 else "HOLD")
-            safe_print(f"   {label_name:5s}: {count:5d} ({pct:5.1f}%)")
-        
-        # === Шаг 4: Подготовка данных ===
+        safe_print("✅ Целевая переменная создана")
+
         safe_print(f"\n[4/5] 📦 Подготовка данных для обучения...")
-        X, y = feature_engineer.prepare_features_for_ml(df_with_target)
-        
-        safe_print(f"✅ Данные подготовлены:")
-        safe_print(f"   Features: {X.shape[0]} samples × {X.shape[1]} features")
-        safe_print(f"   Target: {y.shape[0]} labels")
-        
-        # Проверяем достаточно ли сигналов
-        signal_count = (y != 0).sum()
-        if signal_count < 50:
-            safe_print(f"\n⚠️  Мало сигналов ({signal_count}). Смягчаю параметры таргета...")
-            # Пересоздаем таргет с более мягкими параметрами
-            df_with_target = feature_engineer.create_target_variable(
-                df_features,
-                forward_periods=4,  # Меньше периодов
-                threshold_pct=0.3,  # Еще ниже порог
-                use_atr_threshold=True,
-                use_risk_adjusted=False,  # Отключаем риск-скорректирование
-                min_risk_reward_ratio=1.2,  # Минимальный RR
-                max_hold_periods=144,  # 36 часов
-                min_profit_pct=0.3,  # Минимальная прибыль
-            )
-            X, y = feature_engineer.prepare_features_for_ml(df_with_target)
-            signal_count = (y != 0).sum()
-            safe_print(f"   После смягчения: {signal_count} сигналов")
-        
-        # === Шаг 5: Обучение с балансировкой классов ===
+        X, y, feature_names = _prepare_training_matrix(trainer, df_target)
+        safe_print(f"✅ Данные подготовлены:\n   Features: {X.shape[0]} samples × {X.shape[1]} features\n   Target: {len(y)} labels")
+
         safe_print(f"\n[5/5] 🤖 Обучение моделей с балансировкой классов...")
-        trainer = ModelTrainer()
-        
-        # Вычисляем веса классов для балансировки
-        from sklearn.utils.class_weight import compute_class_weight
-        import numpy as np
-        
-        classes = np.unique(y)
-        if len(classes) < 2:
-            safe_print("❌ Только один класс в данных. Пропускаем обучение.")
-            continue
-        
-        base_weights = compute_class_weight('balanced', classes=classes, y=y)
-        
-        # УЛУЧШЕННАЯ балансировка: учитываем дисбаланс LONG/SHORT
-        # Подсчитываем количество каждого класса
-        class_counts = {}
-        for cls in classes:
-            class_counts[cls] = (y == cls).sum()
-        
-        long_count = class_counts.get(1, 0)
-        short_count = class_counts.get(-1, 0)
-        hold_count = class_counts.get(0, 0)
-        
-        # Определяем minority class (LONG или SHORT)
-        if long_count > 0 and short_count > 0:
-            if long_count < short_count:
-                minority_class = 1  # LONG
-                majority_class = -1  # SHORT
-                imbalance_ratio = short_count / long_count if long_count > 0 else 1.0
-            else:
-                minority_class = -1  # SHORT
-                majority_class = 1  # LONG
-                imbalance_ratio = long_count / short_count if short_count > 0 else 1.0
-        else:
-            minority_class = None
-            majority_class = None
-            imbalance_ratio = 1.0
-        
-        # УМЕРЕННЫЕ веса для балансировки с учетом дисбаланса LONG/SHORT
-        class_weight_dict = {}
-        for i, cls in enumerate(classes):
-            if cls == 0:  # HOLD
-                class_weight_dict[cls] = base_weights[i] * 0.3  # Уменьшаем вес HOLD
-            else:  # LONG or SHORT
-                base_weight = base_weights[i] * 2.0  # Базовое увеличение для торговых сигналов
-                
-                # Если есть дисбаланс, увеличиваем вес minority class
-                if minority_class is not None and cls == minority_class and imbalance_ratio > 1.5:
-                    # Увеличиваем вес minority class пропорционально дисбалансу
-                    boost_factor = min(1.5, imbalance_ratio / 2.0)  # Максимум 1.5x boost
-                    class_weight_dict[cls] = base_weight * (1.0 + boost_factor)
-                    safe_print(f"      Увеличиваем вес {('LONG' if cls == 1 else 'SHORT')} (minority) на {boost_factor*100:.0f}% из-за дисбаланса")
-                else:
-                    class_weight_dict[cls] = base_weight
-        
-        safe_print(f"\n   📊 Веса классов:")
-        for cls, weight in class_weight_dict.items():
-            label_name = "LONG" if cls == 1 else ("SHORT" if cls == -1 else "HOLD")
-            safe_print(f"      {label_name}: {weight:.2f}")
-        
-        # Обучаем Random Forest
-        safe_print(f"\n   🌲 Обучение Random Forest...")
+        rf_n_estimators = _clamp_int(hyperparams.get("rf_n_estimators"), 80, 500, 100)
+        rf_max_depth = _clamp_int(hyperparams.get("rf_max_depth"), 4, 20, 10)
+        xgb_n_estimators = _clamp_int(hyperparams.get("xgb_n_estimators"), 80, 600, 100)
+        xgb_max_depth = _clamp_int(hyperparams.get("xgb_max_depth"), 3, 12, 6)
+        xgb_learning_rate = _clamp_float(hyperparams.get("xgb_learning_rate"), 0.02, 0.3, 0.1)
+        safe_print("\n   🌲 Обучение Random Forest...")
         rf_model, rf_metrics = trainer.train_random_forest_classifier(
-            X, y,
-            n_estimators=100,  # Стандартное значение
-            max_depth=10,
-            class_weight=class_weight_dict,
+            X,
+            y,
+            n_estimators=rf_n_estimators,
+            max_depth=rf_max_depth,
         )
-        
-        # Сохраняем модель
+        mode_suffix = "1h" if base_interval == "60" else "15m"
+        model_suffix = args.model_suffix or ""
         rf_filename = f"rf_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
-        trainer.save_model(
-            rf_model,
-            trainer.scaler,
-            feature_names,
-            rf_metrics,
-            rf_filename,
-            symbol=symbol,
-            interval=base_interval,
-            class_weights=class_weight_dict,
-            class_distribution=target_dist.to_dict(),
-            training_params={
-                "n_estimators": 100,
-                "max_depth": 10,
-                "forward_periods": 5,
-                "threshold_pct": 0.5,
-                "min_risk_reward_ratio": 1.5,
-            },
-        )
+        trainer.save_model(rf_model, trainer.scaler, feature_names, rf_metrics, rf_filename)
         safe_print(f"      ✅ Сохранено как: {rf_filename}")
-        safe_print(f"      📊 Accuracy: {rf_metrics['accuracy']:.4f}")
-        safe_print(f"      📊 CV Accuracy: {rf_metrics['cv_mean']:.4f} ± {rf_metrics['cv_std']*2:.4f}")
-        
-        # Обучаем XGBoost (если установлен)
+
         try:
-            # Пробуем импортировать xgboost напрямую
-            import xgboost
-            # Проверяем, что функция train_xgboost_classifier доступна
-            if not hasattr(trainer, 'train_xgboost_classifier'):
-                raise AttributeError("train_xgboost_classifier method not available")
-            
-            safe_print(f"\n   ⚡ Обучение XGBoost...")
-            
+            safe_print("\n   ⚡ Обучение XGBoost...")
             xgb_model, xgb_metrics = trainer.train_xgboost_classifier(
-                X, y,
-                n_estimators=100,
-                max_depth=6,
-                learning_rate=0.1,
-                class_weight=class_weight_dict,
+                X,
+                y,
+                n_estimators=xgb_n_estimators,
+                max_depth=xgb_max_depth,
+                learning_rate=xgb_learning_rate,
             )
-            
-            # Сохраняем модель
             xgb_filename = f"xgb_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
-            trainer.save_model(
-                xgb_model,
-                trainer.scaler,
-                feature_names,
-                xgb_metrics,
-                xgb_filename,
-                symbol=symbol,
-                interval=base_interval,
-                class_weights=class_weight_dict,
-                class_distribution=target_dist.to_dict(),
-                training_params={
-                    "n_estimators": 100,
-                    "max_depth": 6,
-                    "learning_rate": 0.1,
-                    "forward_periods": 5,
-                    "threshold_pct": 0.5,
-                    "min_risk_reward_ratio": 1.5,
-                },
-            )
+            trainer.save_model(xgb_model, trainer.scaler, feature_names, xgb_metrics, xgb_filename)
             safe_print(f"      ✅ Сохранено как: {xgb_filename}")
-            safe_print(f"      📊 Accuracy: {xgb_metrics['accuracy']:.4f}")
-            safe_print(f"      📊 CV Accuracy: {xgb_metrics['cv_mean']:.4f} ± {xgb_metrics['cv_std']*2:.4f}")
-            
-        except (ImportError, NameError) as e:
-            safe_print(f"   ⚡ XGBoost не установлен или недоступен. Пропускаем.")
-            safe_print(f"      Детали: {str(e)[:100]}")
-            # Пытаемся проверить, установлен ли xgboost в системе
-            try:
-                import subprocess
-                import sys
-                result = subprocess.run([sys.executable, "-c", "import xgboost; print(xgboost.__version__)"], 
-                                      capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    safe_print(f"      ⚠️  XGBoost установлен в системе, но не доступен в текущем окружении")
-                    safe_print(f"      Попробуйте: pip install xgboost")
-                else:
-                    safe_print(f"      Установите XGBoost: pip install xgboost")
-            except:
-                pass
-        
-        # Обучаем Ensemble (RF + XGBoost если оба есть)
-        try:
-            rf_model
-            xgb_model
-            safe_print(f"\n   🎯 Обучение Ensemble (RF + XGBoost)...")
-            
-            # Проверяем, есть ли оптимизированные веса для этого символа
-            use_optimized = args.use_optimized_weights and symbol.upper() in optimized_weights
-            rf_weight_opt = None
-            xgb_weight_opt = None
-            
-            if use_optimized:
-                symbol_weights = optimized_weights[symbol.upper()]
-                # Ищем веса для RF и XGB моделей
-                for model_name, weight in symbol_weights.items():
-                    if mode_suffix in model_name and symbol.upper() in model_name:
-                        if model_name.startswith("rf_"):
-                            rf_weight_opt = weight
-                        elif model_name.startswith("xgb_"):
-                            xgb_weight_opt = weight
-                
-                if rf_weight_opt is not None and xgb_weight_opt is not None:
-                    # Нормализуем веса
-                    total = rf_weight_opt + xgb_weight_opt
-                    if total > 0:
-                        rf_weight_opt = rf_weight_opt / total
-                        xgb_weight_opt = xgb_weight_opt / total
-                        safe_print(f"   [OK] Используются оптимизированные веса: RF={rf_weight_opt:.3f}, XGB={xgb_weight_opt:.3f}")
-            
-            # Обучаем ансамбль (веса будут вычислены автоматически или использованы оптимизированные)
-            if use_optimized and rf_weight_opt is not None and xgb_weight_opt is not None:
-                # Создаем ансамбль вручную с оптимизированными весами
-                # Сначала обучаем модели отдельно для получения метрик
-                ensemble_model, ensemble_metrics = trainer.train_ensemble(
-                    X, y,
-                    rf_n_estimators=100,
-                    rf_max_depth=10,
-                    xgb_n_estimators=100,
-                    xgb_max_depth=6,
-                    xgb_learning_rate=0.1,
-                    ensemble_method="weighted_average",
-                    class_weight=class_weight_dict,
-                )
-                # Заменяем ансамбль на новый с оптимизированными весами
-                ensemble_model = WeightedEnsemble(rf_model, xgb_model, rf_weight_opt, xgb_weight_opt)
-                # Обновляем метрики с новыми весами
-                ensemble_metrics['rf_weight'] = rf_weight_opt
-                ensemble_metrics['xgb_weight'] = xgb_weight_opt
-                safe_print(f"   [OK] Ансамбль создан с оптимизированными весами")
-            else:
-                # Используем стандартный метод с автоматическими весами
-                ensemble_model, ensemble_metrics = trainer.train_ensemble(
-                    X, y,
-                    rf_n_estimators=100,
-                    rf_max_depth=10,
-                    xgb_n_estimators=100,
-                    xgb_max_depth=6,
-                    xgb_learning_rate=0.1,
-                    ensemble_method="weighted_average",
-                    class_weight=class_weight_dict,
-                )
-            
-            # Сохраняем модель
-            ensemble_filename = f"ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
-            trainer.save_model(
-                ensemble_model,
-                trainer.scaler,
-                feature_names,
-                ensemble_metrics,
-                ensemble_filename,
-                symbol=symbol,
-                interval=base_interval,
-                model_type="ensemble_weighted",
-                class_weights=class_weight_dict,
-                class_distribution=target_dist.to_dict(),
-                training_params={
-                    "rf_n_estimators": 100,
-                    "rf_max_depth": 10,
-                    "xgb_n_estimators": 100,
-                    "xgb_max_depth": 6,
-                    "xgb_learning_rate": 0.1,
-                    "ensemble_method": "weighted_average",
-                    "forward_periods": 5,
-                    "threshold_pct": 0.5,
-                    "min_risk_reward_ratio": 1.5,
-                    "optimized_weights": use_optimized and rf_weight_opt is not None,
-                    "rf_weight": rf_weight_opt if use_optimized else ensemble_metrics.get('rf_weight'),
-                    "xgb_weight": xgb_weight_opt if use_optimized else ensemble_metrics.get('xgb_weight'),
-                },
-            )
-            safe_print(f"      ✅ Сохранено как: {ensemble_filename}")
-            safe_print(f"      📊 Accuracy: {ensemble_metrics['accuracy']:.4f}")
-            safe_print(f"      📊 CV Accuracy: {ensemble_metrics['cv_mean']:.4f} ± {ensemble_metrics['cv_std']*2:.4f}")
-            if use_optimized and rf_weight_opt is not None:
-                safe_print(f"      📊 Веса: RF={rf_weight_opt:.3f}, XGB={xgb_weight_opt:.3f} (оптимизированные)")
-            
-        except (NameError, ImportError):
-            safe_print(f"   🎯 Не удалось обучить Ensemble. Требуются RF и XGBoost.")
-        
-        # Обучаем TripleEnsemble (если есть LightGBM)
-        try:
-            import lightgbm
-            from bot.ml.model_trainer import LIGHTGBM_AVAILABLE
-            if LIGHTGBM_AVAILABLE:
-                safe_print(f"\n   🎯 Обучение TripleEnsemble (RF + XGBoost + LightGBM)...")
-                
-                # Обучаем LightGBM отдельно для создания ансамбля вручную
-                lgb_model, lgb_metrics = trainer.train_lightgbm_classifier(
-                    X, y,
-                    n_estimators=100,
-                    max_depth=6,
-                    learning_rate=0.1,
-                    class_weight=class_weight_dict,
-                )
-                
-                # Для TripleEnsemble используем оптимизированные веса только для RF и XGB, LightGBM получает остаток
-                use_optimized_triple = args.use_optimized_weights and symbol.upper() in optimized_weights
-                rf_weight_triple = None
-                xgb_weight_triple = None
-                lgb_weight_triple = None
-                
-                if use_optimized_triple:
-                    symbol_weights = optimized_weights[symbol.upper()]
-                    for model_name, weight in symbol_weights.items():
-                        if mode_suffix in model_name and symbol.upper() in model_name:
-                            if model_name.startswith("rf_"):
-                                rf_weight_triple = weight
-                            elif model_name.startswith("xgb_"):
-                                xgb_weight_triple = weight
-                    
-                    if rf_weight_triple is not None and xgb_weight_triple is not None:
-                        # Нормализуем веса RF и XGB, LightGBM получает остаток
-                        total_rf_xgb = rf_weight_triple + xgb_weight_triple
-                        if total_rf_xgb > 0:
-                            # Масштабируем RF и XGB веса, оставляя место для LightGBM
-                            scale = 0.8  # 80% для RF+XGB, 20% для LightGBM
-                            rf_weight_triple = (rf_weight_triple / total_rf_xgb) * scale
-                            xgb_weight_triple = (xgb_weight_triple / total_rf_xgb) * scale
-                            lgb_weight_triple = 1.0 - scale
-                            safe_print(f"   [OK] Используются оптимизированные веса: RF={rf_weight_triple:.3f}, XGB={xgb_weight_triple:.3f}, LGB={lgb_weight_triple:.3f}")
-                
-                # Создаем ансамбль с оптимизированными или стандартными весами
-                if use_optimized_triple and rf_weight_triple is not None and xgb_weight_triple is not None:
-                    # Используем оптимизированные веса
-                    triple_ensemble_model = TripleEnsemble(rf_model, xgb_model, lgb_model, rf_weight_triple, xgb_weight_triple, lgb_weight_triple)
-                    # Вычисляем метрики для ансамбля (используем средневзвешенные метрики компонентов)
-                    triple_ensemble_metrics = {
-                        'accuracy': (
-                            rf_metrics.get('accuracy', 0.0) * rf_weight_triple +
-                            xgb_metrics.get('accuracy', 0.0) * xgb_weight_triple +
-                            lgb_metrics.get('accuracy', 0.0) * lgb_weight_triple
-                        ),
-                        'cv_mean': (
-                            rf_metrics.get('cv_mean', 0.0) * rf_weight_triple +
-                            xgb_metrics.get('cv_mean', 0.0) * xgb_weight_triple +
-                            lgb_metrics.get('cv_mean', 0.0) * lgb_weight_triple
-                        ),
-                        'cv_std': (
-                            (rf_metrics.get('cv_std', 0.0) * rf_weight_triple +
-                             xgb_metrics.get('cv_std', 0.0) * xgb_weight_triple +
-                             lgb_metrics.get('cv_std', 0.0) * lgb_weight_triple) / 3.0
-                        ),
-                        'rf_weight': rf_weight_triple,
-                        'xgb_weight': xgb_weight_triple,
-                        'lgb_weight': lgb_weight_triple,
-                        'rf_metrics': rf_metrics,
-                        'xgb_metrics': xgb_metrics,
-                        'lgb_metrics': lgb_metrics,
-                    }
-                else:
-                    # Используем стандартный метод с автоматическими весами
-                    triple_ensemble_model, triple_ensemble_metrics = trainer.train_ensemble(
-                        X, y,
-                        rf_n_estimators=100,
-                        rf_max_depth=10,
-                        xgb_n_estimators=100,
-                        xgb_max_depth=6,
-                        xgb_learning_rate=0.1,
-                        lgb_n_estimators=100,
-                        lgb_max_depth=6,
-                        lgb_learning_rate=0.1,
-                        ensemble_method="triple",
-                        include_lightgbm=True,
-                        class_weight=class_weight_dict,
-                    )
-                
-                # Сохраняем модель
-                triple_filename = f"triple_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
-                trainer.save_model(
-                    triple_ensemble_model,
-                    trainer.scaler,
-                    feature_names,
-                    triple_ensemble_metrics,
-                    triple_filename,
-                    symbol=symbol,
-                    interval=base_interval,
-                    model_type="triple_ensemble",
-                    class_weights=class_weight_dict,
-                    class_distribution=target_dist.to_dict(),
-                    training_params={
-                        "rf_n_estimators": 100,
-                        "rf_max_depth": 10,
-                        "xgb_n_estimators": 100,
-                        "xgb_max_depth": 6,
-                        "xgb_learning_rate": 0.1,
-                        "lgb_n_estimators": 100,
-                        "lgb_max_depth": 6,
-                        "lgb_learning_rate": 0.1,
-                        "ensemble_method": "triple",
-                        "forward_periods": 5,
-                        "threshold_pct": 0.5,
-                        "min_risk_reward_ratio": 1.5,
-                        "optimized_weights": use_optimized_triple and rf_weight_triple is not None,
-                        "rf_weight": rf_weight_triple if use_optimized_triple else triple_ensemble_metrics.get('rf_weight'),
-                        "xgb_weight": xgb_weight_triple if use_optimized_triple else triple_ensemble_metrics.get('xgb_weight'),
-                        "lgb_weight": lgb_weight_triple if use_optimized_triple else triple_ensemble_metrics.get('lgb_weight'),
-                    },
-                )
-                safe_print(f"      ✅ Сохранено как: {triple_filename}")
-                safe_print(f"      📊 Accuracy: {triple_ensemble_metrics['accuracy']:.4f}")
-                safe_print(f"      📊 CV Accuracy: {triple_ensemble_metrics['cv_mean']:.4f} ± {triple_ensemble_metrics['cv_std']*2:.4f}")
-                if use_optimized_triple and rf_weight_triple is not None:
-                    safe_print(f"      📊 Веса: RF={rf_weight_triple:.3f}, XGB={xgb_weight_triple:.3f}, LGB={lgb_weight_triple:.3f} (оптимизированные)")
-            else:
-                safe_print(f"   ⚠️  LightGBM не установлен, пропускаем TripleEnsemble")
-        except ImportError:
-            safe_print(f"   ⚠️  LightGBM не установлен, пропускаем TripleEnsemble")
-        
-        # Обучаем QuadEnsemble (RF + XGB + LGB + LSTM)
-        try:
-            from bot.ml.model_trainer import LSTM_AVAILABLE, LIGHTGBM_AVAILABLE
-            if args.safe_mode:
-                safe_print(f"   ⚠️  Safe mode включен, пропускаем QuadEnsemble")
-            elif LSTM_AVAILABLE and LIGHTGBM_AVAILABLE:
-                safe_print(f"\n   🚀 Обучение QuadEnsemble (RF + XGB + LGB + LSTM)...")
-                safe_print(f"      (Это может занять некоторое время...)")
-                
-                quad_ensemble_model, quad_metrics = trainer.train_quad_ensemble(
-                    X, y,
-                    df=df_with_target,  # Передаем DataFrame для LSTM последовательностей
-                    rf_n_estimators=100,
-                    rf_max_depth=10,
-                    xgb_n_estimators=100,
-                    xgb_max_depth=6,
-                    xgb_learning_rate=0.1,
-                    lgb_n_estimators=100,
-                    lgb_max_depth=6,
-                    lgb_learning_rate=0.1,
-                    lstm_sequence_length=60,
-                    lstm_epochs=20,  # 20 эпох достаточно для быстрой перетренировки
-                    class_weight=class_weight_dict,
-                )
-                
-                # Сохраняем модель
-                quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
-                trainer.save_model(
-                    quad_ensemble_model,
-                    trainer.scaler,
-                    feature_names,
-                    quad_metrics,
-                    quad_filename,
-                    symbol=symbol,
-                    interval=base_interval,
-                    model_type="quad_ensemble",
-                    class_weights=class_weight_dict,
-                    class_distribution=target_dist.to_dict(),
-                    training_params={
-                        "ensemble_method": "quad",
-                        "lstm_epochs": 20,
-                        "lstm_sequence_length": 60,
-                        "forward_periods": 5,
-                        "threshold_pct": 0.5,
-                        "min_risk_reward_ratio": 1.5,
-                    },
-                )
-                safe_print(f"      ✅ Сохранено как: {quad_filename}")
-                
-                # Для QuadEnsemble метрики агрегированные
-                rf_m = quad_metrics.get("rf_metrics", {})
-                lstm_m = quad_metrics.get("lstm_metrics", {})
-                
-                safe_print(f"      📊 RF CV Accuracy: {rf_m.get('cv_mean', 0):.4f}")
-                safe_print(f"      📊 LSTM Accuracy: {lstm_m.get('accuracy', 0):.4f}")
-                
-            else:
-                missing = []
-                if not LSTM_AVAILABLE: missing.append("LSTM (PyTorch)")
-                if not LIGHTGBM_AVAILABLE: missing.append("LightGBM")
-                safe_print(f"   ⚠️  Компоненты отсутствуют ({', '.join(missing)}), пропускаем QuadEnsemble")
         except Exception as e:
-            safe_print(f"   ⚠️  Ошибка при обучении QuadEnsemble: {e}")
-        
-        # Итоговые метрики
-        safe_print(f"\n" + "-" * 80)
-        safe_print(f"📊 ИТОГОВЫЕ МЕТРИКИ ДЛЯ {symbol}")
-        safe_print("-" * 80)
-        safe_print(f"\n🌲 Random Forest:")
-        safe_print(f"   Accuracy:     {rf_metrics['accuracy']:.4f}")
-        safe_print(f"   CV Accuracy:  {rf_metrics['cv_mean']:.4f} ± {rf_metrics['cv_std']*2:.4f}")
-        
-        if 'xgb_metrics' in locals():
-            safe_print(f"\n⚡ XGBoost:")
-            safe_print(f"   Accuracy:     {xgb_metrics['accuracy']:.4f}")
-            safe_print(f"   CV Accuracy:  {xgb_metrics['cv_mean']:.4f} ± {xgb_metrics['cv_std']*2:.4f}")
-        
-        if 'ensemble_metrics' in locals():
-            safe_print(f"\n🎯 Ensemble (RF+XGB):")
-            safe_print(f"   Accuracy:     {ensemble_metrics['accuracy']:.4f}")
-            safe_print(f"   CV Accuracy:  {ensemble_metrics['cv_mean']:.4f} ± {ensemble_metrics['cv_std']*2:.4f}")
-        
-        if 'triple_ensemble_metrics' in locals():
-            safe_print(f"\n🎯 TripleEnsemble (RF+XGB+LGB):")
-            safe_print(f"   Accuracy:     {triple_ensemble_metrics['accuracy']:.4f}")
-            safe_print(f"   CV Accuracy:  {triple_ensemble_metrics['cv_mean']:.4f} ± {triple_ensemble_metrics['cv_std']*2:.4f}")
+            xgb_metrics = None
+            safe_print(f"      ⚠️  XGBoost недоступен: {e}")
 
-        if 'quad_metrics' in locals():
-            safe_print(f"\n🚀 QuadEnsemble (RF+XGB+LGB+LSTM):")
-            safe_print(f"   Модель успешно обучена и сохранена.")
-        
-        # Выбор лучшей модели
-        models = []
-        models.append(("Random Forest", rf_metrics['cv_mean']))
-        if 'xgb_metrics' in locals():
-            models.append(("XGBoost", xgb_metrics['cv_mean']))
-        if 'ensemble_metrics' in locals():
-            models.append(("Ensemble", ensemble_metrics['cv_mean']))
-        if 'triple_ensemble_metrics' in locals():
-            models.append(("TripleEnsemble", triple_ensemble_metrics['cv_mean']))
-        if 'quad_metrics' in locals():
-             # Используем среднее CV классических моделей как прокси + бонус за диверсификацию
-             avg_cv = (rf_metrics['cv_mean'] + xgb_metrics.get('cv_mean', 0) + triple_ensemble_metrics.get('cv_mean', 0)) / 3
-             models.append(("QuadEnsemble", avg_cv * 1.05)) # Условный бонус
-        
-        if models:
-            models.sort(key=lambda x: x[1], reverse=True)
-            best_model, best_score = models[0]
-            safe_print(f"\n✅ Лучшая модель для {symbol}: {best_model}")
-            safe_print(f"   Score: {best_score:.4f}")
-    
-    report: Dict[str, Any] = {}
-    try:
-        report = {
-            "symbols": symbols,
-            "interval_display": interval_display,
-            "ml_mtf_enabled": ml_mtf_enabled,
-            "rf_metrics": rf_metrics,
-        }
-        if "xgb_metrics" in locals():
-            report["xgb_metrics"] = xgb_metrics
-        if "ensemble_metrics" in locals():
-            report["ensemble_metrics"] = ensemble_metrics
-        if "triple_ensemble_metrics" in locals():
-            report["triple_ensemble_metrics"] = triple_ensemble_metrics
-        if "quad_metrics" in locals():
-            report["quad_metrics"] = quad_metrics
-        if args.report_json:
-            try:
-                from pathlib import Path as _Path
-                p = _Path(args.report_json)
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with open(p, "w", encoding="utf-8") as f:
-                    json.dump(report, f, ensure_ascii=False, indent=2, default=str)
-            except Exception as e:
-                safe_print(f"[WARNING] Не удалось сохранить отчёт эксперимента: {e}")
-    except Exception as e:
-        safe_print(f"[WARNING] Ошибка при формировании отчёта эксперимента: {e}")
+        if xgb_metrics is not None:
+            safe_print("\n   🎯 Обучение Ensemble (RF + XGBoost)...")
+            ensemble_model, ensemble_metrics = trainer.train_ensemble(
+                X,
+                y,
+                rf_n_estimators=rf_n_estimators,
+                rf_max_depth=rf_max_depth,
+                xgb_n_estimators=xgb_n_estimators,
+                xgb_max_depth=xgb_max_depth,
+                xgb_learning_rate=xgb_learning_rate,
+            )
+            ensemble_filename = f"ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
+            trainer.save_model(ensemble_model, trainer.scaler, feature_names, ensemble_metrics, ensemble_filename)
+            safe_print(f"      ✅ Сохранено как: {ensemble_filename}")
+        else:
+            ensemble_metrics = None
 
-    # Финальное сообщение
+    report = {
+        "symbols": symbols,
+        "interval_display": interval_display,
+        "ml_mtf_enabled": ml_mtf_enabled,
+        "hyperparams": hyperparams,
+        "rf_metrics": rf_metrics,
+    }
+    if xgb_metrics is not None:
+        report["xgb_metrics"] = xgb_metrics
+    if ensemble_metrics is not None:
+        report["ensemble_metrics"] = ensemble_metrics
+    if args.report_json:
+        try:
+            p = Path(args.report_json)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            safe_print(f"[WARNING] Не удалось сохранить отчёт эксперимента: {e}")
+
     safe_print("\n" + "=" * 80)
     safe_print("🎉 ПЕРЕОБУЧЕНИЕ ЗАВЕРШЕНО!")
-    safe_print("=" * 80)
-    safe_print("\n📦 Созданные модели:")
-    safe_print("   • ml_models/rf_*_15.pkl (Random Forest)")
-    safe_print("   • ml_models/xgb_*_15.pkl (XGBoost)")
-    safe_print("   • ml_models/ensemble_*_15.pkl (RF + XGBoost)")
-    safe_print("   • ml_models/triple_ensemble_*_15.pkl (RF + XGBoost + LightGBM)")
-    safe_print("   • ml_models/quad_ensemble_*_15.pkl (RF + XGBoost + LightGBM + LSTM)")
-    safe_print("\n🚀 Следующие шаги:")
-    safe_print("   1. Протестируйте новые модели:")
-    safe_print("      python test_ml_strategy.py --symbol SOLUSDT --days 7")
-    safe_print("   2. Если результаты хорошие, задеплойте на сервер")
     safe_print("=" * 80)
 
 

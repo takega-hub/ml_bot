@@ -1,0 +1,75 @@
+AI Research Plan
+
+1) Актуальный статус (обновлено)
+
+- Итерации A/B/C/D реализованы в backend и доведены до рабочего runtime-контура.
+- Реализованы AI Planner, Analyzer, Campaign Orchestrator, Rule-based Safety, Memory v2 и Notebook v2.
+- В AI статус/API/UI добавлены блоки устойчивости и деградации:
+  - oos_metrics,
+  - drift_signals,
+  - stress_results.
+- Добавлены regression-тесты для ключевых блоков:
+  - test_experiment_management_v2.py,
+  - test_api_research_status_v2.py.
+- Для быстрого чтения метрик см. docs/AI_RESEARCH_RUNBOOK.md.
+
+2) Что сделано по этапам
+
+- Итерация A (API/contracts + campaign controls) — сделано:
+  - расширен POST /api/ai/research/start (goal/constraints/budget/auto_iterate/max_steps);
+  - расширен GET /api/ai/research/status (campaign/ai_plan_brief/analysis_summary/next_actions);
+  - реализованы pause/resume/stop кампании;
+  - добавлены ограничения на параллельные кампании + idempotent-защита.
+- Итерация B (scoring/gates + WF + champion/challenger) — сделано:
+  - unified score и quality gates применяются для выбора и рекомендаций;
+  - walk-forward и OOS встроены в цикл исследований;
+  - champion/challenger использует score + OOS + WF.
+- Итерация C (regime-aware + risk guard + notebook) — сделано:
+  - regime-aware планирование и настройка параметров;
+  - AI Risk Guard с soft-fallback для auto-iterative цепочек;
+  - Research Notebook v2 с decision_trace, delta_vs_prev, expected_vs_actual, stop_reason.
+- Итерация D (stress/drift/ablation + hardening) — базово сделано:
+  - stress_results, drift_signals, oos_metrics добавлены в results;
+  - поля выведены в /api/ai/research/status и UI;
+  - добавлены regression-тесты.
+
+3) Что осталось (короткий backlog)
+
+- D.1 Долгий soak-прогон кампаний:
+  - 3–5+ итераций по нескольким символам;
+  - контроль стабильности scheduled_next/failed_to_schedule_next/manual_stop/max_steps_reached.
+- D.2 Усиление realism для stress/drift:
+  - перейти от эвристик к более trade-aware сценариям;
+  - добавить расширенные сигналы drift по межитерационным сдвигам.
+- D.3 CI hardening:
+  - включить новые regression-тесты в постоянный pipeline.
+- D.4 UI полировка:
+  - улучшить визуальные индикаторы риска/стабильности для новых блоков.
+
+4) Текущая архитектура AI-контура
+
+- AI Planner:
+  - строит план запуска эксперимента;
+  - задаёт train/backtest параметры и hyperparams-кандидаты.
+- AI Analyzer:
+  - формирует analysis_summary;
+  - строит selection/decision trace и рекомендации.
+- AI Campaign Orchestrator:
+  - ведёт auto-iterate цепочки;
+  - управляет next_experiment_id и статусами кампаний.
+- Rule-based Safety:
+  - проверяет риск-профиль и ограничения;
+  - включает soft-fallback для repeated_failures в режиме safe-mode.
+- Experiment Memory v2:
+  - хранит success_rate/stability/last_seen/fail reasons/confidence;
+  - влияет на выбор кандидата P2.4.
+- Research Notebook v2:
+  - фиксирует гипотезу, выбор, дельты, expected_vs_actual и stop_reason.
+
+5) Критерии готовности полного AI-контура (актуально)
+
+- Эксперименты запускаются и итерируются без ручного вмешательства в рамках max_steps.
+- Каждая итерация имеет человекочитаемую мотивацию и след изменений.
+- Решение о продвижении модели учитывает score + OOS + WF, а не только PnL.
+- UI показывает контекст кампании и аналитические блоки устойчивости.
+- Есть безопасная остановка/пауза и защита от runaway-циклов.
