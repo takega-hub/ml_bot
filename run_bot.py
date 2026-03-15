@@ -196,7 +196,7 @@ async def main():
         if mobile_api_key:
             try:
                 api_port = int(os.getenv("MOBILE_API_PORT", "8765"))
-                api_host = "0.0.0.0"
+                api_host = os.getenv("MOBILE_API_HOST", "0.0.0.0")
                 tasks.append(run_api_server(state, bybit, settings, trading_loop, model_manager, tg_bot, host=api_host, port=api_port))
                 logger.info(
                     f"[Mobile API] Задача добавлена. Слушаем {api_host}:{api_port}. "

@@ -221,6 +221,57 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
     return models_1h, models_15m
 
 
+def find_best_single_model_from_comparison(symbol: str) -> Optional[Dict[str, Any]]:
+    comparison_files = sorted(
+        Path(".").glob("ml_models_comparison_*.csv"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True
+    )
+    if not comparison_files:
+        return None
+    try:
+        df = pd.read_csv(comparison_files[0])
+        if "symbol" not in df.columns:
+            return None
+        symbol_data = df[df["symbol"] == symbol.upper()].copy()
+        if symbol_data.empty or "total_pnl_pct" not in symbol_data.columns:
+            return None
+        if "total_trades" in symbol_data.columns:
+            symbol_data = symbol_data[symbol_data["total_trades"] > 0]
+        if symbol_data.empty:
+            return None
+        sort_columns = ["total_pnl_pct"]
+        ascending = [False]
+        if "win_rate" in symbol_data.columns:
+            sort_columns.append("win_rate")
+            ascending.append(False)
+        if "total_trades" in symbol_data.columns:
+            sort_columns.append("total_trades")
+            ascending.append(False)
+        best_row = symbol_data.sort_values(sort_columns, ascending=ascending).iloc[0]
+        model_filename = str(best_row.get("model_filename", "") or "")
+        model_name = model_filename.replace(".pkl", "") if model_filename else str(best_row.get("model_name", "") or "")
+        mode_suffix = str(best_row.get("mode_suffix", "") or "").lower()
+        timeframe = mode_suffix
+        if not timeframe:
+            lower_name = model_name.lower()
+            if "_60_" in lower_name or "_1h" in lower_name:
+                timeframe = "1h"
+            elif "_15_" in lower_name or "_15m" in lower_name:
+                timeframe = "15m"
+        return {
+            "model_name": model_name,
+            "timeframe": timeframe or "unknown",
+            "total_pnl_pct": float(best_row.get("total_pnl_pct", 0.0) or 0.0),
+            "win_rate": float(best_row.get("win_rate", 0.0) or 0.0),
+            "total_trades": int(best_row.get("total_trades", 0) or 0),
+            "source_file": comparison_files[0].name,
+        }
+    except Exception as e:
+        print(f"⚠️  Не удалось определить лучшую single модель: {e}")
+        return None
+
+
 def find_models_for_symbol(
     symbol: str, 
     use_best_from_comparison: bool = True,
@@ -407,11 +458,39 @@ def run_mtf_backtest_all_combinations(
     if results:
         df_results = pd.DataFrame(results)
         df_results = df_results.sort_values('total_pnl_pct', ascending=False)
+        best_combo = df_results.iloc[0]
+        best_single = find_best_single_model_from_comparison(symbol)
         
         print("=" * 80)
         print("🏆 ЛУЧШИЕ КОМБИНАЦИИ")
         print("=" * 80)
         print(df_results.head(10).to_string(index=False))
+        print()
+        print("=" * 80)
+        print("📋 ИТОГОВЫЙ ОТЧЕТ ТЕСТИРОВАНИЯ")
+        print("=" * 80)
+        print("Лучшая комбинация моделей:")
+        print(f"  1h: {best_combo['model_1h']}")
+        print(f"  15m: {best_combo['model_15m']}")
+        print(f"  PnL: {best_combo['total_pnl_pct']:.2f}%")
+        print(f"  Win Rate: {best_combo['win_rate']:.1f}%")
+        print(f"  Сделок: {int(best_combo['total_trades'])}")
+        print(f"  Max DD: {best_combo['max_drawdown_pct']:.2f}%")
+        if best_single:
+            print()
+            print("Лучшая single модель:")
+            print(f"  Модель: {best_single['model_name']}")
+            print(f"  Таймфрейм: {best_single['timeframe']}")
+            print(f"  PnL: {best_single['total_pnl_pct']:.2f}%")
+            print(f"  Win Rate: {best_single['win_rate']:.1f}%")
+            print(f"  Сделок: {best_single['total_trades']}")
+            delta = float(best_combo['total_pnl_pct']) - float(best_single['total_pnl_pct'])
+            print(f"  Разница combo vs single: {delta:+.2f} п.п.")
+            print(f"  Источник single: {best_single['source_file']}")
+        else:
+            print()
+            print("Лучшая single модель: нет данных в ml_models_comparison_*.csv")
+        print("=" * 80)
         print()
         
         # Сохраняем результаты
