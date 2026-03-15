@@ -11,6 +11,7 @@ import subprocess
 import sys
 import urllib.request
 import urllib.parse
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Optional, Any, List, Dict
 import shutil
@@ -448,39 +449,36 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
 
     # --- Risk (read + write to file and in-memory) ---
     def _risk_to_dict(r):
-        def _v(name: str, default: Any = None):
+        if is_dataclass(r):
             try:
-                return getattr(r, name, default)
+                payload = asdict(r)
+                if isinstance(payload, dict):
+                    return payload
             except Exception:
-                return default
-        return {
-            "margin_pct_balance": _v("margin_pct_balance", 0.0),
-            "base_order_usd": _v("base_order_usd", 0.0),
-            "stop_loss_pct": _v("stop_loss_pct", 0.0),
-            "take_profit_pct": _v("take_profit_pct", 0.0),
-            "enable_trailing_stop": _v("enable_trailing_stop", False),
-            "trailing_stop_activation_pct": _v("trailing_stop_activation_pct", 0.0),
-            "trailing_stop_distance_pct": _v("trailing_stop_distance_pct", 0.0),
-            "enable_partial_close": _v("enable_partial_close", False),
-            "enable_breakeven": _v("enable_breakeven", False),
-            "breakeven_level1_activation_pct": _v("breakeven_level1_activation_pct", 0.0),
-            "breakeven_level1_sl_pct": _v("breakeven_level1_sl_pct", 0.0),
-            "breakeven_level2_activation_pct": _v("breakeven_level2_activation_pct", 0.0),
-            "breakeven_level2_sl_pct": _v("breakeven_level2_sl_pct", 0.0),
-            "enable_loss_cooldown": _v("enable_loss_cooldown", False),
-            "fee_rate": _v("fee_rate", 0.0),
-            "mid_term_tp_pct": _v("mid_term_tp_pct", 0.0),
-            "long_term_tp_pct": _v("long_term_tp_pct", 0.0),
-            "long_term_sl_pct": _v("long_term_sl_pct", 0.0),
-            "long_term_ignore_reverse": _v("long_term_ignore_reverse", False),
-            "dca_enabled": _v("dca_enabled", False),
-            "dca_drawdown_pct": _v("dca_drawdown_pct", 0.0),
-            "dca_max_adds": _v("dca_max_adds", 0),
-            "dca_min_confidence": _v("dca_min_confidence", 0.0),
-            "reverse_on_strong_signal": _v("reverse_on_strong_signal", False),
-            "reverse_min_confidence": _v("reverse_min_confidence", 0.0),
-            "reverse_min_strength": _v("reverse_min_strength", "сильное"),
+                pass
+        try:
+            return {
+                k: v
+                for k, v in vars(r).items()
+                if not str(k).startswith("_")
+            }
+        except Exception:
+            return {}
+
+    def _normalize_risk_key(name: Any) -> str:
+        k = str(name or "").strip().lower()
+        k = k.replace(" ", "_").replace("-", "_")
+        aliases = {
+            "stop_loss": "stop_loss_pct",
+            "stop_loss_percent": "stop_loss_pct",
+            "take_profit": "take_profit_pct",
+            "take_profit_percent": "take_profit_pct",
+            "trailing_stop_activation": "trailing_stop_activation_pct",
+            "trailing_stop_distance": "trailing_stop_distance_pct",
+            "breakeven_level1_activation": "breakeven_level1_activation_pct",
+            "breakeven_level2_activation": "breakeven_level2_activation_pct",
         }
+        return aliases.get(k, k)
 
     @app.get("/api/risk", dependencies=[Depends(verify_api_key)])
     def get_risk():
@@ -492,7 +490,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         old_settings = _risk_to_dict(settings.risk)
         
         risk = settings.risk
+        applied_keys: List[str] = []
+        ignored_keys: List[str] = []
         for key, val in body.items():
+            key = _normalize_risk_key(key)
             if hasattr(risk, key):
                 if key in ("margin_pct_balance", "stop_loss_pct", "take_profit_pct", "trailing_stop_activation_pct",
                            "trailing_stop_distance_pct", "breakeven_level1_activation_pct", "breakeven_level1_sl_pct",
@@ -502,13 +503,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     if val >= 1:
                         val = val / 100.0
                 setattr(risk, key, val)
+                applied_keys.append(key)
+            else:
+                ignored_keys.append(str(key))
+
+        if not applied_keys:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "No valid risk fields to update",
+                    "ignored_keys": ignored_keys,
+                },
+            )
         
         # Capture new settings
         new_settings = _risk_to_dict(risk)
         
         risk_file = PROJECT_ROOT / "risk_settings.json"
-        with open(risk_file, "w", encoding="utf-8") as f:
-            json.dump(new_settings, f, indent=2, ensure_ascii=False)
+        existing_payload: Dict[str, Any] = {}
+        try:
+            if risk_file.exists():
+                with open(risk_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    existing_payload = loaded
+        except Exception:
+            existing_payload = {}
+        existing_payload.update(new_settings)
+        tmp_file = risk_file.with_suffix(".json.tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(existing_payload, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, risk_file)
             
         # Notify AI Agent about changes
         try:
@@ -519,7 +544,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception as e:
              logger.error(f"Failed to notify AI agent about risk update: {e}")
              
-        return {"ok": True, "risk": new_settings}
+        return {
+            "ok": True,
+            "risk": new_settings,
+            "applied_keys": applied_keys,
+            "ignored_keys": ignored_keys,
+        }
 
     @app.get("/api/ai/risk_history", dependencies=[Depends(verify_api_key)])
     def get_ai_risk_history():
@@ -1885,7 +1915,6 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         from .experiment_management import (
             ExperimentAnalyzer,
             ExperimentCriteria,
-            ExperimentReportBuilder,
             ExperimentStore,
             HypothesisGenerator,
         )
@@ -1907,11 +1936,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.get("/api/ai/experiments/report/{experiment_id}", dependencies=[Depends(verify_api_key)])
     def get_experiment_report(experiment_id: str):
         from pathlib import Path
-        from .experiment_management import (
-            ExperimentAnalyzer,
-            ExperimentReportBuilder,
-            ExperimentStore,
-        )
+        from .experiment_management import ExperimentAnalyzer, ExperimentStore
 
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
         exp = store.get(experiment_id)
@@ -1921,7 +1946,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         impact = None
         if exp.get("symbol"):
             impact = analyzer.compute_param_impact(str(exp.get("symbol")))
-        md = ExperimentReportBuilder().build_markdown(exp, impact=impact)
+        markdown_builder = None
+        try:
+            from .experiment_management import ExperimentReportBuilder
+
+            markdown_builder = ExperimentReportBuilder()
+        except Exception:
+            markdown_builder = None
+        if markdown_builder is not None:
+            md = markdown_builder.build_markdown(exp, impact=impact)
+        else:
+            results = exp.get("results") if isinstance(exp.get("results"), dict) else {}
+            lines = [
+                f"# Experiment Report: {exp.get('id') or experiment_id}",
+                "",
+                "## Overview",
+                f"- Symbol: {exp.get('symbol')}",
+                f"- Type: {exp.get('type')}",
+                f"- Status: {exp.get('status')}",
+                "",
+                "## Performance",
+                f"- Total PnL (%): {results.get('total_pnl_pct')}",
+                f"- Win rate (%): {results.get('win_rate')}",
+                f"- Max drawdown (%): {results.get('max_drawdown_pct') or results.get('max_drawdown')}",
+                f"- Total trades: {results.get('total_trades')}",
+                f"- Recommended tactic: {results.get('recommended_tactic')}",
+            ]
+            if isinstance(impact, dict) and impact:
+                lines.extend(["", "## Parameter Impact"])
+                for key, value in impact.items():
+                    lines.append(f"- {key}: {value}")
+            md = "\n".join(lines)
         return {"experiment_id": experiment_id, "markdown": md}
 
     @app.get("/api/ai/research/experiment/{experiment_id}/health", dependencies=[Depends(verify_api_key)])
@@ -2411,16 +2466,64 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 raise HTTPException(status_code=400, detail="Experiment missing symbol")
             
             # Получаем модели из эксперимента
-            results = experiment.get("results", {})
-            models = results.get("models", {})
-            model_15m_path = models.get("15m")
-            model_1h_path = models.get("1h")
+            results = experiment.get("results") if isinstance(experiment.get("results"), dict) else {}
+            model_sources: List[Dict[str, Any]] = []
+            if isinstance(results.get("models"), dict):
+                model_sources.append(results.get("models"))
+            if isinstance(experiment.get("models"), dict):
+                model_sources.append(experiment.get("models"))
+            if isinstance(experiment.get("applied_models"), dict):
+                model_sources.append(experiment.get("applied_models"))
+            merged_models: Dict[str, Any] = {}
+            for src in model_sources:
+                if not isinstance(src, dict):
+                    continue
+                for k, v in src.items():
+                    if v in (None, "", "null"):
+                        continue
+                    merged_models[str(k)] = v
+            model_15m_path = (
+                merged_models.get("15m")
+                or merged_models.get("model_15m")
+                or merged_models.get("tf_15m")
+                or merged_models.get("m15")
+            )
+            model_1h_path = (
+                merged_models.get("1h")
+                or merged_models.get("model_1h")
+                or merged_models.get("tf_1h")
+                or merged_models.get("h1")
+            )
             recommended_tactic = results.get("recommended_tactic")
+            if not recommended_tactic and isinstance((results.get("selection") or {}).get("recommended_tactic"), str):
+                recommended_tactic = (results.get("selection") or {}).get("recommended_tactic")
             
             if not model_15m_path and not model_1h_path:
-                raise HTTPException(status_code=400, detail="Experiment has no models")
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Experiment has no models",
+                        "experiment_id": body.experiment_id,
+                        "available_model_keys": sorted(list(merged_models.keys())),
+                    },
+                )
             
             # Применяем стратегию
+            if not recommended_tactic:
+                if model_1h_path and model_15m_path:
+                    recommended_tactic = "mtf"
+                elif model_1h_path:
+                    recommended_tactic = "single_1h"
+                else:
+                    recommended_tactic = "single_15m"
+
+            if recommended_tactic == "single_1h" and not model_1h_path and model_15m_path:
+                recommended_tactic = "single_15m"
+            if recommended_tactic == "single_15m" and not model_15m_path and model_1h_path:
+                recommended_tactic = "single_1h"
+            if recommended_tactic == "mtf" and not (model_1h_path and model_15m_path):
+                recommended_tactic = "single_15m" if model_15m_path else "single_1h"
+
             if recommended_tactic == "single_1h":
                 model_path = model_1h_path
                 if not model_path:
