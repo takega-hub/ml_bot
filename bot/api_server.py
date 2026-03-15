@@ -1756,6 +1756,34 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "current_risk": current_risk,
             }
             result = await ai_agent.analyze_risk_settings(payload)
+            if not isinstance(result, dict):
+                result = {
+                    "analysis": "Некорректный ответ AI-анализа",
+                    "suggestions": [],
+                    "risk_score": 0,
+                }
+            suggestions = result.get("suggestions")
+            normalized_suggestions: List[Dict[str, Any]] = []
+            if isinstance(suggestions, list):
+                for item in suggestions:
+                    if not isinstance(item, dict):
+                        continue
+                    key = _normalize_risk_key(item.get("setting_key"))
+                    if not key or not hasattr(settings.risk, key):
+                        continue
+                    current_value = current_risk.get(key, getattr(settings.risk, key, None))
+                    suggested_value = item.get("suggested_value")
+                    if current_value == suggested_value:
+                        continue
+                    if isinstance(current_value, (int, float)) and isinstance(suggested_value, (int, float)):
+                        if abs(float(current_value) - float(suggested_value)) < 1e-12:
+                            continue
+                    row = dict(item)
+                    row["setting_key"] = key
+                    row["current_value"] = current_value
+                    normalized_suggestions.append(row)
+            result["suggestions"] = normalized_suggestions
+            result["current_risk"] = current_risk
             return result
         except Exception as e:
             logger.error(f"AI risk endpoint failed: {e}", exc_info=True)

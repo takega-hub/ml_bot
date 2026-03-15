@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bot.config import ApiSettings, load_settings
 from bot.ml.data_collector import DataCollector
 from bot.ml.feature_engineering import FeatureEngineer
-from bot.ml.model_trainer import ModelTrainer
+from bot.ml.model_trainer import ModelTrainer, LIGHTGBM_AVAILABLE, LSTM_AVAILABLE
 
 
 def safe_print(*args, **kwargs):
@@ -150,6 +150,8 @@ def main():
     rf_metrics = None
     xgb_metrics = None
     ensemble_metrics = None
+    triple_ensemble_metrics = None
+    quad_metrics = None
 
     for symbol in symbols:
         safe_print("\n" + "=" * 80)
@@ -252,6 +254,77 @@ def main():
         else:
             ensemble_metrics = None
 
+        if xgb_metrics is not None and LIGHTGBM_AVAILABLE:
+            safe_print("\n   🎯 Обучение TripleEnsemble (RF + XGBoost + LightGBM)...")
+            lgb_n_estimators = _clamp_int(hyperparams.get("lgb_n_estimators"), 80, 600, 100)
+            lgb_max_depth = _clamp_int(hyperparams.get("lgb_max_depth"), 3, 12, 6)
+            lgb_learning_rate = _clamp_float(hyperparams.get("lgb_learning_rate"), 0.02, 0.3, 0.1)
+            triple_model, triple_ensemble_metrics = trainer.train_ensemble(
+                X,
+                y,
+                rf_n_estimators=rf_n_estimators,
+                rf_max_depth=rf_max_depth,
+                xgb_n_estimators=xgb_n_estimators,
+                xgb_max_depth=xgb_max_depth,
+                xgb_learning_rate=xgb_learning_rate,
+                lgb_n_estimators=lgb_n_estimators,
+                lgb_max_depth=lgb_max_depth,
+                lgb_learning_rate=lgb_learning_rate,
+                ensemble_method="triple",
+                include_lightgbm=True,
+            )
+            triple_filename = f"triple_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
+            trainer.save_model(
+                triple_model,
+                trainer.scaler,
+                feature_names,
+                triple_ensemble_metrics,
+                triple_filename,
+                symbol=symbol,
+                interval=base_interval,
+                model_type="triple_ensemble",
+            )
+            safe_print(f"      ✅ Сохранено как: {triple_filename}")
+        else:
+            triple_ensemble_metrics = None
+
+        if xgb_metrics is not None and LIGHTGBM_AVAILABLE and LSTM_AVAILABLE:
+            safe_print("\n   🚀 Обучение QuadEnsemble (RF + XGBoost + LightGBM + LSTM)...")
+            lgb_n_estimators = _clamp_int(hyperparams.get("lgb_n_estimators"), 80, 600, 100)
+            lgb_max_depth = _clamp_int(hyperparams.get("lgb_max_depth"), 3, 12, 6)
+            lgb_learning_rate = _clamp_float(hyperparams.get("lgb_learning_rate"), 0.02, 0.3, 0.1)
+            lstm_sequence_length = _clamp_int(hyperparams.get("lstm_sequence_length"), 30, 120, 60)
+            lstm_epochs = _clamp_int(hyperparams.get("lstm_epochs"), 5, 80, 20 if args.safe_mode else 40)
+            quad_model, quad_metrics = trainer.train_quad_ensemble(
+                X,
+                y,
+                df=df_target,
+                rf_n_estimators=rf_n_estimators,
+                rf_max_depth=rf_max_depth,
+                xgb_n_estimators=xgb_n_estimators,
+                xgb_max_depth=xgb_max_depth,
+                xgb_learning_rate=xgb_learning_rate,
+                lgb_n_estimators=lgb_n_estimators,
+                lgb_max_depth=lgb_max_depth,
+                lgb_learning_rate=lgb_learning_rate,
+                lstm_sequence_length=lstm_sequence_length,
+                lstm_epochs=lstm_epochs,
+            )
+            quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
+            trainer.save_model(
+                quad_model,
+                trainer.scaler,
+                feature_names,
+                quad_metrics,
+                quad_filename,
+                symbol=symbol,
+                interval=base_interval,
+                model_type="quad_ensemble",
+            )
+            safe_print(f"      ✅ Сохранено как: {quad_filename}")
+        else:
+            quad_metrics = None
+
     report = {
         "symbols": symbols,
         "interval_display": interval_display,
@@ -263,6 +336,10 @@ def main():
         report["xgb_metrics"] = xgb_metrics
     if ensemble_metrics is not None:
         report["ensemble_metrics"] = ensemble_metrics
+    if triple_ensemble_metrics is not None:
+        report["triple_ensemble_metrics"] = triple_ensemble_metrics
+    if quad_metrics is not None:
+        report["quad_metrics"] = quad_metrics
     if args.report_json:
         try:
             p = Path(args.report_json)
