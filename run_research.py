@@ -690,6 +690,20 @@ def main():
                 recommended_tactic = name
                 best_metrics = payload
 
+        best_single_tactic = None
+        best_single_metrics: Dict[str, Any] = {}
+        best_single_score = None
+        for name, payload in tactics.items():
+            if not name.startswith("single_"):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            s = _score(payload)
+            if best_single_score is None or s > best_single_score:
+                best_single_score = s
+                best_single_tactic = name
+                best_single_metrics = payload
+
         result_data = dict(best_metrics) if isinstance(best_metrics, dict) else {}
         result_data["tactics"] = tactics
         result_data["recommended_tactic"] = recommended_tactic
@@ -703,6 +717,27 @@ def main():
             "15m": model_15m_path,
             "1h": model_1h_path
         }
+        if "mtf" in tactics and isinstance(tactics["mtf"], dict):
+            mtf_metrics = tactics["mtf"]
+            result_data["best_combo"] = {
+                "tactic": "mtf",
+                "model_1h": model_1h_path,
+                "model_15m": model_15m_path,
+                "total_pnl_pct": mtf_metrics.get("total_pnl_pct"),
+                "win_rate": mtf_metrics.get("win_rate"),
+                "total_trades": mtf_metrics.get("total_trades"),
+                "max_drawdown_pct": mtf_metrics.get("max_drawdown_pct"),
+            }
+        if best_single_tactic and isinstance(best_single_metrics, dict):
+            result_data["best_single"] = {
+                "tactic": best_single_tactic,
+                "timeframe": "1h" if best_single_tactic == "single_1h" else "15m",
+                "model_name": best_single_metrics.get("model_name"),
+                "total_pnl_pct": best_single_metrics.get("total_pnl_pct"),
+                "win_rate": best_single_metrics.get("win_rate"),
+                "total_trades": best_single_metrics.get("total_trades"),
+                "max_drawdown_pct": best_single_metrics.get("max_drawdown_pct"),
+            }
         
         update_experiment_status(experiment_id, "completed", {
             "progress": 100,
