@@ -1798,9 +1798,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             if not res.get("ok"):
                  error_msg = res.get("error", "Unknown error")
                  logger.error(f"Research start failed for {symbol}: {error_msg}")
+                 error_detail = {
+                     "error": error_msg,
+                     "experiment_id": res.get("experiment_id"),
+                     "param_signature": res.get("param_signature"),
+                     "effective_params": res.get("effective_params"),
+                 }
                  if "Duplicate" in error_msg:
-                     raise HTTPException(status_code=409, detail=error_msg)
-                 raise HTTPException(status_code=500, detail=error_msg)
+                     raise HTTPException(status_code=409, detail=error_detail)
+                 raise HTTPException(status_code=500, detail=error_detail)
             
             if tg_bot:
                  await tg_bot.send_notification(f"🧪 Research Experiment ({body.type}) started for {symbol}")
