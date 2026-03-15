@@ -93,7 +93,7 @@ class AIAgentService:
             try:
                 response = (
                     self.supabase.table("chat_messages")
-                    .select("role,content,created_at")
+                    .select("id,role,content,created_at")
                     .order("created_at", desc=True)
                     .limit(500)
                     .execute()
@@ -107,6 +107,7 @@ class AIAgentService:
                             continue
                         out.append(
                             {
+                                "id": row.get("id"),
                                 "role": row.get("role"),
                                 "content": row.get("content"),
                                 "timestamp": row.get("created_at"),
@@ -153,12 +154,45 @@ class AIAgentService:
         history = self._load_chat_history()
         history.append(
             {
+                "id": str(uuid.uuid4()),
                 "role": role,
                 "content": content,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
         self._save_chat_history(history)
+
+    async def _delete_chat_message(self, message_id: str) -> Dict[str, Any]:
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return {"ok": False, "detail": "message_id is required"}
+        if self.supabase is not None:
+            try:
+                resp = (
+                    self.supabase.table("chat_messages")
+                    .delete()
+                    .eq("id", target_id)
+                    .execute()
+                )
+                data = getattr(resp, "data", None)
+                deleted = len(data) if isinstance(data, list) else 0
+                return {"ok": deleted > 0, "deleted_count": deleted}
+            except Exception as e:
+                return {"ok": False, "detail": str(e)}
+        history = self._load_chat_history()
+        new_history = []
+        deleted = 0
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            row_id = str(row.get("id") or "").strip()
+            if row_id == target_id:
+                deleted += 1
+                continue
+            new_history.append(row)
+        if deleted > 0:
+            self._save_chat_history(new_history)
+        return {"ok": deleted > 0, "deleted_count": deleted}
 
     def _openrouter_chat(self, messages: List[Dict[str, str]], max_tokens: int = 800, temperature: float = 0.2) -> str:
         if not self.api_key:

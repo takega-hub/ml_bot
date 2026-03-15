@@ -71,6 +71,8 @@
 ### 3.1 Типовой запрос: анализ рынка по активным символам
 **Цель:** по выбранному активному символу выдавать сжатый actionable-отчёт.
 
+Статус: реализован в чате командой `/market` (или `/market SYMBOL`) с быстрым UI-кнопкой `Market`.
+
 **Сценарий:**
 1. Получить список активных символов.
 2. Пользователь выбирает символ.
@@ -88,6 +90,8 @@
 
 ### 3.2 Типовой запрос: проверка последних 10 сделок и предложения по рискам
 **Цель:** быстро диагностировать качество торговли и дать корректировки risk settings.
+
+Статус: реализован в чате командой `/riskcheck` с быстрым UI-кнопкой `Risk Check`.
 
 **Сценарий:**
 1. Получить последние 10 закрытых сделок.
@@ -149,6 +153,28 @@
 1. Полноценная страница аудита tool execution в UI.
 2. Rate limit и request-id idempotency.
 
+Статус:
+- Выполнено: отдельный экран аудита в UI, backend rate limit для chat tool execution, idempotency cache для mutating инструментов, endpoint `GET /api/ai/chat/limits`.
+- Выполнено: UI-предзаполнения request_id для high/critical tool-команд (`update_risk_settings`, `apply_research_experiment`, `stop_bot`, `emergency_stop_all`).
+
 ### Этап C (автономность)
 1. Многошаговый planner с верификацией.
 2. Полуавтоматические runbook-сценарии для research/paper/apply.
+
+Статус:
+- Выполнено (базово): runbook-команда `/runbook paper_validate_apply [experiment_id]` с safety-checks (completed, health, oos, drift, stress) и генерацией safe apply команды с request_id.
+- Выполнено (базово): runbook-команды `/runbook incident_response [symbol]`, `/runbook campaign_watchdog`, `/runbook paper_auto_validation [experiment_id]`.
+- Выполнено: paper auto-validation поддерживает окно наблюдения (`/runbook paper_auto_validation [experiment_id] [window_minutes]`) и выдаёт автоматические рекомендации continue/stop/start/apply с командными шаблонами.
+- Выполнено: расширены метрики окна (rolling volatility, consecutive losses) и добавлена авто-эскалация incident_response при повторяющихся high/critical инцидентах за 24ч.
+- Выполнено (базово): planner-режим `/runbook planner paper_auto_validation ...` с этапами plan → execute → verify → summarize и флагом auto_apply.
+- Выполнено: planner расширен на `incident_response` и `campaign_watchdog`.
+- Выполнено: добавлена политика `auto_apply_max_risk` для mixed-risk цепочек (блокировка auto-apply при превышении риск-порога).
+- Выполнено: policy-профили auto-apply (`auto_profile=conservative|balanced|aggressive`) с маппингом в риск-порог.
+- Выполнено: журнал причин блокировки/применения planner policy в audit trail (`planner_policy_blocked`, `planner_auto_apply_executed`, `planner_auto_apply_skipped`).
+- Выполнено: endpoint `GET /api/ai/chat/planner_policy_stats` и виджет policy analytics в Audit (окно 6h/24h/72h/7d, totals, top profile/scenario).
+- Выполнено: расширенная визуализация policy-трендов (time buckets) и сравнение профилей/сценариев по conversion (actionable и blocked→executed).
+- Выполнено: экспорт policy analytics (`GET /api/ai/chat/planner_policy_export`) и UI-действие Export CSV.
+- Выполнено: алерты деградации conversion по активному профилю и по падению последнего bucket.
+- Выполнено: push/notification-канал policy alerting через Telegram + audit события `planner_policy_alert` с cooldown.
+- Выполнено: конфиг порогов policy alerts из UI (profile, min actionable, min conversion, cooldown) с backend persistence.
+- В работе: дашборд долгосрочных трендов (дневные/недельные агрегаты) и автоподбор policy-профиля.

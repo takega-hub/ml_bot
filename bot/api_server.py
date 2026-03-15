@@ -4,15 +4,18 @@ REST API для мобильного приложения (iPhone).
 Аутентификация: заголовок X-API-Key (MOBILE_API_KEY в .env).
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import subprocess
+import statistics
 import sys
 import time
 import urllib.request
 import urllib.parse
 from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any, List, Dict
 import shutil
@@ -239,7 +242,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     """Создаёт FastAPI приложение с инжектированными зависимостями."""
     logger.info("[Mobile API] create_app: импорт FastAPI...")
     try:
-        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks
+        from fastapi import FastAPI, Depends, HTTPException, Header, Body, BackgroundTasks, Response
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError as e:
@@ -293,6 +296,211 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             return True
         if not x_api_key or x_api_key.strip() != api_key:
             raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+    runbook_state_file = PROJECT_ROOT / "runbook_incident_state.json"
+    planner_policy_config_file = PROJECT_ROOT / "planner_policy_config.json"
+    planner_policy_alert_state_file = PROJECT_ROOT / "planner_policy_alert_state.json"
+
+    def _load_runbook_state() -> Dict[str, Any]:
+        try:
+            if runbook_state_file.exists():
+                with open(runbook_state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    incidents = data.get("incidents")
+                    if not isinstance(incidents, list):
+                        data["incidents"] = []
+                    return data
+        except Exception:
+            pass
+        return {"incidents": []}
+
+    def _save_runbook_state(payload: Dict[str, Any]) -> None:
+        try:
+            runbook_state_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(runbook_state_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"Failed to save runbook state: {e}")
+
+    def _incident_stats(window_hours: int = 24) -> Dict[str, Any]:
+        state_payload = _load_runbook_state()
+        incidents = state_payload.get("incidents")
+        if not isinstance(incidents, list):
+            incidents = []
+        cutoff = datetime.now(timezone.utc).timestamp() - (max(1, int(window_hours)) * 3600)
+        in_window: List[Dict[str, Any]] = []
+        for row in incidents:
+            if not isinstance(row, dict):
+                continue
+            ts_raw = row.get("timestamp")
+            if not isinstance(ts_raw, str):
+                continue
+            s = ts_raw
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(s)
+            except Exception:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt.timestamp() >= cutoff:
+                in_window.append(row)
+        high_count = 0
+        critical_count = 0
+        for row in in_window:
+            level = str(row.get("level") or "").lower()
+            if level == "high":
+                high_count += 1
+            elif level == "critical":
+                critical_count += 1
+        return {
+            "window_hours": window_hours,
+            "count_all": len(in_window),
+            "count_high": high_count,
+            "count_critical": critical_count,
+            "count_high_or_critical": high_count + critical_count,
+        }
+
+    def _record_incident(level: str, symbol: Optional[str], details: Dict[str, Any]) -> Dict[str, Any]:
+        state_payload = _load_runbook_state()
+        incidents = state_payload.get("incidents")
+        if not isinstance(incidents, list):
+            incidents = []
+        incidents.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": str(level or "").lower(),
+                "symbol": symbol,
+                "details": details if isinstance(details, dict) else {},
+            }
+        )
+        state_payload["incidents"] = incidents[-500:]
+        _save_runbook_state(state_payload)
+        return _incident_stats(24)
+
+    def _default_planner_policy_config() -> Dict[str, Any]:
+        return {
+            "active_profile": "balanced",
+            "min_actionable_for_alert": 5,
+            "min_conversion_actionable": 35.0,
+            "alert_cooldown_minutes": 60,
+        }
+
+    def _normalize_planner_policy_config(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        cfg = _default_planner_policy_config()
+        data = raw if isinstance(raw, dict) else {}
+        profile = str(data.get("active_profile") or cfg["active_profile"]).strip().lower()
+        if profile not in {"conservative", "balanced", "aggressive"}:
+            profile = str(cfg["active_profile"])
+        cfg["active_profile"] = profile
+        cfg["min_actionable_for_alert"] = max(
+            1,
+            min(1000, int(_safe_float(data.get("min_actionable_for_alert"), cfg["min_actionable_for_alert"]))),
+        )
+        cfg["min_conversion_actionable"] = max(
+            0.0,
+            min(100.0, float(_safe_float(data.get("min_conversion_actionable"), cfg["min_conversion_actionable"]))),
+        )
+        cfg["alert_cooldown_minutes"] = max(
+            1,
+            min(24 * 60, int(_safe_float(data.get("alert_cooldown_minutes"), cfg["alert_cooldown_minutes"]))),
+        )
+        return cfg
+
+    def _load_planner_policy_config() -> Dict[str, Any]:
+        try:
+            if planner_policy_config_file.exists():
+                with open(planner_policy_config_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                return _normalize_planner_policy_config(payload if isinstance(payload, dict) else {})
+        except Exception:
+            pass
+        return _normalize_planner_policy_config({})
+
+    def _save_planner_policy_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+        cfg = _normalize_planner_policy_config(payload)
+        planner_policy_config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(planner_policy_config_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2, default=str)
+        return cfg
+
+    def _load_planner_policy_alert_state() -> Dict[str, Any]:
+        try:
+            if planner_policy_alert_state_file.exists():
+                with open(planner_policy_alert_state_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict):
+                    sent = payload.get("last_sent")
+                    if not isinstance(sent, dict):
+                        payload["last_sent"] = {}
+                    return payload
+        except Exception:
+            pass
+        return {"last_sent": {}}
+
+    def _save_planner_policy_alert_state(payload: Dict[str, Any]) -> None:
+        try:
+            planner_policy_alert_state_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(planner_policy_alert_state_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            pass
+
+    def _emit_policy_alerts(alerts: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, Any]:
+        cooldown_sec = max(60, int(_safe_float(cfg.get("alert_cooldown_minutes"), 60) * 60))
+        state_payload = _load_planner_policy_alert_state()
+        sent = state_payload.get("last_sent")
+        if not isinstance(sent, dict):
+            sent = {}
+        now_ts = time.time()
+        emitted = 0
+        suppressed = 0
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            key = (
+                str(alert.get("type") or "unknown")
+                + "|"
+                + str(alert.get("profile") or cfg.get("active_profile") or "unknown")
+            )
+            last_ts = _safe_float(sent.get(key), 0.0)
+            if last_ts > 0 and now_ts - last_ts < cooldown_sec:
+                suppressed += 1
+                continue
+            sent[key] = now_ts
+            emitted += 1
+            summary = json.dumps(alert, ensure_ascii=False, default=str)
+            record = {
+                "event_type": "planner_policy_alert",
+                "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+                "tool_name": "planner_policy_stats",
+                "goal": "policy_alerting",
+                "risk_tier": "medium",
+                "ok": True,
+                "summary": summary[:1200],
+                "arguments": {
+                    "active_profile": cfg.get("active_profile"),
+                    "alert_cooldown_minutes": cfg.get("alert_cooldown_minutes"),
+                },
+            }
+            append_jsonl(str(PROJECT_ROOT / "logs" / "tool_execution_log.jsonl"), record)
+            try:
+                text_path = PROJECT_ROOT / "logs" / "tool_execution_log.txt"
+                text_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(text_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"{record['timestamp_utc']} | PLANNER_POLICY_ALERT | risk=medium | ok=True | goal=policy_alerting | {record['summary']}\n"
+                    )
+            except Exception:
+                pass
+            _send_telegram_sync(
+                f"Planner policy alert: {alert.get('type')} | profile={cfg.get('active_profile')} | details={summary[:500]}"
+            )
+        state_payload["last_sent"] = sent
+        _save_planner_policy_alert_state(state_payload)
+        return {"emitted": emitted, "suppressed": suppressed, "cooldown_seconds": cooldown_sec}
 
     @app.get("/")
     def root():
@@ -1644,6 +1852,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             conf = self.contract.get("confirmation_policy") if isinstance(self.contract.get("confirmation_policy"), dict) else {}
             self.confirm_phrase = str(conf.get("explicit_confirm_phrase") or "ПОДТВЕРЖДАЮ").strip().upper()
             self.pending_ttl_seconds = self._resolve_pending_ttl_seconds()
+            self.rate_limit_per_minute = self._resolve_rate_limit_per_minute()
+            self.idempotency_ttl_seconds = self._resolve_idempotency_ttl_seconds()
+            self._rate_hits: Dict[str, List[float]] = {}
+            self._idempotency_cache: Dict[str, Dict[str, Any]] = {}
             self.audit_jsonl_path = str(PROJECT_ROOT / "logs" / "tool_execution_log.jsonl")
             self.audit_text_path = PROJECT_ROOT / "logs" / "tool_execution.log"
 
@@ -1679,6 +1891,139 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             except Exception:
                 ttl = 300
             return max(30, min(3600, ttl))
+
+        def _resolve_rate_limit_per_minute(self) -> int:
+            execution = self.contract.get("global_policy", {}).get("execution", {}) if isinstance(self.contract, dict) else {}
+            raw = execution.get("chat_tool_rate_limit_per_minute")
+            try:
+                value = int(raw)
+            except Exception:
+                value = 20
+            return max(3, min(300, value))
+
+        def _resolve_idempotency_ttl_seconds(self) -> int:
+            execution = self.contract.get("global_policy", {}).get("execution", {}) if isinstance(self.contract, dict) else {}
+            raw = execution.get("idempotency_ttl_seconds")
+            try:
+                value = int(raw)
+            except Exception:
+                value = 600
+            return max(30, min(7200, value))
+
+        def _prune_rate_state(self, now: float) -> None:
+            border = now - 60.0
+            keys_to_delete: List[str] = []
+            for key, arr in self._rate_hits.items():
+                arr[:] = [x for x in arr if x >= border]
+                if not arr:
+                    keys_to_delete.append(key)
+            for key in keys_to_delete:
+                self._rate_hits.pop(key, None)
+
+        def check_and_track_rate_limit(self, actor_key: str) -> Dict[str, Any]:
+            key = str(actor_key or "anonymous").strip() or "anonymous"
+            now = time.time()
+            self._prune_rate_state(now)
+            hits = self._rate_hits.get(key)
+            if hits is None:
+                hits = []
+                self._rate_hits[key] = hits
+            if len(hits) >= self.rate_limit_per_minute:
+                retry_after = int(max(1, 60 - (now - hits[0])))
+                return {
+                    "allowed": False,
+                    "retry_after_seconds": retry_after,
+                    "remaining": 0,
+                    "limit_per_minute": self.rate_limit_per_minute,
+                }
+            hits.append(now)
+            remaining = max(0, self.rate_limit_per_minute - len(hits))
+            return {
+                "allowed": True,
+                "retry_after_seconds": 0,
+                "remaining": remaining,
+                "limit_per_minute": self.rate_limit_per_minute,
+            }
+
+        def _prune_idempotency_cache(self, now: float) -> None:
+            keys_to_delete: List[str] = []
+            for key, row in self._idempotency_cache.items():
+                ts = _safe_float(row.get("created_at_ts"), 0.0)
+                if now - ts > self.idempotency_ttl_seconds:
+                    keys_to_delete.append(key)
+            for key in keys_to_delete:
+                self._idempotency_cache.pop(key, None)
+
+        def _is_mutating_tool(self, tool: Dict[str, Any]) -> bool:
+            method = str(tool.get("method") or "GET").strip().upper()
+            return method in {"POST", "PUT", "PATCH", "DELETE"}
+
+        def _extract_request_id(self, arguments: Dict[str, Any]) -> Optional[str]:
+            if not isinstance(arguments, dict):
+                return None
+            for k in ("request_id", "idempotency_key"):
+                v = arguments.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
+
+        def _normalized_arguments_for_idempotency(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            if not isinstance(arguments, dict):
+                return {}
+            result: Dict[str, Any] = {}
+            for k, v in arguments.items():
+                if k in {"request_id", "idempotency_key"}:
+                    continue
+                result[k] = v
+            return result
+
+        def build_idempotency_key(self, tool_name: str, arguments: Dict[str, Any], risk_tier: str) -> Optional[str]:
+            request_id = self._extract_request_id(arguments)
+            normalized = self._normalized_arguments_for_idempotency(arguments)
+            if request_id:
+                source = f"req:{tool_name}:{request_id}"
+            elif risk_tier in {"high", "critical"}:
+                source = f"auto:{tool_name}:{json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)}"
+            else:
+                return None
+            digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            return f"{tool_name}:{digest}"
+
+        def get_idempotent_result(self, idem_key: Optional[str]) -> Optional[Dict[str, Any]]:
+            if not idem_key:
+                return None
+            now = time.time()
+            self._prune_idempotency_cache(now)
+            row = self._idempotency_cache.get(idem_key)
+            if not isinstance(row, dict):
+                return None
+            execution = row.get("execution")
+            if not isinstance(execution, dict):
+                return None
+            return execution
+
+        def store_idempotent_result(self, idem_key: Optional[str], execution: Dict[str, Any]) -> None:
+            if not idem_key or not isinstance(execution, dict):
+                return
+            self._prune_idempotency_cache(time.time())
+            self._idempotency_cache[idem_key] = {
+                "created_at_ts": time.time(),
+                "execution": execution,
+            }
+
+        def get_limits_status(self, actor_key: str) -> Dict[str, Any]:
+            key = str(actor_key or "anonymous").strip() or "anonymous"
+            now = time.time()
+            self._prune_rate_state(now)
+            hits = self._rate_hits.get(key) or []
+            remaining = max(0, self.rate_limit_per_minute - len(hits))
+            self._prune_idempotency_cache(now)
+            return {
+                "rate_limit_per_minute": self.rate_limit_per_minute,
+                "rate_remaining": remaining,
+                "idempotency_ttl_seconds": self.idempotency_ttl_seconds,
+                "idempotency_cache_size": len(self._idempotency_cache),
+            }
 
         def _validate_against_schema(self, value: Any, schema: Dict[str, Any], path: str = "input") -> List[str]:
             errors: List[str] = []
@@ -1838,12 +2183,38 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 text = text[:4000] + "...(truncated)"
             return text
 
-        async def execute(self, tool_name: str, arguments: Dict[str, Any], goal: str = "", confirmed: bool = False) -> Dict[str, Any]:
+        async def execute(
+            self,
+            tool_name: str,
+            arguments: Dict[str, Any],
+            goal: str = "",
+            confirmed: bool = False,
+            actor_key: str = "anonymous",
+        ) -> Dict[str, Any]:
             tool = self.tools_map.get(str(tool_name or "").strip())
             if not tool:
                 return {"ok": False, "error": f"Tool not allowed: {tool_name}", "tool_name": tool_name}
             if not isinstance(arguments, dict):
                 arguments = {}
+            rate = self.check_and_track_rate_limit(actor_key)
+            if not rate.get("allowed"):
+                self.log_tool_event(
+                    event_type="tool_rate_limited",
+                    tool_name=tool_name,
+                    goal=goal,
+                    risk_tier="n/a",
+                    ok=False,
+                    summary=f"retry_after={rate.get('retry_after_seconds')}",
+                    arguments=arguments,
+                )
+                return {
+                    "ok": False,
+                    "tool_name": tool_name,
+                    "error": "Rate limit exceeded for chat tools",
+                    "rate_limited": True,
+                    "retry_after_seconds": rate.get("retry_after_seconds"),
+                    "rate_limit_per_minute": rate.get("limit_per_minute"),
+                }
             schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else {"type": "object"}
             validation_errors = self._validate_against_schema(arguments, schema, "arguments")
             if validation_errors:
@@ -1855,6 +2226,22 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 }
             risk_tier = str(tool.get("risk_tier") or "low").lower()
             requires_confirmation = risk_tier in {"high", "critical"}
+            idem_key = self.build_idempotency_key(tool_name, arguments, risk_tier)
+            if confirmed and self._is_mutating_tool(tool):
+                cached = self.get_idempotent_result(idem_key)
+                if cached:
+                    out = dict(cached)
+                    out["idempotent_reused"] = True
+                    self.log_tool_event(
+                        event_type="tool_idempotent_reused",
+                        tool_name=tool_name,
+                        goal=goal,
+                        risk_tier=risk_tier,
+                        ok=bool(out.get("ok")),
+                        summary="Reused cached execution result",
+                        arguments=arguments,
+                    )
+                    return out
             if requires_confirmation and not confirmed:
                 created_at = time.time()
                 ai_agent.pending_chat_action = {
@@ -1862,6 +2249,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "arguments": arguments,
                     "goal": goal,
                     "risk_tier": risk_tier,
+                    "idempotency_key": idem_key,
                     "created_at_ts": created_at,
                     "expires_at_ts": created_at + self.pending_ttl_seconds,
                 }
@@ -1888,6 +2276,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             ai_agent.pending_chat_action = None
             result["tool_name"] = tool_name
             result["risk_tier"] = risk_tier
+            if self._is_mutating_tool(tool) and result.get("ok"):
+                self.store_idempotent_result(idem_key, result)
             self.log_tool_event(
                 event_type="tool_executed",
                 tool_name=tool_name,
@@ -2044,8 +2434,20 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     f"Для выполнения напишите: {execution.get('confirmation_phrase')}. "
                     f"Для отмены: /cancel"
                 )
+            if execution.get("rate_limited"):
+                return (
+                    "Превышен лимит вызовов инструментов.\n"
+                    f"Повторите через {execution.get('retry_after_seconds')}с "
+                    f"(лимит {execution.get('rate_limit_per_minute')} в минуту)."
+                )
             if execution.get("ok"):
                 payload = execution.get("result")
+                if execution.get("idempotent_reused"):
+                    return (
+                        f"Повторный запрос для {execution.get('tool_name')} обнаружен. "
+                        "Возвращён кэшированный результат.\n"
+                        f"{self._sanitize_result(payload)}"
+                    )
                 return f"Инструмент {execution.get('tool_name')} выполнен успешно.\n{self._sanitize_result(payload)}"
             return f"Не удалось выполнить {execution.get('tool_name')}: {execution.get('error')}"
 
@@ -2063,16 +2465,36 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             logger.error(f"Chat history error: {e}", exc_info=True)
             return {"history": []}
 
+    @app.delete("/api/ai/chat/message/{message_id}", dependencies=[Depends(verify_api_key)])
+    async def delete_chat_message(message_id: str):
+        try:
+            result = await ai_agent._delete_chat_message(message_id)
+            if result.get("ok"):
+                return result
+            raise HTTPException(status_code=404, detail=result.get("detail") or "Message not found")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Delete chat message error: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/ai/chat/tools", dependencies=[Depends(verify_api_key)])
-    def get_chat_tools():
+    def get_chat_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
         pending = chat_tool_executor.get_pending_action()
+        actor_key = str(x_api_key or "anonymous").strip() or "anonymous"
         return {
             "contract_version": chat_tool_executor.contract.get("contract_version"),
             "tools": chat_tool_executor.list_manifest(),
             "pending_confirmation_ttl_seconds": chat_tool_executor.pending_ttl_seconds,
             "confirmation_phrase": chat_tool_executor.confirm_phrase,
             "pending_action": pending,
+            "limits": chat_tool_executor.get_limits_status(actor_key),
         }
+
+    @app.get("/api/ai/chat/limits", dependencies=[Depends(verify_api_key)])
+    def get_chat_limits(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+        actor_key = str(x_api_key or "anonymous").strip() or "anonymous"
+        return chat_tool_executor.get_limits_status(actor_key)
 
     @app.get("/api/ai/chat/tool_execution_log", dependencies=[Depends(verify_api_key)])
     def get_chat_tool_execution_log(
@@ -2128,8 +2550,492 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             },
         }
 
+    @app.get("/api/ai/chat/planner_policy_stats", dependencies=[Depends(verify_api_key)])
+    def get_chat_planner_policy_stats(
+        since_hours: int = 24,
+        limit: int = 5000,
+        bucket_minutes: Optional[int] = None,
+        active_profile: Optional[str] = None,
+        min_actionable_for_alert: Optional[int] = None,
+        min_conversion_actionable: Optional[float] = None,
+        daily_days: int = 14,
+        weekly_weeks: int = 12,
+    ):
+        n = max(100, min(20000, int(limit or 5000)))
+        hours = max(1, min(24 * 30, int(since_hours or 24)))
+        cfg = _load_planner_policy_config()
+        bucket_mins = max(
+            5,
+            min(24 * 60, int((bucket_minutes if bucket_minutes is not None else 60) or 60)),
+        )
+        profile = str(active_profile if active_profile is not None else cfg.get("active_profile")).strip().lower()
+        if profile not in {"conservative", "balanced", "aggressive"}:
+            profile = str(cfg.get("active_profile") or "balanced")
+        min_actionable = max(
+            1,
+            min(
+                1000,
+                int(
+                    (min_actionable_for_alert if min_actionable_for_alert is not None else cfg.get("min_actionable_for_alert"))
+                    or 5
+                ),
+            ),
+        )
+        min_conv = max(
+            0.0,
+            min(
+                100.0,
+                float(
+                    (min_conversion_actionable if min_conversion_actionable is not None else cfg.get("min_conversion_actionable"))
+                    or 35.0
+                ),
+            ),
+        )
+        keep_days = max(3, min(120, int(daily_days or 14)))
+        keep_weeks = max(2, min(104, int(weekly_weeks or 12)))
+        path = PROJECT_ROOT / "logs" / "tool_execution_log.jsonl"
+        if not path.exists():
+            return {
+                "window_hours": hours,
+                "bucket_minutes": bucket_mins,
+                "active_profile": profile,
+                "totals": {
+                    "blocked": 0,
+                    "executed": 0,
+                    "skipped": 0,
+                    "all": 0,
+                },
+                "by_scenario": {},
+                "by_profile": {},
+                "by_event_type": {},
+                "conversion": {"by_profile": {}, "by_scenario": {}},
+                "time_buckets": [],
+                "long_term": {"daily": [], "weekly": []},
+                "suggested_profile": {
+                    "profile": profile,
+                    "reason": "insufficient_data",
+                    "confidence": 0.0,
+                },
+                "alerts": [],
+                "alert_emit": {"emitted": 0, "suppressed": 0, "cooldown_seconds": 0},
+                "alert_config": {
+                    "active_profile": profile,
+                    "min_actionable_for_alert": min_actionable,
+                    "min_conversion_actionable": min_conv,
+                    "alert_cooldown_minutes": cfg.get("alert_cooldown_minutes"),
+                },
+                "path": str(path),
+            }
+
+        event_keys = {
+            "planner_policy_blocked": "blocked",
+            "planner_auto_apply_executed": "executed",
+            "planner_auto_apply_skipped": "skipped",
+        }
+
+        def _parse_event_ts(v: Any) -> Optional[float]:
+            if not isinstance(v, str):
+                return None
+            s = v.strip()
+            if not s:
+                return None
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except Exception:
+                return None
+
+        cutoff = time.time() - (hours * 3600)
+        totals = {"blocked": 0, "executed": 0, "skipped": 0, "all": 0}
+        by_scenario: Dict[str, Dict[str, int]] = {}
+        by_profile: Dict[str, Dict[str, int]] = {}
+        by_event_type: Dict[str, int] = {}
+        bucket_span = bucket_mins * 60
+        time_buckets: Dict[int, Dict[str, Any]] = {}
+        daily_agg: Dict[str, Dict[str, int]] = {}
+        weekly_agg: Dict[str, Dict[str, int]] = {}
+        scanned = 0
+        matched = 0
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                if scanned >= n:
+                    break
+                scanned += 1
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    rec = json.loads(s)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ev = str(rec.get("event_type") or "").strip()
+                bucket = event_keys.get(ev)
+                if not bucket:
+                    continue
+                ts_value = _parse_event_ts(rec.get("timestamp_utc"))
+                if ts_value is not None and ts_value < cutoff:
+                    continue
+                matched += 1
+                totals["all"] += 1
+                totals[bucket] += 1
+                by_event_type[ev] = int(by_event_type.get(ev) or 0) + 1
+                args = rec.get("arguments")
+                scenario = "unknown"
+                profile = "unknown"
+                if isinstance(args, dict):
+                    scenario = str(args.get("scenario") or "unknown").strip() or "unknown"
+                    profile = str(args.get("auto_apply_profile") or "unknown").strip() or "unknown"
+                sc = by_scenario.get(scenario)
+                if not sc:
+                    sc = {"blocked": 0, "executed": 0, "skipped": 0, "all": 0}
+                    by_scenario[scenario] = sc
+                sc["all"] += 1
+                sc[bucket] += 1
+                pr = by_profile.get(profile)
+                if not pr:
+                    pr = {"blocked": 0, "executed": 0, "skipped": 0, "all": 0}
+                    by_profile[profile] = pr
+                pr["all"] += 1
+                pr[bucket] += 1
+                if ts_value is None:
+                    ts_value = time.time()
+                bucket_ts = int(ts_value // bucket_span) * bucket_span
+                b = time_buckets.get(bucket_ts)
+                if not b:
+                    bucket_start_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bucket_ts))
+                    b = {
+                        "bucket_start_utc": bucket_start_utc,
+                        "bucket_start_ts": bucket_ts,
+                        "blocked": 0,
+                        "executed": 0,
+                        "skipped": 0,
+                        "all": 0,
+                    }
+                    time_buckets[bucket_ts] = b
+                b["all"] += 1
+                b[bucket] += 1
+                dt = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                day_key = dt.strftime("%Y-%m-%d")
+                week_key = dt.strftime("%G-W%V")
+                d = daily_agg.get(day_key)
+                if not d:
+                    d = {"blocked": 0, "executed": 0, "skipped": 0, "all": 0}
+                    daily_agg[day_key] = d
+                d["all"] += 1
+                d[bucket] += 1
+                w = weekly_agg.get(week_key)
+                if not w:
+                    w = {"blocked": 0, "executed": 0, "skipped": 0, "all": 0}
+                    weekly_agg[week_key] = w
+                w["all"] += 1
+                w[bucket] += 1
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read planner policy stats: {e}")
+
+        def _build_conversion(source: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, float]]:
+            out: Dict[str, Dict[str, float]] = {}
+            for key, row in source.items():
+                blocked = int(row.get("blocked") or 0)
+                executed = int(row.get("executed") or 0)
+                actionable = blocked + executed
+                out[key] = {
+                    "blocked": blocked,
+                    "executed": executed,
+                    "actionable": actionable,
+                    "conversion_actionable": (executed * 100.0 / actionable) if actionable > 0 else 0.0,
+                    "conversion_blocked_to_executed": (executed * 100.0 / blocked) if blocked > 0 else 0.0,
+                }
+            return out
+
+        bucket_rows = [time_buckets[k] for k in sorted(time_buckets.keys())]
+        for b in bucket_rows:
+            blocked = int(b.get("blocked") or 0)
+            executed = int(b.get("executed") or 0)
+            actionable = blocked + executed
+            b["actionable"] = actionable
+            b["conversion_actionable"] = (executed * 100.0 / actionable) if actionable > 0 else 0.0
+
+        conversion_by_profile = _build_conversion(by_profile)
+        conversion_by_scenario = _build_conversion(by_scenario)
+        daily_rows: List[Dict[str, Any]] = []
+        for k in sorted(daily_agg.keys())[-keep_days:]:
+            row = daily_agg[k]
+            blocked = int(row.get("blocked") or 0)
+            executed = int(row.get("executed") or 0)
+            actionable = blocked + executed
+            daily_rows.append(
+                {
+                    "day_utc": k,
+                    "blocked": blocked,
+                    "executed": executed,
+                    "skipped": int(row.get("skipped") or 0),
+                    "all": int(row.get("all") or 0),
+                    "actionable": actionable,
+                    "conversion_actionable": (executed * 100.0 / actionable) if actionable > 0 else 0.0,
+                }
+            )
+        weekly_rows: List[Dict[str, Any]] = []
+        for k in sorted(weekly_agg.keys())[-keep_weeks:]:
+            row = weekly_agg[k]
+            blocked = int(row.get("blocked") or 0)
+            executed = int(row.get("executed") or 0)
+            actionable = blocked + executed
+            weekly_rows.append(
+                {
+                    "week_utc": k,
+                    "blocked": blocked,
+                    "executed": executed,
+                    "skipped": int(row.get("skipped") or 0),
+                    "all": int(row.get("all") or 0),
+                    "actionable": actionable,
+                    "conversion_actionable": (executed * 100.0 / actionable) if actionable > 0 else 0.0,
+                }
+            )
+
+        suggested_profile = {
+            "profile": profile,
+            "reason": "insufficient_data",
+            "confidence": 0.0,
+        }
+        candidate_rows: List[Dict[str, Any]] = []
+        for p, row in conversion_by_profile.items():
+            if not isinstance(row, dict):
+                continue
+            actionable = int(row.get("actionable") or 0)
+            conv = _safe_float(row.get("conversion_actionable"), 0.0)
+            candidate_rows.append(
+                {
+                    "profile": p,
+                    "actionable": actionable,
+                    "conversion_actionable": conv,
+                }
+            )
+        eligible = [x for x in candidate_rows if int(x.get("actionable") or 0) >= min_actionable]
+        base = eligible if eligible else candidate_rows
+        if base:
+            base.sort(
+                key=lambda x: (
+                    _safe_float(x.get("conversion_actionable"), 0.0),
+                    int(x.get("actionable") or 0),
+                ),
+                reverse=True,
+            )
+            top = base[0]
+            target_profile = str(top.get("profile") or profile)
+            reason = "best_conversion"
+            confidence = min(1.0, _safe_float(top.get("conversion_actionable"), 0.0) / 100.0)
+            suggested_profile = {
+                "profile": target_profile,
+                "reason": reason,
+                "confidence": round(confidence, 4),
+            }
+        alerts: List[Dict[str, Any]] = []
+        active_profile_row = conversion_by_profile.get(profile)
+        if isinstance(active_profile_row, dict):
+            actionable = int(active_profile_row.get("actionable") or 0)
+            conv = _safe_float(active_profile_row.get("conversion_actionable"), 0.0)
+            if actionable >= min_actionable and conv < min_conv:
+                alerts.append(
+                    {
+                        "type": "active_profile_conversion_low",
+                        "severity": "warning",
+                        "profile": profile,
+                        "actionable": actionable,
+                        "conversion_actionable": conv,
+                        "threshold": min_conv,
+                    }
+                )
+        if len(bucket_rows) >= 2:
+            prev = bucket_rows[-2]
+            last = bucket_rows[-1]
+            prev_conv = _safe_float(prev.get("conversion_actionable"), 0.0)
+            last_conv = _safe_float(last.get("conversion_actionable"), 0.0)
+            prev_actionable = int(prev.get("actionable") or 0)
+            last_actionable = int(last.get("actionable") or 0)
+            if prev_actionable >= min_actionable and last_actionable >= min_actionable and last_conv + 10.0 < prev_conv:
+                alerts.append(
+                    {
+                        "type": "conversion_drop_last_bucket",
+                        "severity": "warning",
+                        "previous_bucket_start_utc": str(prev.get("bucket_start_utc") or ""),
+                        "last_bucket_start_utc": str(last.get("bucket_start_utc") or ""),
+                        "previous_conversion_actionable": prev_conv,
+                        "last_conversion_actionable": last_conv,
+                    }
+                )
+        has_drop_alert = any(str(a.get("type") or "") == "conversion_drop_last_bucket" for a in alerts)
+        has_low_alert = any(str(a.get("type") or "") == "active_profile_conversion_low" for a in alerts)
+        if has_low_alert:
+            if profile == "aggressive":
+                suggested_profile = {
+                    "profile": "balanced",
+                    "reason": "degrade_from_aggressive_alert",
+                    "confidence": max(0.7, _safe_float(suggested_profile.get("confidence"), 0.0)),
+                }
+            elif profile == "balanced":
+                suggested_profile = {
+                    "profile": "conservative",
+                    "reason": "degrade_from_balanced_alert",
+                    "confidence": max(0.7, _safe_float(suggested_profile.get("confidence"), 0.0)),
+                }
+        elif has_drop_alert and profile == "aggressive":
+            suggested_profile = {
+                "profile": "balanced",
+                "reason": "bucket_drop_alert",
+                "confidence": max(0.65, _safe_float(suggested_profile.get("confidence"), 0.0)),
+            }
+        emit_cfg = dict(cfg)
+        emit_cfg["active_profile"] = profile
+        emit_result = _emit_policy_alerts(alerts, emit_cfg) if alerts else {"emitted": 0, "suppressed": 0, "cooldown_seconds": int(_safe_float(cfg.get("alert_cooldown_minutes"), 60) * 60)}
+
+        return {
+            "window_hours": hours,
+            "bucket_minutes": bucket_mins,
+            "active_profile": profile,
+            "totals": totals,
+            "by_scenario": by_scenario,
+            "by_profile": by_profile,
+            "by_event_type": by_event_type,
+            "conversion": {
+                "by_profile": conversion_by_profile,
+                "by_scenario": conversion_by_scenario,
+            },
+            "time_buckets": bucket_rows,
+            "long_term": {
+                "daily": daily_rows,
+                "weekly": weekly_rows,
+            },
+            "suggested_profile": suggested_profile,
+            "alerts": alerts,
+            "alert_emit": emit_result,
+            "alert_config": {
+                "active_profile": profile,
+                "min_actionable_for_alert": min_actionable,
+                "min_conversion_actionable": min_conv,
+                "alert_cooldown_minutes": cfg.get("alert_cooldown_minutes"),
+            },
+            "scanned": scanned,
+            "matched": matched,
+            "path": str(path),
+        }
+
+    @app.get("/api/ai/chat/planner_policy_config", dependencies=[Depends(verify_api_key)])
+    def get_chat_planner_policy_config():
+        return _load_planner_policy_config()
+
+    @app.put("/api/ai/chat/planner_policy_config", dependencies=[Depends(verify_api_key)])
+    def put_chat_planner_policy_config(body: Dict[str, Any] = Body(...)):
+        saved = _save_planner_policy_config(body if isinstance(body, dict) else {})
+        return {"ok": True, "config": saved}
+
+    @app.get("/api/ai/chat/planner_policy_export", dependencies=[Depends(verify_api_key)])
+    def get_chat_planner_policy_export(
+        since_hours: int = 24,
+        limit: int = 5000,
+        bucket_minutes: int = 60,
+        active_profile: str = "balanced",
+        daily_days: int = 14,
+        weekly_weeks: int = 12,
+    ):
+        payload = get_chat_planner_policy_stats(
+            since_hours=since_hours,
+            limit=limit,
+            bucket_minutes=bucket_minutes,
+            active_profile=active_profile,
+            daily_days=daily_days,
+            weekly_weeks=weekly_weeks,
+        )
+        lines: List[str] = []
+        lines.append("section,key,metric,value")
+        totals = payload.get("totals") if isinstance(payload, dict) else {}
+        if isinstance(totals, dict):
+            for k in ("all", "blocked", "executed", "skipped"):
+                lines.append(f"totals,all,{k},{totals.get(k, 0)}")
+        conversion = payload.get("conversion") if isinstance(payload, dict) else {}
+        by_profile = conversion.get("by_profile") if isinstance(conversion, dict) else {}
+        if isinstance(by_profile, dict):
+            for profile_key, row in by_profile.items():
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"profile,{profile_key},conversion_actionable,{_safe_float(row.get('conversion_actionable'), 0.0):.4f}"
+                )
+                lines.append(
+                    f"profile,{profile_key},conversion_blocked_to_executed,{_safe_float(row.get('conversion_blocked_to_executed'), 0.0):.4f}"
+                )
+        by_scenario = conversion.get("by_scenario") if isinstance(conversion, dict) else {}
+        if isinstance(by_scenario, dict):
+            for scenario_key, row in by_scenario.items():
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"scenario,{scenario_key},conversion_actionable,{_safe_float(row.get('conversion_actionable'), 0.0):.4f}"
+                )
+        buckets = payload.get("time_buckets") if isinstance(payload, dict) else []
+        if isinstance(buckets, list):
+            for b in buckets:
+                if not isinstance(b, dict):
+                    continue
+                key = str(b.get("bucket_start_utc") or "")
+                lines.append(f"bucket,{key},blocked,{int(b.get('blocked') or 0)}")
+                lines.append(f"bucket,{key},executed,{int(b.get('executed') or 0)}")
+                lines.append(
+                    f"bucket,{key},conversion_actionable,{_safe_float(b.get('conversion_actionable'), 0.0):.4f}"
+                )
+        long_term = payload.get("long_term") if isinstance(payload, dict) else {}
+        daily_rows = long_term.get("daily") if isinstance(long_term, dict) else []
+        if isinstance(daily_rows, list):
+            for row in daily_rows:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("day_utc") or "")
+                lines.append(
+                    f"daily,{key},conversion_actionable,{_safe_float(row.get('conversion_actionable'), 0.0):.4f}"
+                )
+                lines.append(f"daily,{key},actionable,{int(row.get('actionable') or 0)}")
+        weekly_rows = long_term.get("weekly") if isinstance(long_term, dict) else []
+        if isinstance(weekly_rows, list):
+            for row in weekly_rows:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("week_utc") or "")
+                lines.append(
+                    f"weekly,{key},conversion_actionable,{_safe_float(row.get('conversion_actionable'), 0.0):.4f}"
+                )
+                lines.append(f"weekly,{key},actionable,{int(row.get('actionable') or 0)}")
+        suggested = payload.get("suggested_profile") if isinstance(payload, dict) else {}
+        if isinstance(suggested, dict):
+            lines.append(f"suggested_profile,active,profile,{str(suggested.get('profile') or '')}")
+            lines.append(
+                f"suggested_profile,active,confidence,{_safe_float(suggested.get('confidence'), 0.0):.4f}"
+            )
+            lines.append(f"suggested_profile,active,reason,{str(suggested.get('reason') or '')}")
+        alerts = payload.get("alerts") if isinstance(payload, dict) else []
+        if isinstance(alerts, list):
+            for i, row in enumerate(alerts, start=1):
+                if not isinstance(row, dict):
+                    continue
+                lines.append(f"alert,{i},type,{str(row.get('type') or '')}")
+                lines.append(f"alert,{i},severity,{str(row.get('severity') or '')}")
+        csv_body = "\n".join(lines) + "\n"
+        return Response(
+            content=csv_body,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="planner_policy_export.csv"'
+            },
+        )
+
     @app.post("/api/ai/chat", dependencies=[Depends(verify_api_key)])
-    async def post_chat(body: ChatBody):
+    async def post_chat(body: ChatBody, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
         try:
             log_lines = []
             log_path = PROJECT_ROOT / "logs" / "bot.log"
@@ -2162,21 +3068,41 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             }
 
             user_message = str(body.message or "").strip()
+            actor_key = str(x_api_key or "anonymous").strip() or "anonymous"
             if not user_message:
                 response = await ai_agent.chat_with_user(user_message, context, log_lines)
                 return {"response": response}
 
             if user_message.lower() in {"/tools", "tools", "инструменты"}:
                 manifest = chat_tool_executor.list_manifest()
+                limits = chat_tool_executor.get_limits_status(actor_key)
                 preview = []
                 for row in manifest[:20]:
                     preview.append(
                         f"- {row.get('name')} [{row.get('risk_tier')}] — {row.get('goal')}"
                     )
-                response_text = "Доступные инструменты:\n" + ("\n".join(preview) if preview else "нет инструментов")
+                response_text = (
+                    "Доступные инструменты:\n"
+                    + ("\n".join(preview) if preview else "нет инструментов")
+                    + "\n\n"
+                    + f"Rate limit: {limits.get('rate_remaining')}/{limits.get('rate_limit_per_minute')} в текущем окне."
+                )
                 await ai_agent._save_chat_message("user", user_message)
                 await ai_agent._save_chat_message("assistant", response_text)
-                return {"response": response_text, "tools": manifest}
+                return {"response": response_text, "tools": manifest, "limits": limits}
+
+            if user_message.lower() in {"/limits", "limits", "лимиты"}:
+                limits = chat_tool_executor.get_limits_status(actor_key)
+                response_text = (
+                    "Лимиты чат-инструментов:\n"
+                    f"- Rate limit/min: {limits.get('rate_limit_per_minute')}\n"
+                    f"- Remaining: {limits.get('rate_remaining')}\n"
+                    f"- Idempotency TTL: {limits.get('idempotency_ttl_seconds')}с\n"
+                    f"- Idempotency cache size: {limits.get('idempotency_cache_size')}"
+                )
+                await ai_agent._save_chat_message("user", user_message)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "limits": limits}
 
             expired = chat_tool_executor.expire_pending_if_needed()
             if expired:
@@ -2219,12 +3145,919 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     arguments=pending.get("arguments") if isinstance(pending.get("arguments"), dict) else {},
                     goal=str(pending.get("goal") or ""),
                     confirmed=True,
+                    actor_key=actor_key,
                 )
                 response_text = chat_tool_executor.render_response_text(execution)
                 await ai_agent._save_chat_message("assistant", response_text)
                 return {"response": response_text, "tool_execution": execution}
             if pending:
                 response_text = chat_tool_executor.pending_summary_text(pending)
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text}
+
+            if user_message.lower().startswith("/market"):
+                await ai_agent._save_chat_message("user", user_message)
+                parts = user_message.split()
+                selected_symbol = None
+                if len(parts) >= 2:
+                    selected_symbol = str(parts[1]).upper().strip()
+                if not selected_symbol:
+                    active = [s for s in state.active_symbols if isinstance(s, str) and s]
+                    selected_symbol = active[0] if active else None
+                if not selected_symbol:
+                    response_text = "Нет активных символов. Добавьте пару и повторите /market SYMBOL."
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+                try:
+                    insight = await get_ai_market_insight(symbol=selected_symbol, interval="60")
+                    status_data = _get_status_data(state, bybit_client, settings, trading_loop)
+                    open_positions = status_data.get("positions") if isinstance(status_data, dict) else []
+                    open_count = len(open_positions) if isinstance(open_positions, list) else 0
+                    trend = insight.get("trend") if isinstance(insight, dict) else None
+                    volatility = insight.get("volatility") if isinstance(insight, dict) else None
+                    confidence = insight.get("confidence") if isinstance(insight, dict) else None
+                    advice = insight.get("advice") if isinstance(insight, dict) else None
+                    conf_text = f"{float(confidence) * 100:.1f}%" if isinstance(confidence, (int, float)) else "N/A"
+                    response_text = (
+                        f"Маркет-срез {selected_symbol}\n"
+                        f"- Trend: {trend or 'N/A'}\n"
+                        f"- Volatility: {volatility or 'N/A'}\n"
+                        f"- Confidence: {conf_text}\n"
+                        f"- Open positions: {open_count}\n"
+                        f"- Advice: {advice or 'N/A'}"
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text, "market_insight": insight}
+                except HTTPException as e:
+                    response_text = f"Не удалось выполнить /market: {e.detail}"
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+                except Exception as e:
+                    response_text = f"Не удалось выполнить /market: {e}"
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+
+            if user_message.lower().startswith("/riskcheck"):
+                await ai_agent._save_chat_message("user", user_message)
+                try:
+                    history_payload = get_history_trades(limit=10)
+                    trades = history_payload.get("trades") if isinstance(history_payload, dict) else []
+                    if not isinstance(trades, list):
+                        trades = []
+                    wins = 0
+                    losses = 0
+                    total_pnl = 0.0
+                    for t in trades:
+                        if not isinstance(t, dict):
+                            continue
+                        pnl = _safe_float(t.get("pnl_usd"), 0.0)
+                        total_pnl += pnl
+                        if pnl > 0:
+                            wins += 1
+                        elif pnl < 0:
+                            losses += 1
+                    avg_pnl = (total_pnl / len(trades)) if trades else 0.0
+                    ai_risk = await get_ai_risk_analysis()
+                    suggestions = ai_risk.get("suggestions") if isinstance(ai_risk, dict) else []
+                    if not isinstance(suggestions, list):
+                        suggestions = []
+                    top = []
+                    for item in suggestions[:3]:
+                        if not isinstance(item, dict):
+                            continue
+                        key = item.get("setting_key")
+                        cur = item.get("current_value")
+                        sug = item.get("suggested_value")
+                        reason = item.get("reason")
+                        top.append(f"- {key}: {cur} -> {sug} ({reason})")
+                    suggestions_text = "\n".join(top) if top else "- Нет явных изменений по риску"
+                    risk_score = ai_risk.get("risk_score") if isinstance(ai_risk, dict) else None
+                    analysis = ai_risk.get("analysis") if isinstance(ai_risk, dict) else None
+                    response_text = (
+                        "Risk-check по последним 10 сделкам\n"
+                        f"- Trades: {len(trades)}\n"
+                        f"- Wins/Losses: {wins}/{losses}\n"
+                        f"- Total PnL: {total_pnl:.2f} USD\n"
+                        f"- Avg PnL: {avg_pnl:.2f} USD\n"
+                        f"- AI risk score: {risk_score if risk_score is not None else 'N/A'}\n"
+                        f"- AI analysis: {analysis if analysis else 'N/A'}\n"
+                        "Рекомендации:\n"
+                        f"{suggestions_text}\n"
+                        "Для применения используйте /tool update_risk_settings {\"updates\": {...}}"
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text, "risk_check": {"trades": trades, "ai_risk": ai_risk}}
+                except HTTPException as e:
+                    response_text = f"Не удалось выполнить /riskcheck: {e.detail}"
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+                except Exception as e:
+                    response_text = f"Не удалось выполнить /riskcheck: {e}"
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+
+            if user_message.lower().startswith("/runbook"):
+                await ai_agent._save_chat_message("user", user_message)
+                parts = user_message.split()
+                mode = parts[1].lower().strip() if len(parts) >= 2 else "help"
+                if mode in {"help", "?", "list"}:
+                    response_text = (
+                        "Доступные runbook-сценарии:\n"
+                        "- /runbook planner paper_auto_validation [experiment_id] [window_minutes] [auto_apply=true|false] [auto_profile=conservative|balanced|aggressive]\n"
+                        "- /runbook paper_validate_apply [experiment_id]\n"
+                        "- /runbook incident_response [symbol]\n"
+                        "- /runbook campaign_watchdog\n"
+                        "- /runbook paper_auto_validation [experiment_id] [window_minutes]\n"
+                        "Сценарий проверяет completed/health/drift/OOS/stress и формирует безопасную команду apply."
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {"response": response_text}
+
+                if mode in {"planner", "plan"}:
+                    scenario = str(parts[2]).lower().strip() if len(parts) >= 3 else "paper_auto_validation"
+                    if scenario not in {"paper_auto_validation", "incident_response", "campaign_watchdog"}:
+                        response_text = "Planner поддерживает scenarios: paper_auto_validation, incident_response, campaign_watchdog."
+                        await ai_agent._save_chat_message("assistant", response_text)
+                        return {"response": response_text}
+
+                    auto_apply = False
+                    auto_apply_max_risk = "medium"
+                    auto_apply_profile = "balanced"
+                    profile_to_risk = {
+                        "conservative": "low",
+                        "balanced": "medium",
+                        "aggressive": "high",
+                    }
+                    for token in parts[3:]:
+                        t = str(token).strip().lower()
+                        if t in {"auto", "apply", "auto_apply=true", "auto=true", "yes"}:
+                            auto_apply = True
+                        if t.startswith("auto_profile="):
+                            val = t.split("=", 1)[1].strip()
+                            if val in profile_to_risk:
+                                auto_apply_profile = val
+                                auto_apply_max_risk = profile_to_risk[val]
+                        if t.startswith("auto_risk="):
+                            val = t.split("=", 1)[1].strip()
+                            if val in {"low", "medium", "high", "critical"}:
+                                auto_apply_max_risk = val
+
+                    def _parse_ts_planner(v: Any) -> Optional[float]:
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        if not isinstance(v, str):
+                            return None
+                        s = v.strip()
+                        if not s:
+                            return None
+                        if s.endswith("Z"):
+                            s = s[:-1] + "+00:00"
+                        try:
+                            dt = datetime.fromisoformat(s)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            return dt.timestamp()
+                        except Exception:
+                            return None
+
+                    def _risk_rank(r: str) -> int:
+                        return {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(str(r or "").lower(), 99)
+
+                    def _recommended_tool_name(command: str) -> str:
+                        parsed = chat_tool_executor.parse_manual_tool_command(command)
+                        if isinstance(parsed, dict):
+                            return str(parsed.get("tool_name") or "")
+                        return ""
+
+                    def _recommended_tool_risk(command: str) -> str:
+                        name = _recommended_tool_name(command)
+                        tool_row = chat_tool_executor.tools_map.get(name) if name else None
+                        if isinstance(tool_row, dict):
+                            return str(tool_row.get("risk_tier") or "unknown").lower()
+                        return "unknown"
+
+                    experiment_id = ""
+                    window_minutes = 30
+                    symbol = ""
+                    if scenario == "paper_auto_validation":
+                        arg1 = str(parts[3]).strip() if len(parts) >= 4 else ""
+                        arg2 = str(parts[4]).strip() if len(parts) >= 5 else ""
+                        if arg1 and not arg1.startswith("auto_"):
+                            if arg1.isdigit():
+                                window_minutes = int(arg1)
+                            else:
+                                experiment_id = arg1
+                        if arg2 and arg2.isdigit():
+                            window_minutes = int(arg2)
+                        window_minutes = max(5, min(240, window_minutes))
+                        if not experiment_id:
+                            status_payload = get_paper_status()
+                            sessions = status_payload.get("sessions") if isinstance(status_payload, dict) else []
+                            if isinstance(sessions, list) and sessions:
+                                first = sessions[0]
+                                if isinstance(first, dict):
+                                    experiment_id = str(first.get("experiment_id") or "")
+                        if not experiment_id:
+                            response_text = "Planner: не найден experiment_id. Укажите /runbook planner paper_auto_validation exp_... 30 auto_apply=true"
+                            await ai_agent._save_chat_message("assistant", response_text)
+                            return {"response": response_text}
+                    elif scenario == "incident_response":
+                        symbol = str(parts[3]).upper().strip() if len(parts) >= 4 and not str(parts[3]).startswith("auto_") else ""
+
+                    plan_steps = [
+                        f"PLAN: scenario={scenario} auto_apply={auto_apply} auto_profile={auto_apply_profile} auto_apply_max_risk={auto_apply_max_risk}",
+                        "EXECUTE: собрать данные по сценарию",
+                        "VERIFY: определить recommendation и risk команды",
+                        "SUMMARY: вернуть решение и (опционально) результат auto_apply",
+                    ]
+
+                    recommendation = "none"
+                    recommendation_reason = "N/A"
+                    recommended_command = ""
+                    summary_line = ""
+                    verification = "skip"
+                    execution = None
+                    verify_payload: Dict[str, Any] = {}
+
+                    if scenario == "paper_auto_validation":
+                        metrics_payload = get_paper_metrics(experiment_id=experiment_id)
+                        metrics = metrics_payload.get("metrics") if isinstance(metrics_payload, dict) else {}
+                        if not isinstance(metrics, dict):
+                            metrics = {}
+                        total_trades = int(metrics.get("total_trades") or 0)
+                        win_rate = _safe_float(metrics.get("win_rate"), 0.0)
+                        total_pnl = _safe_float(metrics.get("total_pnl"), 0.0)
+                        max_dd_pct = _safe_float(metrics.get("max_drawdown_pct"), 0.0)
+                        status_text = str(metrics_payload.get("status") or "")
+                        trades_payload = get_paper_trades(experiment_id=experiment_id, limit=300)
+                        trades_rows = trades_payload.get("trades") if isinstance(trades_payload, dict) else []
+                        if not isinstance(trades_rows, list):
+                            trades_rows = []
+                        cutoff = datetime.now(timezone.utc).timestamp() - (window_minutes * 60)
+                        window_pnls: List[float] = []
+                        window_trades = 0
+                        window_wins = 0
+                        window_pnl = 0.0
+                        for row in trades_rows:
+                            if not isinstance(row, dict):
+                                continue
+                            exit_ts = _parse_ts_planner(row.get("exit_time"))
+                            if exit_ts is None or exit_ts < cutoff:
+                                continue
+                            pnl = _safe_float(row.get("pnl"), 0.0)
+                            window_pnls.append(pnl)
+                            window_trades += 1
+                            window_pnl += pnl
+                            if pnl > 0:
+                                window_wins += 1
+                        window_win_rate = (window_wins * 100.0 / window_trades) if window_trades > 0 else 0.0
+                        rolling_volatility = float(statistics.pstdev(window_pnls)) if len(window_pnls) >= 2 else 0.0
+                        consecutive_losses_window = 0
+                        for pnl in reversed(window_pnls):
+                            if pnl < 0:
+                                consecutive_losses_window += 1
+                            else:
+                                break
+                        recommendation = "continue_paper"
+                        recommendation_reason = "Окно наблюдения стабильно."
+                        if status_text in {"error", "interrupted"}:
+                            recommendation = "start_paper"
+                            recommendation_reason = "Paper session в ошибке/прервана."
+                            recommended_command = '/tool start_paper_trading {"experiment_id":"' + experiment_id + '"}'
+                        elif window_trades >= 3 and (
+                            window_pnl <= -20
+                            or window_win_rate < 35.0
+                            or rolling_volatility > 25.0
+                            or consecutive_losses_window >= 4
+                        ):
+                            recommendation = "stop_paper"
+                            recommendation_reason = "Негативная динамика в окне."
+                            recommended_command = '/tool stop_paper_trading {"experiment_id":"' + experiment_id + '"}'
+                        elif total_trades >= 5 and win_rate >= 45.0 and total_pnl > 0 and max_dd_pct <= 20.0:
+                            recommendation = "apply_candidate"
+                            recommendation_reason = "Базовые гейты пройдены."
+                            recommended_command = (
+                                '/tool apply_research_experiment {"request_id":"req_'
+                                + str(int(time.time() * 1000))
+                                + '","experiment_id":"'
+                                + experiment_id
+                                + '"}'
+                            )
+                        summary_line = (
+                            f"window={window_minutes}m, trades={window_trades}, win_rate={window_win_rate:.2f}, pnl={window_pnl:.2f}, "
+                            f"volatility={rolling_volatility:.2f}, consecutive_losses={consecutive_losses_window}"
+                        )
+                    elif scenario == "incident_response":
+                        stats = get_stats()
+                        history_payload = get_history_trades(limit=10)
+                        trades = history_payload.get("trades") if isinstance(history_payload, dict) else []
+                        if not isinstance(trades, list):
+                            trades = []
+                        negatives = 0
+                        total_pnl = 0.0
+                        for t in trades:
+                            if not isinstance(t, dict):
+                                continue
+                            pnl = _safe_float(t.get("pnl_usd"), 0.0)
+                            total_pnl += pnl
+                            if pnl < 0:
+                                negatives += 1
+                        week_pnl = _safe_float(stats.get("week_pnl"), 0.0) if isinstance(stats, dict) else 0.0
+                        drawdown_hint = "high" if week_pnl < -50 or negatives >= 7 else ("medium" if negatives >= 5 else "low")
+                        incidents_24h = _incident_stats(24)
+                        if drawdown_hint == "high" and int(incidents_24h.get("count_high_or_critical") or 0) >= 2:
+                            drawdown_hint = "critical"
+                        recommendation = "continue_monitoring"
+                        recommendation_reason = "Стабильная ситуация."
+                        if drawdown_hint == "critical":
+                            recommendation = "emergency_stop"
+                            recommendation_reason = "Критическая серия инцидентов."
+                            recommended_command = '/tool emergency_stop_all {"request_id":"req_' + str(int(time.time() * 1000)) + '"}'
+                        elif drawdown_hint in {"high", "medium"}:
+                            recommendation = "reduce_risk"
+                            recommendation_reason = "Повышенный риск по инцидентам."
+                            recommended_command = '/tool update_risk_settings {"request_id":"req_' + str(int(time.time() * 1000)) + '","updates":{"base_order_usd":15,"stop_loss_pct":0.02}}'
+                        summary_line = (
+                            f"symbol={symbol or 'all'}, level={drawdown_hint}, negatives_last10={negatives}, total_pnl_last10={total_pnl:.2f}, "
+                            f"week_pnl={week_pnl:.2f}, incidents_24h={incidents_24h.get('count_high_or_critical')}"
+                        )
+                    elif scenario == "campaign_watchdog":
+                        payload = get_research_status()
+                        experiments = payload.get("experiments") if isinstance(payload, dict) else []
+                        if not isinstance(experiments, list):
+                            experiments = []
+                        active_rows = []
+                        stale_rows = []
+                        for row in experiments:
+                            if not isinstance(row, dict):
+                                continue
+                            status_text = str(row.get("status") or "").lower()
+                            if status_text in {"running", "queued", "pending"}:
+                                active_rows.append(row)
+                        for row in active_rows[:20]:
+                            exp_id = str(row.get("id") or "")
+                            if not exp_id:
+                                continue
+                            try:
+                                health = get_research_experiment_health(exp_id)
+                                if bool(health.get("stale")):
+                                    stale_rows.append(
+                                        {
+                                            "experiment_id": exp_id,
+                                            "symbol": row.get("symbol"),
+                                            "status_reason": health.get("status_reason"),
+                                        }
+                                    )
+                            except Exception:
+                                continue
+                        recommendation = "continue_campaigns"
+                        recommendation_reason = "Состояние кампаний штатное."
+                        if stale_rows:
+                            target = stale_rows[0]
+                            recommendation = "pause_stale_campaign"
+                            recommendation_reason = "Обнаружены stale кампании."
+                            recommended_command = (
+                                '/tool control_research_campaign {"experiment_id":"'
+                                + str(target.get("experiment_id") or "")
+                                + '","action":"pause"}'
+                            )
+                        summary_line = f"active={len(active_rows)}, stale={len(stale_rows)}"
+
+                    recommended_risk = _recommended_tool_risk(recommended_command) if recommended_command else "none"
+                    if auto_apply and recommended_command:
+                        if _risk_rank(recommended_risk) > _risk_rank(auto_apply_max_risk):
+                            verification = f"blocked_by_risk_policy(risk={recommended_risk}, max={auto_apply_max_risk})"
+                            chat_tool_executor.log_tool_event(
+                                event_type="planner_policy_blocked",
+                                tool_name=_recommended_tool_name(recommended_command) or "unknown",
+                                goal=f"planner:{scenario}",
+                                risk_tier=recommended_risk,
+                                ok=False,
+                                summary=f"Blocked by policy profile={auto_apply_profile}, max_risk={auto_apply_max_risk}",
+                                arguments={
+                                    "scenario": scenario,
+                                    "recommended_command": recommended_command,
+                                    "recommended_risk": recommended_risk,
+                                    "auto_apply_profile": auto_apply_profile,
+                                    "auto_apply_max_risk": auto_apply_max_risk,
+                                },
+                            )
+                        else:
+                            execution_plan = chat_tool_executor.parse_manual_tool_command(recommended_command)
+                            if isinstance(execution_plan, dict):
+                                execution = await chat_tool_executor.execute(
+                                    tool_name=str(execution_plan.get("tool_name") or ""),
+                                    arguments=execution_plan.get("arguments") if isinstance(execution_plan.get("arguments"), dict) else {},
+                                    goal="runbook_planner_auto_apply",
+                                    confirmed=False,
+                                    actor_key=actor_key,
+                                )
+                                verification = "executed"
+                                chat_tool_executor.log_tool_event(
+                                    event_type="planner_auto_apply_executed",
+                                    tool_name=str(execution_plan.get("tool_name") or "unknown"),
+                                    goal=f"planner:{scenario}",
+                                    risk_tier=recommended_risk,
+                                    ok=bool(execution.get("ok")) if isinstance(execution, dict) else False,
+                                    summary=f"profile={auto_apply_profile}, max_risk={auto_apply_max_risk}",
+                                    arguments={
+                                        "scenario": scenario,
+                                        "recommended_command": recommended_command,
+                                        "recommended_risk": recommended_risk,
+                                    },
+                                )
+                            else:
+                                verification = "parse_failed"
+                    elif auto_apply and not recommended_command:
+                        verification = "no_recommended_command"
+                        chat_tool_executor.log_tool_event(
+                            event_type="planner_auto_apply_skipped",
+                            tool_name="none",
+                            goal=f"planner:{scenario}",
+                            risk_tier="none",
+                            ok=True,
+                            summary="Auto-apply enabled but no recommended command",
+                            arguments={"scenario": scenario, "recommendation": recommendation},
+                        )
+
+                    if verification == "executed":
+                        if scenario == "paper_auto_validation":
+                            verify_payload = get_paper_status()
+                        elif scenario == "incident_response":
+                            verify_payload = get_status()
+                        elif scenario == "campaign_watchdog":
+                            verify_payload = get_research_status()
+
+                    response_text = (
+                        "Runbook planner\n"
+                        + "\n".join(f"- {x}" for x in plan_steps)
+                        + "\n"
+                        + f"SUMMARY: recommendation={recommendation} reason={recommendation_reason}\n"
+                        + f"metrics: {summary_line}\n"
+                        + f"recommended_command={recommended_command if recommended_command else 'N/A'}\n"
+                        + f"recommended_risk={recommended_risk}\n"
+                        + f"auto_apply={auto_apply}, auto_apply_profile={auto_apply_profile}, auto_apply_max_risk={auto_apply_max_risk}, verification={verification}"
+                    )
+                    if isinstance(execution, dict):
+                        response_text += "\n" + chat_tool_executor.render_response_text(execution)
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {
+                        "response": response_text,
+                        "runbook_planner": {
+                            "scenario": scenario,
+                            "auto_apply": auto_apply,
+                            "auto_apply_profile": auto_apply_profile,
+                            "auto_apply_max_risk": auto_apply_max_risk,
+                            "recommendation": recommendation,
+                            "recommendation_reason": recommendation_reason,
+                            "recommended_command": recommended_command,
+                            "recommended_risk": recommended_risk,
+                            "execution": execution,
+                            "verification": verification,
+                            "verify_payload": verify_payload,
+                        },
+                    }
+
+                if mode in {"paper_validate_apply", "paper", "validate_apply"}:
+                    experiment_id = str(parts[2]).strip() if len(parts) >= 3 else ""
+                    experiments_payload = get_research_status()
+                    experiments = experiments_payload.get("experiments") if isinstance(experiments_payload, dict) else []
+                    if not isinstance(experiments, list):
+                        experiments = []
+                    selected = None
+                    if experiment_id:
+                        for row in experiments:
+                            if isinstance(row, dict) and str(row.get("id") or "") == experiment_id:
+                                selected = row
+                                break
+                    else:
+                        for row in experiments:
+                            if isinstance(row, dict) and str(row.get("status") or "").lower() == "completed":
+                                selected = row
+                                break
+                        if selected is None and experiments:
+                            selected = experiments[0] if isinstance(experiments[0], dict) else None
+                    if not selected:
+                        response_text = "Runbook: эксперименты не найдены. Сначала запустите /tools -> start_research_experiment."
+                        await ai_agent._save_chat_message("assistant", response_text)
+                        return {"response": response_text}
+                    experiment_id = str(selected.get("id") or experiment_id or "").strip()
+                    health_ok = False
+                    health_payload = {}
+                    report_payload = {}
+                    try:
+                        health_payload = get_research_experiment_health(experiment_id)
+                        health_ok = bool(health_payload.get("ok")) and not bool(health_payload.get("stale"))
+                    except Exception:
+                        health_ok = False
+                    try:
+                        report_payload = get_experiment_report(experiment_id)
+                    except Exception:
+                        report_payload = {}
+                    status_text = str(selected.get("status") or "").lower()
+                    completed = status_text == "completed" or int(selected.get("progress") or 0) >= 100
+                    oos_gate = selected.get("oos_gates")
+                    if oos_gate is None:
+                        oos_gate = selected.get("oos_validation", {}).get("pass") if isinstance(selected.get("oos_validation"), dict) else None
+                    drift_level = "unknown"
+                    drift = selected.get("drift_signals")
+                    if isinstance(drift, dict):
+                        drift_level = str(drift.get("drift_level") or drift.get("level") or "unknown")
+                    stress_level = "unknown"
+                    stress = selected.get("stress_results")
+                    if isinstance(stress, dict):
+                        stress_level = str(stress.get("risk_level") or stress.get("severity") or "unknown")
+                    apply_ready = bool(completed and health_ok)
+                    if isinstance(oos_gate, bool) and not oos_gate:
+                        apply_ready = False
+                    if drift_level.lower() in {"high", "critical"}:
+                        apply_ready = False
+                    if stress_level.lower() in {"high", "critical"}:
+                        apply_ready = False
+                    req_id = f"req_{int(time.time() * 1000)}"
+                    apply_cmd = (
+                        "/tool apply_research_experiment "
+                        f"{{\"request_id\":\"{req_id}\",\"experiment_id\":\"{experiment_id}\"}}"
+                    )
+                    stop_reason = report_payload.get("stop_reason") if isinstance(report_payload, dict) else None
+                    response_text = (
+                        f"Runbook paper_validate_apply for {experiment_id}\n"
+                        f"1) Completed: {completed}\n"
+                        f"2) Health OK: {health_ok}\n"
+                        f"3) OOS gate: {oos_gate if oos_gate is not None else 'unknown'}\n"
+                        f"4) Drift: {drift_level}\n"
+                        f"5) Stress: {stress_level}\n"
+                        f"6) Stop reason: {stop_reason if stop_reason else 'N/A'}\n"
+                        f"APPLY_READY: {'YES' if apply_ready else 'NO'}\n"
+                        "Safe apply command:\n"
+                        f"{apply_cmd}"
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {
+                        "response": response_text,
+                        "runbook": {
+                            "name": "paper_validate_apply",
+                            "experiment_id": experiment_id,
+                            "apply_ready": apply_ready,
+                            "apply_command": apply_cmd,
+                            "checks": {
+                                "completed": completed,
+                                "health_ok": health_ok,
+                                "oos_gate": oos_gate,
+                                "drift_level": drift_level,
+                                "stress_level": stress_level,
+                            },
+                        },
+                    }
+
+                if mode in {"incident_response", "incident"}:
+                    symbol = str(parts[2]).upper().strip() if len(parts) >= 3 else ""
+                    status_data = _get_status_data(state, bybit_client, settings, trading_loop)
+                    stats = get_stats()
+                    history_payload = get_history_trades(limit=10)
+                    trades = history_payload.get("trades") if isinstance(history_payload, dict) else []
+                    if not isinstance(trades, list):
+                        trades = []
+                    negatives = 0
+                    total_pnl = 0.0
+                    for t in trades:
+                        if not isinstance(t, dict):
+                            continue
+                        pnl = _safe_float(t.get("pnl_usd"), 0.0)
+                        total_pnl += pnl
+                        if pnl < 0:
+                            negatives += 1
+                    recent_consecutive_losses = 0
+                    for t in trades:
+                        if not isinstance(t, dict):
+                            continue
+                        pnl = _safe_float(t.get("pnl_usd"), 0.0)
+                        if pnl < 0:
+                            recent_consecutive_losses += 1
+                        else:
+                            break
+                    week_pnl = _safe_float(stats.get("week_pnl"), 0.0) if isinstance(stats, dict) else 0.0
+                    drawdown_hint = "high" if week_pnl < -50 or negatives >= 7 else ("medium" if negatives >= 5 else "low")
+                    last24_stats = _incident_stats(24)
+                    if drawdown_hint == "high" and int(last24_stats.get("count_high_or_critical") or 0) >= 2:
+                        drawdown_hint = "critical"
+                    elif drawdown_hint == "medium" and int(last24_stats.get("count_high_or_critical") or 0) >= 3:
+                        drawdown_hint = "high"
+                    after_record_stats = _record_incident(
+                        drawdown_hint,
+                        symbol or None,
+                        {
+                            "week_pnl": week_pnl,
+                            "negatives_last10": negatives,
+                            "consecutive_losses_last10": recent_consecutive_losses,
+                            "total_pnl_last10": total_pnl,
+                        },
+                    )
+                    risk_cmd = '/tool update_risk_settings {"request_id":"req_' + str(int(time.time() * 1000)) + '","updates":{"base_order_usd":15,"stop_loss_pct":0.02}}'
+                    stop_cmd = '/tool stop_bot {"request_id":"req_' + str(int(time.time() * 1000)) + '"}'
+                    emergency_cmd = '/tool emergency_stop_all {"request_id":"req_' + str(int(time.time() * 1000)) + '"}'
+                    escalation_action = "continue_monitoring"
+                    escalation_cmd = ""
+                    if drawdown_hint == "critical":
+                        escalation_action = "consider_emergency_stop"
+                        escalation_cmd = emergency_cmd
+                    elif drawdown_hint == "high" or recent_consecutive_losses >= 4:
+                        escalation_action = "consider_stop_bot"
+                        escalation_cmd = stop_cmd
+                    response_text = (
+                        f"Runbook incident_response {symbol or '(all symbols)'}\n"
+                        f"- Bot status: {status_data.get('bot_status') if isinstance(status_data, dict) else 'N/A'}\n"
+                        f"- Active positions: {len(status_data.get('positions', [])) if isinstance(status_data, dict) and isinstance(status_data.get('positions'), list) else 0}\n"
+                        f"- Last 10 trades negative: {negatives}\n"
+                        f"- Last 10 consecutive losses: {recent_consecutive_losses}\n"
+                        f"- Last 10 total PnL: {total_pnl:.2f} USD\n"
+                        f"- Week PnL: {week_pnl:.2f} USD\n"
+                        f"- Incident level: {drawdown_hint}\n"
+                        f"- Incidents 24h (high/critical): {after_record_stats.get('count_high_or_critical')}\n"
+                        "Рекомендованные действия:\n"
+                        "1) /riskcheck\n"
+                        "2) При medium/high снизить риск\n"
+                        f"3) Suggested command: {risk_cmd}\n"
+                        f"4) Escalation action: {escalation_action}\n"
+                        f"5) Escalation command: {escalation_cmd if escalation_cmd else 'N/A'}"
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {
+                        "response": response_text,
+                        "runbook": {
+                            "name": "incident_response",
+                            "symbol": symbol or None,
+                            "incident_level": drawdown_hint,
+                            "negative_trades_last10": negatives,
+                            "consecutive_losses_last10": recent_consecutive_losses,
+                            "total_pnl_last10": total_pnl,
+                            "week_pnl": week_pnl,
+                            "incidents_24h": after_record_stats,
+                            "escalation_action": escalation_action,
+                            "escalation_command": escalation_cmd,
+                            "suggested_risk_command": risk_cmd,
+                        },
+                    }
+
+                if mode in {"campaign_watchdog", "watchdog"}:
+                    payload = get_research_status()
+                    experiments = payload.get("experiments") if isinstance(payload, dict) else []
+                    if not isinstance(experiments, list):
+                        experiments = []
+                    active_rows = []
+                    stale_rows = []
+                    for row in experiments:
+                        if not isinstance(row, dict):
+                            continue
+                        status_text = str(row.get("status") or "").lower()
+                        if status_text in {"running", "queued", "pending"}:
+                            active_rows.append(row)
+                    for row in active_rows[:20]:
+                        exp_id = str(row.get("id") or "")
+                        if not exp_id:
+                            continue
+                        try:
+                            health = get_research_experiment_health(exp_id)
+                            if bool(health.get("stale")):
+                                stale_rows.append(
+                                    {
+                                        "experiment_id": exp_id,
+                                        "symbol": row.get("symbol"),
+                                        "status": row.get("status"),
+                                        "status_reason": health.get("status_reason"),
+                                    }
+                                )
+                        except Exception:
+                            continue
+                    response_lines = [
+                        "Runbook campaign_watchdog",
+                        f"- Active campaigns: {len(active_rows)}",
+                        f"- Stale campaigns: {len(stale_rows)}",
+                    ]
+                    for item in stale_rows[:8]:
+                        response_lines.append(
+                            f"  • {item.get('experiment_id')} {item.get('symbol')} reason={item.get('status_reason')}"
+                        )
+                    if stale_rows:
+                        response_lines.append(
+                            "Рекомендация: используйте /tool control_research_campaign {\"experiment_id\":\"...\",\"action\":\"pause\"} или stop."
+                        )
+                    else:
+                        response_lines.append("Проблемных кампаний не обнаружено.")
+                    response_text = "\n".join(response_lines)
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {
+                        "response": response_text,
+                        "runbook": {
+                            "name": "campaign_watchdog",
+                            "active_count": len(active_rows),
+                            "stale_count": len(stale_rows),
+                            "stale_campaigns": stale_rows,
+                        },
+                    }
+
+                if mode in {"paper_auto_validation", "paper_auto", "paper_validate"}:
+                    experiment_id = ""
+                    window_minutes = 30
+                    arg1 = str(parts[2]).strip() if len(parts) >= 3 else ""
+                    arg2 = str(parts[3]).strip() if len(parts) >= 4 else ""
+                    if arg1:
+                        if arg1.isdigit():
+                            window_minutes = int(arg1)
+                        else:
+                            experiment_id = arg1
+                    if arg2 and arg2.isdigit():
+                        window_minutes = int(arg2)
+                    window_minutes = max(5, min(240, window_minutes))
+                    if not experiment_id:
+                        status_payload = get_paper_status()
+                        sessions = status_payload.get("sessions") if isinstance(status_payload, dict) else []
+                        if isinstance(sessions, list) and sessions:
+                            first = sessions[0]
+                            if isinstance(first, dict):
+                                experiment_id = str(first.get("experiment_id") or "")
+                    if not experiment_id:
+                        response_text = "Runbook: не найден experiment_id для paper validation. Укажите /runbook paper_auto_validation exp_..."
+                        await ai_agent._save_chat_message("assistant", response_text)
+                        return {"response": response_text}
+                    try:
+                        metrics_payload = get_paper_metrics(experiment_id=experiment_id)
+                    except Exception as e:
+                        response_text = f"Runbook paper_auto_validation failed: {e}"
+                        await ai_agent._save_chat_message("assistant", response_text)
+                        return {"response": response_text}
+                    metrics = metrics_payload.get("metrics") if isinstance(metrics_payload, dict) else {}
+                    if not isinstance(metrics, dict):
+                        metrics = {}
+                    total_trades = int(metrics.get("total_trades") or 0)
+                    win_rate = _safe_float(metrics.get("win_rate"), 0.0)
+                    total_pnl = _safe_float(metrics.get("total_pnl"), 0.0)
+                    max_dd_pct = _safe_float(metrics.get("max_drawdown_pct"), 0.0)
+                    status_text = str(metrics_payload.get("status") or "")
+                    timestamps = metrics.get("timestamps") if isinstance(metrics.get("timestamps"), list) else []
+                    equity_curve = metrics.get("equity_curve") if isinstance(metrics.get("equity_curve"), list) else []
+                    cutoff = datetime.now(timezone.utc).timestamp() - (window_minutes * 60)
+
+                    def _parse_ts(v: Any) -> Optional[float]:
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        if not isinstance(v, str):
+                            return None
+                        s = v.strip()
+                        if not s:
+                            return None
+                        if s.endswith("Z"):
+                            s = s[:-1] + "+00:00"
+                        try:
+                            dt = datetime.fromisoformat(s)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            return dt.timestamp()
+                        except Exception:
+                            return None
+
+                    window_indices: List[int] = []
+                    for i, ts in enumerate(timestamps):
+                        ts_value = _parse_ts(ts)
+                        if ts_value is None:
+                            continue
+                        if ts_value >= cutoff:
+                            window_indices.append(i)
+                    window_return_pct = 0.0
+                    window_points = len(window_indices)
+                    if window_points >= 2 and len(equity_curve) > window_indices[0]:
+                        first_idx = window_indices[0]
+                        last_idx = window_indices[-1]
+                        if len(equity_curve) > last_idx:
+                            first_equity = _safe_float(equity_curve[first_idx], 0.0)
+                            last_equity = _safe_float(equity_curve[last_idx], 0.0)
+                            if first_equity > 0:
+                                window_return_pct = ((last_equity - first_equity) / first_equity) * 100.0
+
+                    trades_payload = get_paper_trades(experiment_id=experiment_id, limit=300)
+                    trades_rows = trades_payload.get("trades") if isinstance(trades_payload, dict) else []
+                    if not isinstance(trades_rows, list):
+                        trades_rows = []
+                    window_trades = 0
+                    window_wins = 0
+                    window_pnl = 0.0
+                    window_pnls: List[float] = []
+                    window_trade_rows: List[Dict[str, Any]] = []
+                    for row in trades_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        exit_ts = _parse_ts(row.get("exit_time"))
+                        if exit_ts is None or exit_ts < cutoff:
+                            continue
+                        pnl = _safe_float(row.get("pnl"), 0.0)
+                        window_trades += 1
+                        window_pnl += pnl
+                        window_pnls.append(pnl)
+                        window_trade_rows.append(row)
+                        if pnl > 0:
+                            window_wins += 1
+                    window_win_rate = (window_wins * 100.0 / window_trades) if window_trades > 0 else 0.0
+                    rolling_volatility = 0.0
+                    if len(window_pnls) >= 2:
+                        try:
+                            rolling_volatility = float(statistics.pstdev(window_pnls))
+                        except Exception:
+                            rolling_volatility = 0.0
+                    window_trade_rows.sort(
+                        key=lambda r: (_parse_ts(r.get("exit_time")) or 0.0),
+                        reverse=True,
+                    )
+                    consecutive_losses_window = 0
+                    for row in window_trade_rows:
+                        pnl = _safe_float(row.get("pnl"), 0.0)
+                        if pnl < 0:
+                            consecutive_losses_window += 1
+                        else:
+                            break
+
+                    gates = {
+                        "min_trades": total_trades >= 5,
+                        "win_rate": win_rate >= 45.0,
+                        "pnl_positive": total_pnl > 0,
+                        "drawdown_ok": max_dd_pct <= 20.0,
+                        "status_ok": status_text in {"active", "completed", "stopped"},
+                        "rolling_volatility_ok": rolling_volatility <= 25.0,
+                        "consecutive_losses_ok": consecutive_losses_window <= 3,
+                    }
+                    pass_all = all(bool(v) for v in gates.values())
+                    recommendation = "continue_paper"
+                    recommendation_reason = "Окно наблюдения стабильно."
+                    recommended_command = ""
+                    if status_text in {"error", "interrupted"}:
+                        recommendation = "start_paper"
+                        recommendation_reason = "Paper session в ошибке/прервана, рекомендуется перезапуск."
+                        recommended_command = '/tool start_paper_trading {"experiment_id":"' + experiment_id + '"}'
+                    elif window_trades >= 3 and (
+                        window_pnl <= -20
+                        or window_win_rate < 35.0
+                        or window_return_pct <= -1.5
+                        or rolling_volatility > 25.0
+                        or consecutive_losses_window >= 4
+                    ):
+                        recommendation = "stop_paper"
+                        recommendation_reason = "Негативная динамика в окне наблюдения."
+                        recommended_command = '/tool stop_paper_trading {"experiment_id":"' + experiment_id + '"}'
+                    elif pass_all and window_return_pct >= 0.5 and window_win_rate >= 50.0:
+                        recommendation = "apply_candidate"
+                        recommendation_reason = "Гейты и окно наблюдения подтверждают кандидата."
+
+                    apply_cmd = (
+                        '/tool apply_research_experiment {"request_id":"req_'
+                        + str(int(time.time() * 1000))
+                        + '","experiment_id":"'
+                        + experiment_id
+                        + '"}'
+                    )
+                    response_text = (
+                        f"Runbook paper_auto_validation {experiment_id}\n"
+                        f"- status: {status_text}\n"
+                        f"- total_trades: {total_trades}\n"
+                        f"- win_rate: {win_rate:.2f}\n"
+                        f"- total_pnl: {total_pnl:.2f}\n"
+                        f"- max_drawdown_pct: {max_dd_pct:.2f}\n"
+                        f"- window_minutes: {window_minutes}\n"
+                        f"- window_points: {window_points}\n"
+                        f"- window_trades: {window_trades}\n"
+                        f"- window_win_rate: {window_win_rate:.2f}\n"
+                        f"- window_pnl: {window_pnl:.2f}\n"
+                        f"- window_return_pct: {window_return_pct:.2f}\n"
+                        f"- rolling_volatility: {rolling_volatility:.2f}\n"
+                        f"- consecutive_losses_window: {consecutive_losses_window}\n"
+                        f"- gates: {gates}\n"
+                        f"AUTO_PASS: {'YES' if pass_all else 'NO'}\n"
+                        f"Recommendation: {recommendation} ({recommendation_reason})\n"
+                        f"Recommended command: {recommended_command if recommended_command else 'N/A'}\n"
+                        "Safe apply command:\n"
+                        f"{apply_cmd}"
+                    )
+                    await ai_agent._save_chat_message("assistant", response_text)
+                    return {
+                        "response": response_text,
+                        "runbook": {
+                            "name": "paper_auto_validation",
+                            "experiment_id": experiment_id,
+                            "auto_pass": pass_all,
+                            "gates": gates,
+                            "window_minutes": window_minutes,
+                            "window_trades": window_trades,
+                            "window_win_rate": window_win_rate,
+                            "window_pnl": window_pnl,
+                            "window_return_pct": window_return_pct,
+                            "rolling_volatility": rolling_volatility,
+                            "consecutive_losses_window": consecutive_losses_window,
+                            "recommendation": recommendation,
+                            "recommendation_reason": recommendation_reason,
+                            "recommended_command": recommended_command,
+                            "apply_command": apply_cmd,
+                        },
+                    }
+
+                response_text = "Неизвестный runbook. Используйте /runbook help."
                 await ai_agent._save_chat_message("assistant", response_text)
                 return {"response": response_text}
 
@@ -2243,6 +4076,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     arguments=plan.get("arguments") if isinstance(plan.get("arguments"), dict) else {},
                     goal=str(plan.get("goal") or ""),
                     confirmed=False,
+                    actor_key=actor_key,
                 )
                 response_text = chat_tool_executor.render_response_text(execution)
                 await ai_agent._save_chat_message("assistant", response_text)
