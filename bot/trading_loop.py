@@ -112,6 +112,82 @@ class TradingLoop:
         except Exception:
             return default
 
+    @staticmethod
+    def _normalize_ai_confirm_entry_result(raw, decision_id: str) -> Dict:
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if not isinstance(raw, dict):
+            raw = {"decision": str(raw)}
+        d = raw.get("decision")
+        d_str = str(d) if d is not None else ""
+        d_upper = d_str.upper()
+        d_lower = d_str.lower()
+        if d_lower in ("allow", "reduce", "veto"):
+            decision = d_lower
+        elif d_upper in ("APPROVE", "APPROVED", "ALLOW"):
+            decision = "allow"
+        elif d_upper in ("REJECT", "REJECTED", "DENY", "DENIED", "VETO", "BLOCK", "BLOCKED"):
+            decision = "veto"
+        elif d_upper in ("WAIT", "HOLD"):
+            decision = "veto"
+        else:
+            decision = "veto"
+
+        size_multiplier = raw.get("size_multiplier", 1.0)
+        try:
+            size_multiplier = float(size_multiplier)
+        except Exception:
+            size_multiplier = 1.0
+        if size_multiplier <= 0:
+            size_multiplier = 1.0
+        if decision == "reduce":
+            if size_multiplier not in (0.1, 0.25, 0.5):
+                size_multiplier = 0.25
+        if decision == "veto":
+            size_multiplier = 1.0
+
+        reason_codes = raw.get("reason_codes")
+        if not isinstance(reason_codes, list):
+            reason_codes = raw.get("risk_flags")
+        if not isinstance(reason_codes, list):
+            reason_codes = []
+        reason_codes = [str(x) for x in reason_codes]
+
+        notes = raw.get("notes")
+        if not isinstance(notes, str) or not notes:
+            notes = raw.get("reason")
+        if not isinstance(notes, str) or not notes:
+            notes = ""
+
+        confidence = raw.get("confidence", 0.0)
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+
+        risk_score = raw.get("risk_score", 50)
+        try:
+            risk_score = int(risk_score)
+        except Exception:
+            risk_score = 50
+
+        latency_ms = raw.get("latency_ms")
+        try:
+            latency_ms = int(latency_ms)
+        except Exception:
+            latency_ms = None
+
+        return {
+            "decision": decision,
+            "confidence": confidence,
+            "risk_score": risk_score,
+            "size_multiplier": size_multiplier,
+            "reason_codes": reason_codes,
+            "notes": notes,
+            "decision_id": decision_id,
+            "timestamp_utc": raw.get("timestamp_utc") or now_ts,
+            "latency_ms": latency_ms,
+        }
+
     @classmethod
     def _orderbook_summary(cls, ob: Dict) -> Dict:
         result = ob.get("result") if isinstance(ob, dict) else None
@@ -285,8 +361,10 @@ class TradingLoop:
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "latency_ms": 0,
             }
+            result_raw = result
         else:
-            result = await agent.confirm_entry(payload)
+            result_raw = await agent.confirm_entry(payload)
+            result = self._normalize_ai_confirm_entry_result(result_raw, decision_id)
 
         root = Path(__file__).resolve().parent.parent
         append_jsonl(
@@ -300,6 +378,7 @@ class TradingLoop:
                 "latency_ms": result.get("latency_ms"),
                 "request": payload,
                 "response": result,
+                "response_raw": result_raw,
             },
         )
 
@@ -1488,18 +1567,48 @@ class TradingLoop:
                 if not isinstance(signal.indicators_info, dict):
                     signal.indicators_info = {}
                 signal.indicators_info["ai_entry_confirmation"] = decision
-                if isinstance(decision, dict) and decision.get("decision") == "veto":
+                if isinstance(decision, dict):
+                    d = str(decision.get("decision", "")).lower()
+                    decision_id = decision.get("decision_id")
+                    mult = decision.get("size_multiplier")
+                    codes = decision.get("reason_codes")
+                    logger.info(
+                        f"[{symbol}] 🤖 AI entry decision={d} mult={mult} codes={codes} decision_id={decision_id}"
+                    )
+                    if d not in ("allow", "reduce", "veto"):
+                        d = "veto"
+                else:
+                    d = "veto"
+
+                if d == "veto":
                     logger.info(
                         f"[{symbol}] ⛔ AI Agent veto entry: decision_id={decision.get('decision_id')} "
                         f"codes={decision.get('reason_codes')} notes={decision.get('notes')}"
                     )
+                    try:
+                        root = Path(__file__).resolve().parent.parent
+                        append_jsonl(
+                            str(root / "logs" / "ai_entry_audit.jsonl"),
+                            {
+                                "event_type": "entry_blocked",
+                                "symbol": symbol,
+                                "side": side,
+                                "decision_id": decision.get("decision_id"),
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "ai": decision,
+                                "reason_codes": decision.get("reason_codes") if isinstance(decision, dict) else None,
+                                "notes": decision.get("notes") if isinstance(decision, dict) else None,
+                            },
+                        )
+                    except Exception:
+                        pass
                     return
                 if isinstance(decision, dict) and decision.get("size_multiplier") is not None:
                     try:
                         signal.indicators_info["ai_size_multiplier"] = float(decision.get("size_multiplier"))
                     except Exception:
                         signal.indicators_info["ai_size_multiplier"] = 1.0
-                if isinstance(decision, dict) and decision.get("decision") == "reduce":
+                if isinstance(decision, dict) and str(decision.get("decision", "")).lower() == "reduce":
                     if not isinstance(signal.indicators_info, dict):
                         signal.indicators_info = {}
                     if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
@@ -1714,7 +1823,13 @@ class TradingLoop:
                                         self.state.update_position(symbol, size, avg_price)
                 else:
                     # Log to trades.log
-                    trade_logger.info(f"ORDER PLACED (OPEN): {symbol} {side} Qty={qty} Price={signal.price} TP={signal.take_profit} SL={signal.stop_loss}")
+                    ai = None
+                    if signal.indicators_info and isinstance(signal.indicators_info, dict):
+                        ai = signal.indicators_info.get("ai_entry_confirmation")
+                    ai_suffix = ""
+                    if isinstance(ai, dict) and ai.get("decision_id"):
+                        ai_suffix = f" AI={ai.get('decision')} AI_ID={ai.get('decision_id')}"
+                    trade_logger.info(f"ORDER PLACED (OPEN): {symbol} {side} Qty={qty} Price={signal.price} TP={signal.take_profit} SL={signal.stop_loss}{ai_suffix}")
                     
                     logger.info(f"Successfully opened {side} for {symbol}")
                     

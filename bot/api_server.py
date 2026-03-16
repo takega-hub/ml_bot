@@ -853,7 +853,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         ):
             if key in body:
                 v = float(body[key])
-                if v >= 1:
+                if key in (
+                    "mtf_confidence_threshold_1h",
+                    "mtf_confidence_threshold_15m",
+                    "confidence_threshold",
+                    "min_confidence_for_trade",
+                    "follow_btc_override_confidence",
+                    "ai_fallback_spread_reduce_pct",
+                    "ai_fallback_spread_veto_pct",
+                ) and v >= 1:
                     v = v / 100.0
                 data[key] = v
                 setattr(m, key, v)
@@ -1630,9 +1638,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                             if event_type == "confirm_entry":
                                 resp = rec.get("response", {}) if isinstance(rec.get("response"), dict) else {}
                                 decision = resp.get("decision")
-                                mult = resp.get("size_multiplier")
+                                mult = resp.get("size_multiplier", resp.get("mult"))
                                 codes = resp.get("reason_codes")
-                                latency = resp.get("latency_ms")
+                                if not isinstance(codes, list):
+                                    codes = resp.get("risk_flags")
+                                latency = resp.get("latency_ms", rec.get("latency_ms"))
                                 out.append(
                                     f"{ts} AI confirm_entry {symbol} {side} decision={decision} mult={mult} codes={codes} latency_ms={latency} id={decision_id}"
                                 )
@@ -1643,6 +1653,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                                 exit_reason = rec.get("exit_reason")
                                 out.append(
                                     f"{ts} AI trade_outcome {symbol} {side} pnl_usd={pnl_usd} pnl_pct={pnl_pct} exit_reason={exit_reason} id={decision_id}"
+                                )
+                                continue
+                            if event_type == "entry_blocked":
+                                ai = rec.get("ai", {}) if isinstance(rec.get("ai"), dict) else {}
+                                decision = ai.get("decision", "veto")
+                                codes = rec.get("reason_codes", ai.get("reason_codes"))
+                                notes = rec.get("notes", ai.get("notes"))
+                                out.append(
+                                    f"{ts} AI entry_blocked {symbol} {side} decision={decision} codes={codes} notes={notes} id={decision_id}"
                                 )
                                 continue
                     except Exception:
