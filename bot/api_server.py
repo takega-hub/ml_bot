@@ -2235,7 +2235,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "rate_limit_per_minute": rate.get("limit_per_minute"),
                 }
             schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), dict) else {"type": "object"}
-            validation_errors = self._validate_against_schema(arguments, schema, "arguments")
+            validation_arguments = arguments if isinstance(arguments, dict) else {}
+            if isinstance(validation_arguments, dict):
+                validation_arguments = dict(validation_arguments)
+                validation_arguments.pop("request_id", None)
+                validation_arguments.pop("idempotency_key", None)
+            validation_errors = self._validate_against_schema(validation_arguments, schema, "arguments")
             if validation_errors:
                 return {
                     "ok": False,
