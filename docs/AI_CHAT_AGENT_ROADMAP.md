@@ -177,4 +177,6 @@
 - Выполнено: алерты деградации conversion по активному профилю и по падению последнего bucket.
 - Выполнено: push/notification-канал policy alerting через Telegram + audit события `planner_policy_alert` с cooldown.
 - Выполнено: конфиг порогов policy alerts из UI (profile, min actionable, min conversion, cooldown) с backend persistence.
-- В работе: дашборд долгосрочных трендов (дневные/недельные агрегаты) и автоподбор policy-профиля.
+- Выполнено: долгосрочные тренды policy analytics (daily/weekly агрегаты) и отображение в Audit UI.
+- Выполнено: backend-рекомендация `suggested_profile` и UI-действие Apply Suggested Profile.
+- В работе: авто-тюнинг порогов policy alerts на основе долгосрочной конверсии и волатильности.

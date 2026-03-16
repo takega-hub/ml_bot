@@ -4097,9 +4097,57 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     confirmed=False,
                     actor_key=actor_key,
                 )
-                response_text = chat_tool_executor.render_response_text(execution)
+                if execution.get("ok"):
+                    response_text = await ai_agent.synthesize_tool_results(
+                        user_message=user_message,
+                        executions=[execution],
+                        context=context,
+                    )
+                else:
+                    response_text = chat_tool_executor.render_response_text(execution)
                 await ai_agent._save_chat_message("assistant", response_text)
                 return {"response": response_text, "tool_execution": execution}
+
+            if isinstance(plan, dict) and str(plan.get("intent") or "").lower() == "tool_chain":
+                steps = plan.get("steps")
+                if not isinstance(steps, list) or not steps:
+                    response = await ai_agent.chat_with_user(user_message, context, log_lines)
+                    return {"response": response}
+                await ai_agent._save_chat_message("user", user_message)
+                executions: List[Dict[str, Any]] = []
+                for row in steps[:4]:
+                    if not isinstance(row, dict):
+                        continue
+                    execution = await chat_tool_executor.execute(
+                        tool_name=str(row.get("tool_name") or ""),
+                        arguments=row.get("arguments") if isinstance(row.get("arguments"), dict) else {},
+                        goal=str(row.get("goal") or ""),
+                        confirmed=False,
+                        actor_key=actor_key,
+                    )
+                    executions.append(execution)
+                    if (
+                        execution.get("requires_confirmation")
+                        or execution.get("rate_limited")
+                        or (not execution.get("ok"))
+                    ):
+                        break
+                all_ok = bool(executions) and all(bool(x.get("ok")) for x in executions if isinstance(x, dict))
+                if all_ok:
+                    response_text = await ai_agent.synthesize_tool_results(
+                        user_message=user_message,
+                        executions=executions,
+                        context=context,
+                    )
+                else:
+                    chunks: List[str] = []
+                    for ex in executions:
+                        if not isinstance(ex, dict):
+                            continue
+                        chunks.append(chat_tool_executor.render_response_text(ex))
+                    response_text = "\n\n".join(chunks).strip() or "Не удалось выполнить цепочку инструментов."
+                await ai_agent._save_chat_message("assistant", response_text)
+                return {"response": response_text, "tool_executions": executions}
 
             response = await ai_agent.chat_with_user(user_message, context, log_lines)
             return {"response": response}
