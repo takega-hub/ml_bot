@@ -3241,17 +3241,32 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     if not isinstance(suggestions, list):
                         suggestions = []
                     top = []
+                    apply_updates: Dict[str, Any] = {}
                     for item in suggestions[:3]:
                         if not isinstance(item, dict):
                             continue
-                        key = item.get("setting_key")
+                        key = str(item.get("setting_key") or "").strip()
                         cur = item.get("current_value")
                         sug = item.get("suggested_value")
                         reason = item.get("reason")
+                        if key and isinstance(sug, (str, int, float, bool)):
+                            apply_updates[key] = sug
                         top.append(f"- {key}: {cur} -> {sug} ({reason})")
                     suggestions_text = "\n".join(top) if top else "- Нет явных изменений по риску"
                     risk_score = ai_risk.get("risk_score") if isinstance(ai_risk, dict) else None
                     analysis = ai_risk.get("analysis") if isinstance(ai_risk, dict) else None
+                    apply_command = ""
+                    if apply_updates:
+                        apply_payload = {
+                            "request_id": f"req_{int(time.time() * 1000)}_riskcheck",
+                            "updates": apply_updates,
+                        }
+                        apply_command = "/tool update_risk_settings " + json.dumps(
+                            apply_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            default=str,
+                        )
                     response_text = (
                         "Risk-check по последним 10 сделкам\n"
                         f"- Trades: {len(trades)}\n"
@@ -3262,7 +3277,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         f"- AI analysis: {analysis if analysis else 'N/A'}\n"
                         "Рекомендации:\n"
                         f"{suggestions_text}\n"
-                        "Для применения используйте /tool update_risk_settings {\"updates\": {...}}"
+                        + (
+                            f"Apply command:\n{apply_command}"
+                            if apply_command
+                            else "Для применения используйте /tool update_risk_settings {\"request_id\":\"req_...\",\"updates\":{...}}"
+                        )
                     )
                     await ai_agent._save_chat_message("assistant", response_text)
                     return {"response": response_text, "risk_check": {"trades": trades, "ai_risk": ai_risk}}
