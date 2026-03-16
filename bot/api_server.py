@@ -3242,6 +3242,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         suggestions = []
                     top = []
                     apply_updates: Dict[str, Any] = {}
+                    allowed_risk_keys = {
+                        "base_order_usd",
+                        "max_position_usd",
+                        "stop_loss_pct",
+                        "take_profit_pct",
+                        "margin_pct_balance",
+                    }
                     for item in suggestions[:3]:
                         if not isinstance(item, dict):
                             continue
@@ -3249,8 +3256,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         cur = item.get("current_value")
                         sug = item.get("suggested_value")
                         reason = item.get("reason")
-                        if key and isinstance(sug, (str, int, float, bool)):
-                            apply_updates[key] = sug
+                        if key in allowed_risk_keys and isinstance(sug, (int, float)):
+                            apply_updates[key] = float(sug)
                         top.append(f"- {key}: {cur} -> {sug} ({reason})")
                     suggestions_text = "\n".join(top) if top else "- Нет явных изменений по риску"
                     risk_score = ai_risk.get("risk_score") if isinstance(ai_risk, dict) else None
