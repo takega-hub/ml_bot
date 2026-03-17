@@ -51,6 +51,7 @@ class TradingLoop:
         # Ожидающие сигналы для входа по откату (pullback)
         # Структура: {symbol: [{'signal': Signal, 'signal_time': datetime, 'signal_high': float, 'signal_low': float, 'bars_waited': int}, ...]}
         self.pending_pullback_signals: Dict[str, List[Dict]] = {}
+        self.pending_pullback_entry_orders: Dict[str, Dict] = {}
         
         # Paper trading manager for online testing of experimental models
         # Pass bot settings for realistic simulation
@@ -1186,8 +1187,54 @@ class TradingLoop:
 
             local_pos = self.state.get_open_position(symbol)
             
+            if has_pos is not None and not local_pos:
+                rec = self.pending_pullback_entry_orders.get(symbol)
+                if rec and isinstance(rec, dict) and isinstance(rec.get("signal"), Signal):
+                    s = rec.get("signal")
+                    indicators_info = s.indicators_info if isinstance(s.indicators_info, dict) else {}
+                    confidence = indicators_info.get("confidence", 0) if isinstance(indicators_info, dict) else 0
+                    signal_strength = indicators_info.get("strength", "") if isinstance(indicators_info, dict) else ""
+                    trade = TradeRecord(
+                        symbol=symbol,
+                        side=side if side in ("Buy", "Sell") else ("Buy" if has_pos == Bias.LONG else "Sell"),
+                        entry_price=float(entry_price),
+                        qty=float(size),
+                        status="open",
+                        model_name=self.state.symbol_models.get(symbol, ""),
+                        horizon=self._classify_position_horizon(s),
+                        entry_reason=s.reason or "",
+                        confidence=confidence,
+                        take_profit=s.take_profit or indicators_info.get("take_profit"),
+                        stop_loss=s.stop_loss or indicators_info.get("stop_loss"),
+                        leverage=self.settings.leverage,
+                        margin_usd=float(rec.get("expected_margin_usd") or 0.0),
+                        signal_strength=str(signal_strength),
+                    )
+                    self.state.add_trade(trade)
+                    logger.info(f"[{symbol}] 🔄 Added filled pullback limit entry to state (qty={size}, avg={entry_price})")
+                else:
+                    trade = TradeRecord(
+                        symbol=symbol,
+                        side=side if side in ("Buy", "Sell") else ("Buy" if has_pos == Bias.LONG else "Sell"),
+                        entry_price=float(entry_price),
+                        qty=float(size),
+                        status="open",
+                        model_name=self.state.symbol_models.get(symbol, ""),
+                        leverage=self.settings.leverage,
+                    )
+                    self.state.add_trade(trade)
+                    logger.info(f"[{symbol}] 🔄 Added exchange position to state (qty={size}, avg={entry_price})")
+                if symbol in self.pending_pullback_entry_orders:
+                    await self._cancel_pullback_entry_order(symbol, reason="position_detected")
+            
             # Обрабатываем pending сигналы (вход по откату) - проверяем ДО генерации нового сигнала
-            if has_pos is None and self.settings.ml_strategy.pullback_enabled and df is not None and not df.empty:
+            if has_pos is None and self._pullback_limit_roll_enabled() and df is not None and not df.empty:
+                try:
+                    if candle_timestamp is not None:
+                        await self._tick_pullback_entry_order(symbol, candle_timestamp)
+                except Exception as e:
+                    logger.warning(f"[{symbol}] ⚠️ Error ticking pullback limit order: {e}")
+            elif has_pos is None and self.settings.ml_strategy.pullback_enabled and df is not None and not df.empty:
                 try:
                     # Получаем текущие данные свечи
                     if len(df) > 0:
@@ -1595,23 +1642,29 @@ class TradingLoop:
                 # Открываем позицию, если ее нет или она в другую сторону (для short_term)
                 if signal.action == Action.LONG and has_pos != Bias.LONG:
                     if self.settings.ml_strategy.pullback_enabled:
-                        # Добавляем сигнал в pending вместо немедленного открытия
-                        # Используем high/low из сигнальной свечи (row)
                         signal_high = float(row['high'])
                         signal_low = float(row['low'])
-                        self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
-                        logger.info(f"[{symbol}] 📋 Added LONG signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
+                        if self._pullback_limit_roll_enabled():
+                            if symbol in self.pending_pullback_signals:
+                                self.pending_pullback_signals[symbol] = []
+                            await self._handle_pullback_limit_roll_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                        else:
+                            self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                            logger.info(f"[{symbol}] 📋 Added LONG signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
                     else:
                         logger.info(f"[{symbol}] ✅ Opening LONG position (no position or opposite)")
                         await self.execute_trade(symbol, "Buy", signal)
                 elif signal.action == Action.SHORT and has_pos != Bias.SHORT:
                     if self.settings.ml_strategy.pullback_enabled:
-                        # Добавляем сигнал в pending вместо немедленного открытия
-                        # Используем high/low из сигнальной свечи (row)
                         signal_high = float(row['high'])
                         signal_low = float(row['low'])
-                        self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
-                        logger.info(f"[{symbol}] 📋 Added SHORT signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
+                        if self._pullback_limit_roll_enabled():
+                            if symbol in self.pending_pullback_signals:
+                                self.pending_pullback_signals[symbol] = []
+                            await self._handle_pullback_limit_roll_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                        else:
+                            self._add_pending_pullback_signal(symbol, signal, candle_timestamp or pd.Timestamp.now(), signal_high, signal_low)
+                            logger.info(f"[{symbol}] 📋 Added SHORT signal to pullback queue (waiting for pullback, signal_high={signal_high:.2f}, signal_low={signal_low:.2f})")
                     else:
                         logger.info(f"[{symbol}] ✅ Opening SHORT position (no position or opposite)")
                         await self.execute_trade(symbol, "Sell", signal)
@@ -1628,6 +1681,294 @@ class TradingLoop:
             logger.error(f"[trading_loop] Error processing {symbol}: {e}")
             # При ошибке НЕ сохраняем timestamp, чтобы можно было повторить обработку
 
+    def _pullback_entry_mode(self) -> str:
+        return str(getattr(self.settings.ml_strategy, "pullback_entry_mode", "pending")).strip().lower()
+
+    def _pullback_limit_roll_enabled(self) -> bool:
+        return bool(self.settings.ml_strategy.pullback_enabled) and self._pullback_entry_mode() == "limit_roll"
+
+    def _to_timestamp(self, ts) -> Optional[pd.Timestamp]:
+        if ts is None:
+            return None
+        if isinstance(ts, pd.Timestamp):
+            return ts
+        if isinstance(ts, (int, float)):
+            try:
+                return pd.Timestamp(ts, unit="ms")
+            except Exception:
+                return pd.Timestamp(ts)
+        try:
+            return pd.Timestamp(ts)
+        except Exception:
+            return None
+
+    def _extract_open_orders_list(self, resp: Optional[dict]) -> List[dict]:
+        if not resp or not isinstance(resp, dict):
+            return []
+        if resp.get("retCode") not in (0, "0", None):
+            return []
+        result = resp.get("result")
+        if isinstance(result, dict):
+            lst = result.get("list", [])
+            if isinstance(lst, list):
+                return [x for x in lst if isinstance(x, dict)]
+        return []
+
+    async def _prepare_entry(
+        self,
+        symbol: str,
+        side: str,
+        signal: Signal,
+        is_add: bool,
+        position_horizon: Optional[str],
+    ) -> Optional[tuple]:
+        indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
+        signal_received_time = None
+        if indicators_info and "signal_received_time" in indicators_info:
+            try:
+                signal_received_time = pd.Timestamp(indicators_info["signal_received_time"])
+            except Exception:
+                signal_received_time = None
+        elif signal.timestamp:
+            signal_received_time = signal.timestamp
+
+        if signal_received_time and not is_add:
+            try:
+                signal_age_minutes = (pd.Timestamp.now() - signal_received_time).total_seconds() / 60
+                if signal_age_minutes > 15:
+                    logger.warning(
+                        f"[{symbol}] ❌ Cannot open position: signal is too old ({signal_age_minutes:.1f} minutes > 15 minutes). "
+                        f"Signal timestamp: {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, "
+                        f"current time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return None
+            except Exception:
+                pass
+
+        signal_tp = signal.take_profit or indicators_info.get("take_profit")
+        signal_sl = signal.stop_loss or indicators_info.get("stop_loss")
+        if not is_add and (not signal_tp or not signal_sl):
+            logger.warning(
+                f"[{symbol}] ❌ Cannot open position: missing TP/SL! "
+                f"TP={signal_tp}, SL={signal_sl}, signal.take_profit={signal.take_profit}, "
+                f"signal.stop_loss={signal.stop_loss}, indicators_info={indicators_info}"
+            )
+            return None
+
+        if not is_add and bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)):
+            engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
+            eng = indicators_info.get("decision_engine_eval") if isinstance(indicators_info, dict) else None
+            if isinstance(eng, dict):
+                eng_d = str(eng.get("decision", "")).lower()
+                eng_mult = eng.get("size_multiplier")
+                if eng_d not in ("allow", "reduce", "veto"):
+                    eng_d = "veto"
+                if engine_mode == "enforce" and eng_d == "veto":
+                    try:
+                        root = Path(__file__).resolve().parent.parent
+                        append_jsonl(
+                            str(root / "logs" / "ai_entry_audit.jsonl"),
+                            {
+                                "event_type": "entry_blocked",
+                                "symbol": symbol,
+                                "side": side,
+                                "decision_id": None,
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "decision_source": "engine",
+                                "ai": None,
+                                "engine": eng,
+                                "reason_codes": eng.get("reason_codes"),
+                                "notes": "Blocked by decision engine",
+                            },
+                        )
+                    except Exception:
+                        pass
+                    return None
+                if engine_mode == "enforce" and eng_mult is not None:
+                    try:
+                        signal.indicators_info["ai_size_multiplier"] = float(eng_mult)
+                    except Exception:
+                        signal.indicators_info["ai_size_multiplier"] = 1.0
+                    indicators_info = signal.indicators_info
+                if engine_mode == "enforce" and eng_d == "reduce":
+                    if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
+                        signal.indicators_info["ai_size_multiplier"] = 0.25
+                        indicators_info = signal.indicators_info
+
+        if not is_add and getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False):
+            decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
+            if not isinstance(signal.indicators_info, dict):
+                signal.indicators_info = {}
+            signal.indicators_info["ai_entry_confirmation"] = decision
+            indicators_info = signal.indicators_info
+            ai_mode = str(getattr(self.settings.ml_strategy, "ai_entry_confirmation_mode", "enforce"))
+            engine_enabled = bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False))
+            engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
+
+            ai_d = "veto"
+            ai_mult = None
+            if isinstance(decision, dict):
+                ai_d = str(decision.get("decision", "")).lower()
+                ai_mult = decision.get("size_multiplier")
+                if ai_d not in ("allow", "reduce", "veto"):
+                    ai_d = "veto"
+
+            eng = decision.get("decision_engine") if isinstance(decision, dict) else None
+            eng_d = None
+            eng_mult = None
+            if isinstance(eng, dict):
+                eng_d = str(eng.get("decision", "")).lower()
+                eng_mult = eng.get("size_multiplier")
+                if eng_d not in ("allow", "reduce", "veto"):
+                    eng_d = "veto"
+
+            d_source = "ai"
+            d = ai_d
+            mult = ai_mult
+            if engine_enabled and engine_mode == "enforce" and eng_d:
+                d_source = "engine"
+                d = eng_d
+                mult = eng_mult
+
+            decision_id = decision.get("decision_id") if isinstance(decision, dict) else None
+            codes = decision.get("reason_codes") if isinstance(decision, dict) else None
+            logger.info(
+                f"[{symbol}] 🤖 Entry decision_source={d_source} decision={d} mult={mult} codes={codes} decision_id={decision_id}"
+            )
+
+            if ai_mode == "shadow":
+                logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked")
+            elif d == "veto":
+                try:
+                    root = Path(__file__).resolve().parent.parent
+                    append_jsonl(
+                        str(root / "logs" / "ai_entry_audit.jsonl"),
+                        {
+                            "event_type": "entry_blocked",
+                            "symbol": symbol,
+                            "side": side,
+                            "decision_id": decision_id,
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            "decision_source": d_source,
+                            "ai": decision if isinstance(decision, dict) else None,
+                            "engine": eng if isinstance(eng, dict) else None,
+                            "reason_codes": codes if isinstance(codes, list) else None,
+                            "notes": decision.get("notes") if isinstance(decision, dict) else None,
+                        },
+                    )
+                except Exception:
+                    pass
+                return None
+
+            if ai_mode != "shadow" and mult is not None:
+                try:
+                    signal.indicators_info["ai_size_multiplier"] = float(mult)
+                except Exception:
+                    signal.indicators_info["ai_size_multiplier"] = 1.0
+                indicators_info = signal.indicators_info
+            if ai_mode != "shadow" and d == "reduce":
+                if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
+                    signal.indicators_info["ai_size_multiplier"] = 0.25
+                    indicators_info = signal.indicators_info
+
+        tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
+        sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
+        logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={tp_str}, SL={sl_str}")
+        return signal_tp, signal_sl, indicators_info
+
+    async def _calc_order_qty(
+        self,
+        symbol: str,
+        entry_price: float,
+        indicators_info: dict,
+        is_add: bool,
+    ) -> Optional[tuple]:
+        qty_step = self.bybit.get_qty_step(symbol)
+        if qty_step <= 0:
+            logger.error(f"Invalid qtyStep for {symbol}: {qty_step}")
+            return None
+
+        qty_step_str = str(qty_step)
+        precision = len(qty_step_str.split(".")[1]) if "." in qty_step_str else 0
+
+        balance_info = await asyncio.to_thread(self.bybit.get_wallet_balance)
+        balance = 0.0
+        if balance_info and balance_info.get("retCode") == 0:
+            result = balance_info.get("result")
+            if result and isinstance(result, dict):
+                list_data = result.get("list", [])
+                if list_data and len(list_data) > 0:
+                    wallet_item = list_data[0]
+                    if wallet_item and isinstance(wallet_item, dict):
+                        wallet = wallet_item.get("coin", [])
+                        if wallet and isinstance(wallet, list):
+                            usdt_coin = next((c for c in wallet if isinstance(c, dict) and c.get("coin") == "USDT"), None)
+                            if usdt_coin:
+                                balance_str = usdt_coin.get("walletBalance", "0")
+                                balance = float(balance_str) if balance_str and balance_str != "" else 0.0
+
+        if balance <= 0:
+            logger.error(f"[{symbol}] ❌ Cannot get balance or balance is zero: {balance}")
+            return None
+
+        logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
+
+        if is_add:
+            base_position_size_usd = self.settings.risk.base_order_usd * self.settings.leverage
+            position_size_usd = base_position_size_usd / 2.0
+            fixed_margin_usd = position_size_usd / self.settings.leverage
+        else:
+            size_multiplier = 1.0
+            if isinstance(indicators_info, dict) and "ai_size_multiplier" in indicators_info:
+                try:
+                    size_multiplier = float(indicators_info.get("ai_size_multiplier", 1.0))
+                except Exception:
+                    size_multiplier = 1.0
+            if size_multiplier <= 0:
+                size_multiplier = 1.0
+            if size_multiplier > 2.0:
+                size_multiplier = 2.0
+            fixed_margin_usd = self.settings.risk.base_order_usd * size_multiplier
+            position_size_usd = fixed_margin_usd * self.settings.leverage
+
+            max_position_usd = getattr(self.settings.risk, "max_position_usd", None)
+            if isinstance(max_position_usd, (int, float)) and max_position_usd and max_position_usd > 0:
+                if position_size_usd > float(max_position_usd):
+                    position_size_usd = float(max_position_usd)
+                    fixed_margin_usd = position_size_usd / self.settings.leverage
+
+        if fixed_margin_usd > balance:
+            logger.warning(
+                f"[{symbol}] ⚠️ Fixed margin ${fixed_margin_usd:.2f} exceeds balance ${balance:.2f}, "
+                f"using available balance"
+            )
+            fixed_margin_usd = balance
+            position_size_usd = fixed_margin_usd * self.settings.leverage
+
+        if entry_price <= 0:
+            logger.error(f"[{symbol}] ❌ Invalid entry_price: {entry_price}")
+            return None
+
+        total_qty = position_size_usd / entry_price
+        logger.info(
+            f"Position size for {symbol}: "
+            f"balance=${balance:.2f}, "
+            f"margin=${fixed_margin_usd:.2f}, "
+            f"position_size_usd=${position_size_usd:.2f}, "
+            f"qty={total_qty:.6f}, leverage={self.settings.leverage}x"
+        )
+
+        rounded_qty = math.floor(total_qty / qty_step) * qty_step
+        if rounded_qty < qty_step:
+            qty = qty_step
+        else:
+            qty = rounded_qty
+        qty = float(f"{qty:.{precision}f}")
+        if qty <= 0:
+            logger.error(f"[{symbol}] ❌ Calculated qty is zero or negative: {qty}")
+            return None
+        return qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision
+
     async def execute_trade(
         self,
         symbol: str,
@@ -1640,267 +1981,19 @@ class TradingLoop:
             logger.info(f"[{symbol}] 🚀 execute_trade() called: side={side}, is_add={is_add}, price={signal.price:.2f}")
             
             # Проверяем наличие TP/SL в сигнале (критично для открытия позиции)
-            indicators_info = signal.indicators_info if signal.indicators_info and isinstance(signal.indicators_info, dict) else {}
-            
-            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: проверяем возраст сигнала (для защиты от устаревших сигналов)
-            # Используем signal_received_time из indicators_info, если он есть, иначе используем timestamp свечи
-            signal_received_time = None
-            if indicators_info and 'signal_received_time' in indicators_info:
-                signal_received_time = pd.Timestamp(indicators_info['signal_received_time'])
-            elif signal.timestamp:
-                # Используем timestamp свечи как приблизительное время получения сигнала
-                signal_received_time = signal.timestamp
-            
-            if signal_received_time and not is_add:  # Проверяем только для новых позиций, не для DCA
-                signal_age_seconds = (pd.Timestamp.now() - signal_received_time).total_seconds()
-                signal_age_minutes = signal_age_seconds / 60
-                max_signal_age_minutes = 15  # Максимальный возраст сигнала для открытия сделки
-                
-                if signal_age_minutes > max_signal_age_minutes:
-                    logger.warning(
-                        f"[{symbol}] ❌ Cannot open position: signal is too old ({signal_age_minutes:.1f} minutes > {max_signal_age_minutes} minutes). "
-                        f"Signal timestamp: {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, "
-                        f"current time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
-                    return  # Не открываем позицию по устаревшему сигналу
-            
-            signal_tp = signal.take_profit or indicators_info.get('take_profit')
-            signal_sl = signal.stop_loss or indicators_info.get('stop_loss')
-            
-            if not is_add and (not signal_tp or not signal_sl):
-                logger.warning(
-                    f"[{symbol}] ❌ Cannot open position: missing TP/SL! "
-                    f"TP={signal_tp}, SL={signal_sl}, signal.take_profit={signal.take_profit}, "
-                    f"signal.stop_loss={signal.stop_loss}, indicators_info={indicators_info}"
-                )
+            prep = await self._prepare_entry(symbol, side, signal, is_add, position_horizon)
+            if prep is None:
                 return
+            signal_tp, signal_sl, indicators_info = prep
+            if not is_add:
+                signal.take_profit = signal_tp
+                signal.stop_loss = signal_sl
 
-            if not is_add and bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)):
-                engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
-                eng = indicators_info.get("decision_engine_eval") if isinstance(indicators_info, dict) else None
-                if isinstance(eng, dict):
-                    eng_d = str(eng.get("decision", "")).lower()
-                    eng_mult = eng.get("size_multiplier")
-                    if eng_d not in ("allow", "reduce", "veto"):
-                        eng_d = "veto"
-                    if engine_mode == "enforce" and eng_d == "veto":
-                        try:
-                            root = Path(__file__).resolve().parent.parent
-                            append_jsonl(
-                                str(root / "logs" / "ai_entry_audit.jsonl"),
-                                {
-                                    "event_type": "entry_blocked",
-                                    "symbol": symbol,
-                                    "side": side,
-                                    "decision_id": None,
-                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                    "decision_source": "engine",
-                                    "ai": None,
-                                    "engine": eng,
-                                    "reason_codes": eng.get("reason_codes"),
-                                    "notes": "Blocked by decision engine",
-                                },
-                            )
-                        except Exception:
-                            pass
-                        return
-                    if engine_mode == "enforce" and eng_mult is not None:
-                        try:
-                            signal.indicators_info["ai_size_multiplier"] = float(eng_mult)
-                        except Exception:
-                            signal.indicators_info["ai_size_multiplier"] = 1.0
-                    if engine_mode == "enforce" and eng_d == "reduce":
-                        if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
-                            signal.indicators_info["ai_size_multiplier"] = 0.25
-
-            if not is_add and getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False):
-                decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
-                if not isinstance(signal.indicators_info, dict):
-                    signal.indicators_info = {}
-                signal.indicators_info["ai_entry_confirmation"] = decision
-                ai_mode = str(getattr(self.settings.ml_strategy, "ai_entry_confirmation_mode", "enforce"))
-                engine_enabled = bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False))
-                engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
-
-                ai_d = "veto"
-                ai_mult = None
-                if isinstance(decision, dict):
-                    ai_d = str(decision.get("decision", "")).lower()
-                    ai_mult = decision.get("size_multiplier")
-                    if ai_d not in ("allow", "reduce", "veto"):
-                        ai_d = "veto"
-
-                eng = decision.get("decision_engine") if isinstance(decision, dict) else None
-                eng_d = None
-                eng_mult = None
-                if isinstance(eng, dict):
-                    eng_d = str(eng.get("decision", "")).lower()
-                    eng_mult = eng.get("size_multiplier")
-                    if eng_d not in ("allow", "reduce", "veto"):
-                        eng_d = "veto"
-
-                d_source = "ai"
-                d = ai_d
-                mult = ai_mult
-                if engine_enabled and engine_mode == "enforce" and eng_d:
-                    d_source = "engine"
-                    d = eng_d
-                    mult = eng_mult
-
-                decision_id = decision.get("decision_id") if isinstance(decision, dict) else None
-                codes = decision.get("reason_codes") if isinstance(decision, dict) else None
-                logger.info(
-                    f"[{symbol}] 🤖 Entry decision_source={d_source} decision={d} mult={mult} codes={codes} decision_id={decision_id}"
-                )
-
-                if ai_mode == "shadow":
-                    logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked")
-                elif d == "veto":
-                    try:
-                        root = Path(__file__).resolve().parent.parent
-                        append_jsonl(
-                            str(root / "logs" / "ai_entry_audit.jsonl"),
-                            {
-                                "event_type": "entry_blocked",
-                                "symbol": symbol,
-                                "side": side,
-                                "decision_id": decision_id,
-                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                "decision_source": d_source,
-                                "ai": decision if isinstance(decision, dict) else None,
-                                "engine": eng if isinstance(eng, dict) else None,
-                                "reason_codes": codes if isinstance(codes, list) else None,
-                                "notes": decision.get("notes") if isinstance(decision, dict) else None,
-                            },
-                        )
-                    except Exception:
-                        pass
-                    return
-
-                if ai_mode != "shadow" and mult is not None:
-                    try:
-                        signal.indicators_info["ai_size_multiplier"] = float(mult)
-                    except Exception:
-                        signal.indicators_info["ai_size_multiplier"] = 1.0
-                if ai_mode != "shadow" and d == "reduce":
-                    if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
-                        signal.indicators_info["ai_size_multiplier"] = 0.25
-            
-            tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
-            sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
-            logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={tp_str}, SL={sl_str}")
-            
-            # Получаем qtyStep для символа
-            qty_step = self.bybit.get_qty_step(symbol)
-            
-            if qty_step <= 0:
-                logger.error(f"Invalid qtyStep for {symbol}: {qty_step}")
+            qty_calc = await self._calc_order_qty(symbol, float(signal.price), indicators_info, is_add)
+            if qty_calc is None:
                 return
-            
-            # Определяем precision из qtyStep
-            qty_step_str = str(qty_step)
-            if '.' in qty_step_str:
-                precision = len(qty_step_str.split('.')[1])
-            else:
-                precision = 0
-            
-            # Вычисляем размер позиции: используем минимум из двух вариантов
-            # 1. Процент от баланса
-            # Получаем баланс
-            balance_info = await asyncio.to_thread(self.bybit.get_wallet_balance)
-            balance = 0.0
-            
-            if balance_info and balance_info.get("retCode") == 0:
-                result = balance_info.get("result")
-                if result and isinstance(result, dict):
-                    list_data = result.get("list", [])
-                    if list_data and len(list_data) > 0:
-                        wallet_item = list_data[0]
-                        if wallet_item and isinstance(wallet_item, dict):
-                            wallet = wallet_item.get("coin", [])
-                            if wallet and isinstance(wallet, list):
-                                usdt_coin = next((c for c in wallet if isinstance(c, dict) and c.get("coin") == "USDT"), None)
-                                if usdt_coin:
-                                    balance_str = usdt_coin.get("walletBalance", "0")
-                                    balance = float(balance_str) if balance_str and balance_str != "" else 0.0
-            
-            if balance <= 0:
-                logger.error(f"[{symbol}] ❌ Cannot get balance or balance is zero: {balance}")
-                return
-            
-            logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
-            
-            # РАСЧЕТ: Фиксированная сумма маржи с учетом плеча
-            # base_order_usd - это маржа в USD
-            # Размер позиции в USD = маржа * leverage
-            # Количество = (маржа * leverage) / цена
-            # При добавлении к позиции используем половину от размера позиции (notional)
-            if is_add:
-                # Сначала считаем размер позиции для новой позиции
-                base_position_size_usd = self.settings.risk.base_order_usd * self.settings.leverage
-                # При добавлении используем половину от размера позиции
-                position_size_usd = base_position_size_usd / 2.0
-                # Маржа = размер позиции / leverage
-                fixed_margin_usd = position_size_usd / self.settings.leverage
-            else:
-                size_multiplier = 1.0
-                if isinstance(indicators_info, dict) and "ai_size_multiplier" in indicators_info:
-                    try:
-                        size_multiplier = float(indicators_info.get("ai_size_multiplier", 1.0))
-                    except Exception:
-                        size_multiplier = 1.0
-                if size_multiplier <= 0:
-                    size_multiplier = 1.0
-                if size_multiplier > 2.0:
-                    size_multiplier = 2.0
-                fixed_margin_usd = self.settings.risk.base_order_usd * size_multiplier
-                # Размер позиции в USD = маржа * leverage
-                position_size_usd = fixed_margin_usd * self.settings.leverage
+            qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision = qty_calc
 
-                max_position_usd = getattr(self.settings.risk, "max_position_usd", None)
-                if isinstance(max_position_usd, (int, float)) and max_position_usd and max_position_usd > 0:
-                    if position_size_usd > float(max_position_usd):
-                        position_size_usd = float(max_position_usd)
-                        fixed_margin_usd = position_size_usd / self.settings.leverage
-            
-            # Проверяем, что маржа не превышает баланс
-            if fixed_margin_usd > balance:
-                logger.warning(
-                    f"[{symbol}] ⚠️ Fixed margin ${fixed_margin_usd:.2f} exceeds balance ${balance:.2f}, "
-                    f"using available balance"
-                )
-                fixed_margin_usd = balance
-                # Пересчитываем размер позиции с учетом ограничения по балансу
-                position_size_usd = fixed_margin_usd * self.settings.leverage
-            
-            # Количество монет = размер позиции / цена
-            total_qty = position_size_usd / signal.price
-            
-            logger.info(
-                f"Position size for {symbol}: "
-                f"balance=${balance:.2f}, "
-                f"margin=${fixed_margin_usd:.2f}, "
-                f"position_size_usd=${position_size_usd:.2f}, "
-                f"qty={total_qty:.6f}, leverage={self.settings.leverage}x"
-            )
-            
-            # Округляем вниз до ближайшего кратного qtyStep (как в примере кода)
-            # Округляем вниз: Math.floor(totalQty / qtyStep) * qtyStep
-            rounded_qty = math.floor(total_qty / qty_step) * qty_step
-            
-            # Если получилось меньше qtyStep, используем минимальный шаг
-            if rounded_qty < qty_step:
-                qty = qty_step
-            else:
-                qty = rounded_qty
-            
-            # Форматируем до нужной точности
-            qty = float(f"{qty:.{precision}f}")
-            
-            if qty <= 0:
-                logger.error(f"[{symbol}] ❌ Calculated qty is zero or negative: {qty}")
-                return
-            
             logger.info(f"[{symbol}] ✅ Position size calculated: qty={qty:.6f}, placing order...")
             
             try:
@@ -1909,8 +2002,8 @@ class TradingLoop:
                     side=side,
                     qty=qty,
                     order_type="Market",
-                    take_profit=None if is_add else signal.take_profit,
-                    stop_loss=None if is_add else signal.stop_loss,
+                    take_profit=None if is_add else signal_tp,
+                    stop_loss=None if is_add else signal_sl,
                 )
             except InvalidRequestError as e:
                 # Обрабатываем ошибку недостатка средств (код 110007)
@@ -2011,6 +2104,9 @@ class TradingLoop:
                         self.pending_pullback_signals[symbol] = []
                         if cleared_count > 0:
                             logger.info(f"[{symbol}] 🧹 Cleared {cleared_count} pending pullback signal(s) after opening position")
+                    
+                    if symbol in self.pending_pullback_entry_orders:
+                        await self._cancel_pullback_entry_order(symbol, reason="position_opened")
                     
                     await self.notifier.high(
                         f"🚀 ОТКРЫТА ПОЗИЦИЯ {side} {symbol}\n"
@@ -2444,6 +2540,243 @@ class TradingLoop:
         })
         
         logger.info(f"[{symbol}] 📋 Added signal to pending pullback queue: {signal.action.value} @ {signal.price:.2f}")
+
+    async def _cancel_pullback_entry_order(self, symbol: str, reason: str = "") -> None:
+        rec = self.pending_pullback_entry_orders.get(symbol)
+        if not rec or not isinstance(rec, dict):
+            return
+        order_link_id = rec.get("order_link_id")
+        if not order_link_id:
+            self.pending_pullback_entry_orders.pop(symbol, None)
+            return
+        try:
+            open_resp = await asyncio.to_thread(self.bybit.get_open_orders, symbol=symbol, order_link_id=order_link_id)
+            open_orders = self._extract_open_orders_list(open_resp)
+            if not open_orders:
+                self.pending_pullback_entry_orders.pop(symbol, None)
+                return
+            cancel_resp = await asyncio.to_thread(self.bybit.cancel_order, symbol=symbol, order_link_id=order_link_id)
+            ok = isinstance(cancel_resp, dict) and cancel_resp.get("retCode") == 0
+            if not ok:
+                order_id = open_orders[0].get("orderId") if isinstance(open_orders[0], dict) else None
+                if order_id:
+                    cancel_resp = await asyncio.to_thread(self.bybit.cancel_order, symbol=symbol, order_id=order_id)
+                    ok = isinstance(cancel_resp, dict) and cancel_resp.get("retCode") == 0
+            if ok:
+                logger.info(f"[{symbol}] 🧹 Pullback limit order canceled ({reason}) link={order_link_id}")
+            else:
+                logger.warning(f"[{symbol}] ⚠️ Pullback limit order cancel failed ({reason}) link={order_link_id} resp={cancel_resp}")
+        except Exception as e:
+            logger.warning(f"[{symbol}] ⚠️ Pullback limit order cancel exception ({reason}) link={order_link_id}: {e}")
+        finally:
+            self.pending_pullback_entry_orders.pop(symbol, None)
+
+    def _signal_confidence(self, signal: Signal) -> float:
+        try:
+            info = signal.indicators_info if isinstance(signal.indicators_info, dict) else {}
+            v = info.get("confidence", 0)
+            return float(v) if v is not None else 0.0
+        except Exception:
+            return 0.0
+
+    async def _tick_pullback_entry_order(self, symbol: str, candle_timestamp) -> None:
+        rec = self.pending_pullback_entry_orders.get(symbol)
+        if not rec or not isinstance(rec, dict):
+            return
+        order_link_id = rec.get("order_link_id")
+        if not order_link_id:
+            self.pending_pullback_entry_orders.pop(symbol, None)
+            return
+        try:
+            open_resp = await asyncio.to_thread(self.bybit.get_open_orders, symbol=symbol, order_link_id=order_link_id)
+            open_orders = self._extract_open_orders_list(open_resp)
+            if not open_orders:
+                self.pending_pullback_entry_orders.pop(symbol, None)
+                return
+        except Exception:
+            return
+
+        try:
+            rec["bars_waited"] = int(rec.get("bars_waited", 0)) + 1
+        except Exception:
+            rec["bars_waited"] = 1
+
+        max_bars = int(getattr(self.settings.ml_strategy, "pullback_max_bars", 3) or 3)
+        if rec["bars_waited"] >= max(1, max_bars):
+            await self._cancel_pullback_entry_order(symbol, reason="max_bars")
+
+    def _calc_pullback_limit_price(self, signal: Signal, symbol: str, signal_high: float, signal_low: float) -> Optional[float]:
+        pullback_pct = float(getattr(self.settings.ml_strategy, "pullback_pct", 0.0))
+        if pullback_pct <= 0:
+            return None
+        if signal.action == Action.LONG:
+            limit_price = float(signal_high) * (1.0 - pullback_pct)
+        elif signal.action == Action.SHORT:
+            limit_price = float(signal_low) * (1.0 + pullback_pct)
+        else:
+            return None
+        limit_price = float(self.bybit.round_price(float(limit_price), symbol))
+        if limit_price <= 0:
+            return None
+        return limit_price
+
+    async def _handle_pullback_limit_roll_signal(
+        self,
+        symbol: str,
+        signal: Signal,
+        candle_timestamp,
+        signal_high: float,
+        signal_low: float,
+    ) -> None:
+        if not self._pullback_limit_roll_enabled():
+            return
+        rec = self.pending_pullback_entry_orders.get(symbol)
+
+        if signal.action not in (Action.LONG, Action.SHORT):
+            if rec:
+                await self._cancel_pullback_entry_order(symbol, reason="hold")
+            return
+
+        limit_price = self._calc_pullback_limit_price(signal, symbol, signal_high, signal_low)
+        if limit_price is None:
+            if rec:
+                await self._cancel_pullback_entry_order(symbol, reason="bad_price")
+            return
+
+        side = "Buy" if signal.action == Action.LONG else "Sell"
+        position_horizon = self._classify_position_horizon(signal)
+        prep = await self._prepare_entry(symbol, side, signal, False, position_horizon)
+        if prep is None:
+            if rec:
+                await self._cancel_pullback_entry_order(symbol, reason="entry_veto")
+            return
+        signal_tp, signal_sl, indicators_info = prep
+        signal.take_profit = signal_tp
+        signal.stop_loss = signal_sl
+
+        if rec and isinstance(rec, dict):
+            order_link_id = rec.get("order_link_id")
+            if order_link_id:
+                try:
+                    open_resp = await asyncio.to_thread(self.bybit.get_open_orders, symbol=symbol, order_link_id=order_link_id)
+                    if not self._extract_open_orders_list(open_resp):
+                        self.pending_pullback_entry_orders.pop(symbol, None)
+                        rec = None
+                except Exception:
+                    pass
+
+        if rec and isinstance(rec, dict):
+            old_action = rec.get("action")
+            if old_action and str(old_action) != signal.action.value:
+                await self._cancel_pullback_entry_order(symbol, reason="side_change")
+                rec = None
+            else:
+                old_conf = float(rec.get("confidence") or 0.0)
+                new_conf = self._signal_confidence(signal)
+                drop = float(getattr(self.settings.ml_strategy, "pullback_limit_roll_conf_drop_pct", 0.05) or 0.05)
+                if new_conf < (old_conf - drop):
+                    await self._cancel_pullback_entry_order(symbol, reason="confidence_drop")
+                    return
+
+                old_price = float(rec.get("limit_price") or 0.0)
+                min_rq = float(getattr(self.settings.ml_strategy, "pullback_limit_roll_min_requote_pct", 0.001) or 0.001)
+                price_move = abs(float(limit_price) - old_price) / max(1e-12, old_price) if old_price > 0 else 1.0
+
+                old_signal = rec.get("signal") if isinstance(rec.get("signal"), Signal) else None
+                old_tp = float(getattr(old_signal, "take_profit", 0.0) or 0.0) if old_signal else 0.0
+                old_sl = float(getattr(old_signal, "stop_loss", 0.0) or 0.0) if old_signal else 0.0
+                tp_move = abs(float(signal_tp) - old_tp) / max(1e-12, old_tp) if old_tp > 0 and signal_tp else 0.0
+                sl_move = abs(float(signal_sl) - old_sl) / max(1e-12, old_sl) if old_sl > 0 and signal_sl else 0.0
+
+                if price_move < min_rq and tp_move < min_rq and sl_move < min_rq:
+                    rec["bars_waited"] = 0
+                    try:
+                        if new_conf > old_conf:
+                            rec["confidence"] = float(new_conf)
+                    except Exception:
+                        pass
+                    return
+
+                await self._cancel_pullback_entry_order(symbol, reason="requote")
+
+        await self._place_pullback_limit_entry_order(symbol, signal, candle_timestamp, signal_high, signal_low)
+
+    async def _place_pullback_limit_entry_order(
+        self,
+        symbol: str,
+        signal: Signal,
+        candle_timestamp,
+        signal_high: float,
+        signal_low: float,
+    ) -> None:
+        if signal.action not in (Action.LONG, Action.SHORT):
+            return
+        if not self._pullback_limit_roll_enabled():
+            return
+        if symbol in self.pending_pullback_entry_orders:
+            return
+
+        limit_price = self._calc_pullback_limit_price(signal, symbol, signal_high, signal_low)
+        if limit_price is None:
+            return
+
+        side = "Buy" if signal.action == Action.LONG else "Sell"
+
+        position_horizon = self._classify_position_horizon(signal)
+        prep = await self._prepare_entry(symbol, side, signal, False, position_horizon)
+        if prep is None:
+            return
+        signal_tp, signal_sl, indicators_info = prep
+        signal.take_profit = signal_tp
+        signal.stop_loss = signal_sl
+
+        qty_calc = await self._calc_order_qty(symbol, float(limit_price), indicators_info, False)
+        if qty_calc is None:
+            return
+        qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision = qty_calc
+
+        order_link_id = f"PB_{symbol}_{uuid.uuid4().hex[:12]}"
+        try:
+            resp = await asyncio.to_thread(
+                self.bybit.place_order,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type="Limit",
+                price=limit_price,
+                time_in_force="GoodTillCancel",
+                order_link_id=order_link_id,
+                take_profit=signal_tp,
+                stop_loss=signal_sl,
+            )
+        except Exception as e:
+            logger.error(f"[{symbol}] ❌ Pullback limit order exception: {e}")
+            return
+
+        if not resp or not isinstance(resp, dict) or resp.get("retCode") != 0:
+            logger.error(f"[{symbol}] ❌ Pullback limit order failed: resp={resp}")
+            return
+
+        placed_at = self._to_timestamp(candle_timestamp) or pd.Timestamp.now()
+        self.pending_pullback_entry_orders[symbol] = {
+            "order_link_id": order_link_id,
+            "side": side,
+            "limit_price": float(limit_price),
+            "qty": float(qty),
+            "placed_at": placed_at,
+            "bars_waited": 0,
+            "action": signal.action.value,
+            "confidence": float(self._signal_confidence(signal)),
+            "signal_high": float(signal_high),
+            "signal_low": float(signal_low),
+            "signal": signal,
+            "expected_margin_usd": float(fixed_margin_usd),
+            "expected_position_usd": float(position_size_usd),
+        }
+        logger.info(
+            f"[{symbol}] 📌 Pullback limit order placed: {side} qty={qty:.{precision}f} price={limit_price:.6f} "
+            f"link={order_link_id}"
+        )
 
     def _timeframe_minutes(self, timeframe: str) -> int:
         tf = str(timeframe).strip().lower()

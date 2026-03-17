@@ -985,6 +985,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "atr_filter_enabled": getattr(m, "atr_filter_enabled", False),
             "pullback_enabled": getattr(m, "pullback_enabled", True),
             "pullback_enter_on_continuation": getattr(m, "pullback_enter_on_continuation", True),
+            "pullback_entry_mode": getattr(m, "pullback_entry_mode", "pending"),
+            "pullback_limit_roll_min_requote_pct": getattr(m, "pullback_limit_roll_min_requote_pct", 0.001),
+            "pullback_limit_roll_conf_drop_pct": getattr(m, "pullback_limit_roll_conf_drop_pct", 0.05),
             "follow_btc_filter_enabled": getattr(m, "follow_btc_filter_enabled", True),
             "follow_btc_override_confidence": getattr(m, "follow_btc_override_confidence", 0.80),
             "auto_optimize_strategies": getattr(m, "auto_optimize_strategies", False),
@@ -1067,6 +1070,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "decision_engine_w_history_edge",
             "decision_engine_atr_prefer_min_pct",
             "decision_engine_atr_prefer_max_pct",
+            "pullback_limit_roll_min_requote_pct",
+            "pullback_limit_roll_conf_drop_pct",
         ):
             if key in body:
                 v = float(body[key])
@@ -1078,11 +1083,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "follow_btc_override_confidence",
                     "ai_fallback_spread_reduce_pct",
                     "ai_fallback_spread_veto_pct",
+                    "pullback_limit_roll_min_requote_pct",
+                    "pullback_limit_roll_conf_drop_pct",
                 ) and v >= 1:
                     v = v / 100.0
                 data[key] = v
                 setattr(m, key, v)
-        for key in ("mtf_alignment_mode", "auto_optimize_day", "decision_engine_mode", "ai_entry_confirmation_mode"):
+        for key in ("mtf_alignment_mode", "auto_optimize_day", "decision_engine_mode", "ai_entry_confirmation_mode", "pullback_entry_mode"):
             if key in body:
                 data[key] = body[key]
                 setattr(m, key, body[key])

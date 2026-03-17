@@ -734,6 +734,31 @@ class BybitClient:
         if order_link_id:
             params["orderLinkId"] = order_link_id
         return self.session.get_open_orders(**params)
+    
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[str] = None,
+        order_link_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"category": "linear", "symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        fn = getattr(self.session, "cancel_order", None)
+        if fn is None:
+            return {"retCode": -1, "retMsg": "cancel_order_not_supported", "result": {}}
+        return self._retry_request(fn, **params)
+    
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"category": "linear"}
+        if symbol:
+            params["symbol"] = symbol
+        fn = getattr(self.session, "cancel_all_orders", None)
+        if fn is None:
+            return {"retCode": -1, "retMsg": "cancel_all_orders_not_supported", "result": {}}
+        return self._retry_request(fn, **params)
 
     def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         """

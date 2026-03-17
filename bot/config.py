@@ -86,6 +86,9 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     pullback_ema_period: int = 9  # Период EMA для отката (9 или 20)
     pullback_pct: float = 0.003  # 0.3% от high/low сигнальной свечи
     pullback_max_bars: int = 3  # Максимальная задержка входа (1-3 свечи)
+    pullback_entry_mode: str = "pending"
+    pullback_limit_roll_min_requote_pct: float = 0.001
+    pullback_limit_roll_conf_drop_pct: float = 0.05
     
     # Динамические веса ансамбля по режиму рынка (тренд vs флэт по ADX)
     use_dynamic_ensemble_weights: bool = False  # Включить переключение весов по ADX (по умолчанию выключено)
@@ -186,6 +189,25 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.decision_engine_atr_prefer_min_pct = 0.35
         if self.decision_engine_atr_prefer_max_pct <= self.decision_engine_atr_prefer_min_pct:
             self.decision_engine_atr_prefer_max_pct = max(1.6, self.decision_engine_atr_prefer_min_pct + 0.25)
+        
+        if str(getattr(self, "pullback_entry_mode", "pending")).strip().lower() not in ("pending", "limit_roll"):
+            self.pullback_entry_mode = "pending"
+        
+        try:
+            if float(getattr(self, "pullback_limit_roll_min_requote_pct", 0.001)) < 0:
+                self.pullback_limit_roll_min_requote_pct = 0.001
+        except Exception:
+            self.pullback_limit_roll_min_requote_pct = 0.001
+        
+        try:
+            v = float(getattr(self, "pullback_limit_roll_conf_drop_pct", 0.05))
+            if v < 0:
+                v = 0.0
+            if v > 0.5:
+                v = 0.5
+            self.pullback_limit_roll_conf_drop_pct = v
+        except Exception:
+            self.pullback_limit_roll_conf_drop_pct = 0.05
 
 
 @dataclass
@@ -555,6 +577,18 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.pullback_enabled = bool(ml_dict["pullback_enabled"])
                 if "pullback_enter_on_continuation" in ml_dict:
                     settings.ml_strategy.pullback_enter_on_continuation = bool(ml_dict["pullback_enter_on_continuation"])
+                if "pullback_entry_mode" in ml_dict:
+                    settings.ml_strategy.pullback_entry_mode = str(ml_dict["pullback_entry_mode"])
+                if "pullback_limit_roll_min_requote_pct" in ml_dict:
+                    v = float(ml_dict["pullback_limit_roll_min_requote_pct"])
+                    if v >= 1:
+                        v = v / 100.0
+                    settings.ml_strategy.pullback_limit_roll_min_requote_pct = v
+                if "pullback_limit_roll_conf_drop_pct" in ml_dict:
+                    v = float(ml_dict["pullback_limit_roll_conf_drop_pct"])
+                    if v >= 1:
+                        v = v / 100.0
+                    settings.ml_strategy.pullback_limit_roll_conf_drop_pct = v
                 if "follow_btc_filter_enabled" in ml_dict:
                     settings.ml_strategy.follow_btc_filter_enabled = bool(ml_dict["follow_btc_filter_enabled"])
                 if "follow_btc_override_confidence" in ml_dict:
@@ -869,6 +903,9 @@ def log_server_config(settings: "AppSettings", log: Optional[logging.Logger] = N
         _p("stability_filter", ms.stability_filter),
         _p("use_mtf_strategy", ms.use_mtf_strategy),
         _p("pullback_enabled", ms.pullback_enabled),
+        _p("pullback_entry_mode", getattr(ms, "pullback_entry_mode", "pending")),
+        _p("pullback_limit_roll_min_requote_pct", getattr(ms, "pullback_limit_roll_min_requote_pct", 0.001)),
+        _p("pullback_limit_roll_conf_drop_pct", getattr(ms, "pullback_limit_roll_conf_drop_pct", 0.05)),
         _p("use_dynamic_ensemble_weights", getattr(ms, "use_dynamic_ensemble_weights", False)),
         _p("use_adaptive_confidence_by_atr", getattr(ms, "use_adaptive_confidence_by_atr", False)),
         _p("use_fixed_sl_from_risk", getattr(ms, "use_fixed_sl_from_risk", False)),
