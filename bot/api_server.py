@@ -67,8 +67,7 @@ def _slot_floor(timestamp: datetime, timeframe: str) -> datetime:
 
 
 def _normalize_signal(direction: str, conf: float) -> float:
-    base = conf - 0.5
-    return base if direction == "LONG" else -base
+    return conf if direction == "LONG" else -conf
 
 
 def _parse_signals_for_dashboard(
@@ -1942,7 +1941,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         end_date: Optional[str] = None,
         pairs: Optional[str] = None,
         agg_method: str = "last",
-        strong_threshold: float = 0.15,
+        strong_threshold: float = 0.65,
         limit_pairs: int = 10,
         max_lines: int = 50000,
     ):
@@ -1980,23 +1979,25 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             if parsed_pairs:
                 pairs_filter = parsed_pairs
 
-        data = _parse_signals_for_dashboard(
+        base_data = _parse_signals_for_dashboard(
             log_path=PROJECT_ROOT / "logs" / "signals.log",
             timeframe=tf,
             agg_method=agg,
             start_dt=start_dt,
             end_dt=end_dt,
-            pairs_filter=pairs_filter,
+            pairs_filter=None,
             strong_threshold=strong_threshold,
             max_lines=max_lines,
         )
-        top_pairs = data["pairs"][:limit_pairs]
+        top_pairs = base_data["pairs"][:limit_pairs]
         if pairs_filter:
-            selected_pairs = sorted(pairs_filter)
+            selected_pairs = [p for p in top_pairs if p in pairs_filter]
+            if not selected_pairs:
+                selected_pairs = top_pairs
         else:
             selected_pairs = top_pairs
         selected_set = set(selected_pairs)
-        filtered_points = [p for p in data["points"] if p["pair"] in selected_set]
+        filtered_points = [p for p in base_data["points"] if p["pair"] in selected_set]
 
         return {
             "timeframe": tf,
@@ -2007,12 +2008,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "pairs_requested": sorted(list(pairs_filter)) if pairs_filter else None,
             "pairs_selected": selected_pairs,
             "top_pairs": top_pairs,
-            "pair_activity": data["pair_activity"],
+            "pair_activity": base_data["pair_activity"],
             "time_slots": sorted({p["time_slot"] for p in filtered_points}),
             "points": filtered_points,
             "meta": {
                 "log_path": str(PROJECT_ROOT / "logs" / "signals.log"),
-                "total_raw_signals": data["total_raw_signals"],
+                "total_raw_signals": base_data["total_raw_signals"],
                 "total_points": len(filtered_points),
                 "max_lines_used": max_lines,
             },
