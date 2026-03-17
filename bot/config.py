@@ -104,6 +104,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     use_fixed_sl_from_risk: bool = False
 
     ai_entry_confirmation_enabled: bool = False
+    ai_entry_confirmation_mode: str = "enforce"
     ai_fallback_force_enabled: bool = False
 
     ai_fallback_spread_reduce_pct: float = 0.10
@@ -112,6 +113,19 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     ai_fallback_imbalance_abs_reduce: float = 0.60
     ai_fallback_orderflow_ratio_low: float = 0.40
     ai_fallback_orderflow_ratio_high: float = 2.50
+
+    decision_engine_enabled: bool = False
+    decision_engine_mode: str = "shadow"
+    decision_engine_allow_score: float = 0.35
+    decision_engine_reduce_score: float = 0.10
+    decision_engine_w_ml_confidence: float = 1.2
+    decision_engine_w_mtf_alignment: float = 0.6
+    decision_engine_w_atr_regime: float = 0.6
+    decision_engine_w_sr_proximity: float = 0.9
+    decision_engine_w_trend_slope: float = 0.3
+    decision_engine_w_history_edge: float = 1.0
+    decision_engine_atr_prefer_min_pct: float = 0.35
+    decision_engine_atr_prefer_max_pct: float = 1.60
     
     def __post_init__(self):
         """Валидация значений"""
@@ -159,6 +173,18 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.atr_min_pct = 0.3
         if self.atr_max_pct <= self.atr_min_pct:
             self.atr_max_pct = max(2.0, self.atr_min_pct + 0.5)
+
+        if self.ai_entry_confirmation_mode not in ("shadow", "enforce"):
+            self.ai_entry_confirmation_mode = "enforce"
+
+        if self.decision_engine_mode not in ("shadow", "enforce"):
+            self.decision_engine_mode = "shadow"
+        if self.decision_engine_allow_score < self.decision_engine_reduce_score:
+            self.decision_engine_allow_score = self.decision_engine_reduce_score + 0.1
+        if self.decision_engine_atr_prefer_min_pct < 0:
+            self.decision_engine_atr_prefer_min_pct = 0.35
+        if self.decision_engine_atr_prefer_max_pct <= self.decision_engine_atr_prefer_min_pct:
+            self.decision_engine_atr_prefer_max_pct = max(1.6, self.decision_engine_atr_prefer_min_pct + 0.25)
 
 
 @dataclass
@@ -546,6 +572,8 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.use_fixed_sl_from_risk = bool(ml_dict["use_fixed_sl_from_risk"])
                 if "ai_entry_confirmation_enabled" in ml_dict:
                     settings.ml_strategy.ai_entry_confirmation_enabled = bool(ml_dict["ai_entry_confirmation_enabled"])
+                if "ai_entry_confirmation_mode" in ml_dict:
+                    settings.ml_strategy.ai_entry_confirmation_mode = str(ml_dict["ai_entry_confirmation_mode"])
                 if "ai_fallback_force_enabled" in ml_dict:
                     settings.ml_strategy.ai_fallback_force_enabled = bool(ml_dict["ai_fallback_force_enabled"])
                 if "ai_fallback_spread_reduce_pct" in ml_dict:
@@ -560,6 +588,30 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.ai_fallback_orderflow_ratio_low = float(ml_dict["ai_fallback_orderflow_ratio_low"])
                 if "ai_fallback_orderflow_ratio_high" in ml_dict:
                     settings.ml_strategy.ai_fallback_orderflow_ratio_high = float(ml_dict["ai_fallback_orderflow_ratio_high"])
+                if "decision_engine_enabled" in ml_dict:
+                    settings.ml_strategy.decision_engine_enabled = bool(ml_dict["decision_engine_enabled"])
+                if "decision_engine_mode" in ml_dict:
+                    settings.ml_strategy.decision_engine_mode = str(ml_dict["decision_engine_mode"])
+                if "decision_engine_allow_score" in ml_dict:
+                    settings.ml_strategy.decision_engine_allow_score = float(ml_dict["decision_engine_allow_score"])
+                if "decision_engine_reduce_score" in ml_dict:
+                    settings.ml_strategy.decision_engine_reduce_score = float(ml_dict["decision_engine_reduce_score"])
+                if "decision_engine_w_ml_confidence" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_ml_confidence = float(ml_dict["decision_engine_w_ml_confidence"])
+                if "decision_engine_w_mtf_alignment" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_mtf_alignment = float(ml_dict["decision_engine_w_mtf_alignment"])
+                if "decision_engine_w_atr_regime" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_atr_regime = float(ml_dict["decision_engine_w_atr_regime"])
+                if "decision_engine_w_sr_proximity" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_sr_proximity = float(ml_dict["decision_engine_w_sr_proximity"])
+                if "decision_engine_w_trend_slope" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_trend_slope = float(ml_dict["decision_engine_w_trend_slope"])
+                if "decision_engine_w_history_edge" in ml_dict:
+                    settings.ml_strategy.decision_engine_w_history_edge = float(ml_dict["decision_engine_w_history_edge"])
+                if "decision_engine_atr_prefer_min_pct" in ml_dict:
+                    settings.ml_strategy.decision_engine_atr_prefer_min_pct = float(ml_dict["decision_engine_atr_prefer_min_pct"])
+                if "decision_engine_atr_prefer_max_pct" in ml_dict:
+                    settings.ml_strategy.decision_engine_atr_prefer_max_pct = float(ml_dict["decision_engine_atr_prefer_max_pct"])
         except Exception as e:
             logger.warning(f"Failed to load ml_settings.json: {e}")
     

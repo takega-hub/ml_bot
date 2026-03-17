@@ -801,6 +801,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "auto_optimize_hour": getattr(m, "auto_optimize_hour", 3),
             "use_fixed_sl_from_risk": getattr(m, "use_fixed_sl_from_risk", False),
             "ai_entry_confirmation_enabled": getattr(m, "ai_entry_confirmation_enabled", False),
+            "ai_entry_confirmation_mode": getattr(m, "ai_entry_confirmation_mode", "enforce"),
             "ai_fallback_force_enabled": getattr(m, "ai_fallback_force_enabled", False),
             "ai_fallback_spread_reduce_pct": getattr(m, "ai_fallback_spread_reduce_pct", 0.10),
             "ai_fallback_spread_veto_pct": getattr(m, "ai_fallback_spread_veto_pct", 0.25),
@@ -808,6 +809,18 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "ai_fallback_imbalance_abs_reduce": getattr(m, "ai_fallback_imbalance_abs_reduce", 0.60),
             "ai_fallback_orderflow_ratio_low": getattr(m, "ai_fallback_orderflow_ratio_low", 0.40),
             "ai_fallback_orderflow_ratio_high": getattr(m, "ai_fallback_orderflow_ratio_high", 2.50),
+            "decision_engine_enabled": getattr(m, "decision_engine_enabled", False),
+            "decision_engine_mode": getattr(m, "decision_engine_mode", "shadow"),
+            "decision_engine_allow_score": getattr(m, "decision_engine_allow_score", 0.35),
+            "decision_engine_reduce_score": getattr(m, "decision_engine_reduce_score", 0.10),
+            "decision_engine_w_ml_confidence": getattr(m, "decision_engine_w_ml_confidence", 1.2),
+            "decision_engine_w_mtf_alignment": getattr(m, "decision_engine_w_mtf_alignment", 0.6),
+            "decision_engine_w_atr_regime": getattr(m, "decision_engine_w_atr_regime", 0.6),
+            "decision_engine_w_sr_proximity": getattr(m, "decision_engine_w_sr_proximity", 0.9),
+            "decision_engine_w_trend_slope": getattr(m, "decision_engine_w_trend_slope", 0.3),
+            "decision_engine_w_history_edge": getattr(m, "decision_engine_w_history_edge", 1.0),
+            "decision_engine_atr_prefer_min_pct": getattr(m, "decision_engine_atr_prefer_min_pct", 0.35),
+            "decision_engine_atr_prefer_max_pct": getattr(m, "decision_engine_atr_prefer_max_pct", 1.60),
             "confidence_threshold": getattr(m, "confidence_threshold", 0.35),
             "min_confidence_for_trade": getattr(m, "min_confidence_for_trade", 0.5),
         }
@@ -835,6 +848,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "use_fixed_sl_from_risk",
             "ai_entry_confirmation_enabled",
             "ai_fallback_force_enabled",
+            "decision_engine_enabled",
         ):
             if key in body:
                 data[key] = bool(body[key])
@@ -850,6 +864,16 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "ai_fallback_imbalance_abs_reduce",
             "ai_fallback_orderflow_ratio_low",
             "ai_fallback_orderflow_ratio_high",
+            "decision_engine_allow_score",
+            "decision_engine_reduce_score",
+            "decision_engine_w_ml_confidence",
+            "decision_engine_w_mtf_alignment",
+            "decision_engine_w_atr_regime",
+            "decision_engine_w_sr_proximity",
+            "decision_engine_w_trend_slope",
+            "decision_engine_w_history_edge",
+            "decision_engine_atr_prefer_min_pct",
+            "decision_engine_atr_prefer_max_pct",
         ):
             if key in body:
                 v = float(body[key])
@@ -865,7 +889,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     v = v / 100.0
                 data[key] = v
                 setattr(m, key, v)
-        for key in ("mtf_alignment_mode", "auto_optimize_day"):
+        for key in ("mtf_alignment_mode", "auto_optimize_day", "decision_engine_mode", "ai_entry_confirmation_mode"):
             if key in body:
                 data[key] = body[key]
                 setattr(m, key, body[key])
@@ -1135,6 +1159,44 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "current_15m": current_15m,
             "mtf_candidates": mtf_candidates
         }
+
+    class ModelsCleanupBody(BaseModel):
+        min_age_days: int = 7
+        dry_run: bool = False
+
+    @app.post("/api/models/cleanup_old_inactive", dependencies=[Depends(verify_api_key)])
+    def post_cleanup_old_inactive_models(body: ModelsCleanupBody):
+        if not model_manager:
+            raise HTTPException(status_code=501, detail="Model manager not available")
+
+        active_paths: set[str] = set()
+        with state.lock:
+            for p in state.symbol_models.values():
+                if isinstance(p, str) and p.strip():
+                    active_paths.add(p)
+            strategy_map = getattr(state, "symbol_strategies", {})
+            if isinstance(strategy_map, dict):
+                for cfg in strategy_map.values():
+                    if not isinstance(cfg, dict):
+                        continue
+                    for key in ("model_path", "model_1h_path", "model_15m_path"):
+                        p = cfg.get(key)
+                        if isinstance(p, str) and p.strip():
+                            active_paths.add(p)
+
+        if trading_loop and getattr(trading_loop, "strategies", None):
+            for strategy in trading_loop.strategies.values():
+                for attr in ("model_path", "model_1h_path", "model_15m_path"):
+                    p = getattr(strategy, attr, None)
+                    if isinstance(p, str) and p.strip():
+                        active_paths.add(p)
+
+        result = model_manager.cleanup_old_inactive_models(
+            active_model_paths=active_paths,
+            min_age_days=body.min_age_days,
+            dry_run=body.dry_run,
+        )
+        return result
 
     @app.post("/api/models/{symbol}/apply_best", dependencies=[Depends(verify_api_key)])
     def post_apply_best_mtf(symbol: str):

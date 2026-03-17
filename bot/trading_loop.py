@@ -1,6 +1,7 @@
 import time
 import asyncio
 import logging
+import json
 import math
 import pandas as pd
 import numpy as np
@@ -18,6 +19,7 @@ from bot.notification_manager import NotificationManager, NotificationLevel
 from bot.paper_trading import PaperTradingManager
 from bot.ai_agent_service import AIAgentService
 from bot.audit_logger import append_jsonl
+from bot.decision_engine import DecisionEngineConfig, DecisionEngineThresholds, DecisionEngineWeights, SignalDecisionEngine
 
 if TYPE_CHECKING:
     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
@@ -90,6 +92,7 @@ class TradingLoop:
         }
         self.paper_trading_manager = PaperTradingManager(bot_settings)
         self._ai_agent: Optional[AIAgentService] = None
+        self._decision_engine: Optional[SignalDecisionEngine] = None
         
         # Валидация моделей при старте
         if self.settings.ml_strategy.use_mtf_strategy:
@@ -104,6 +107,32 @@ class TradingLoop:
         except Exception:
             self._ai_agent = None
             return None
+
+    def _get_decision_engine(self) -> SignalDecisionEngine:
+        root = Path(__file__).resolve().parent.parent
+        cfg = DecisionEngineConfig(
+            enabled=bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)),
+            mode=str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow")),
+            thresholds=DecisionEngineThresholds(
+                allow_score=float(getattr(self.settings.ml_strategy, "decision_engine_allow_score", 0.35)),
+                reduce_score=float(getattr(self.settings.ml_strategy, "decision_engine_reduce_score", 0.10)),
+            ),
+            weights=DecisionEngineWeights(
+                w_ml_confidence=float(getattr(self.settings.ml_strategy, "decision_engine_w_ml_confidence", 1.2)),
+                w_mtf_alignment=float(getattr(self.settings.ml_strategy, "decision_engine_w_mtf_alignment", 0.6)),
+                w_atr_regime=float(getattr(self.settings.ml_strategy, "decision_engine_w_atr_regime", 0.6)),
+                w_sr_proximity=float(getattr(self.settings.ml_strategy, "decision_engine_w_sr_proximity", 0.9)),
+                w_trend_slope=float(getattr(self.settings.ml_strategy, "decision_engine_w_trend_slope", 0.3)),
+                w_history_edge=float(getattr(self.settings.ml_strategy, "decision_engine_w_history_edge", 1.0)),
+            ),
+            atr_prefer_min_pct=float(getattr(self.settings.ml_strategy, "decision_engine_atr_prefer_min_pct", 0.35)),
+            atr_prefer_max_pct=float(getattr(self.settings.ml_strategy, "decision_engine_atr_prefer_max_pct", 1.60)),
+        )
+        if self._decision_engine is None:
+            self._decision_engine = SignalDecisionEngine(cfg, root)
+        else:
+            self._decision_engine.config = cfg
+        return self._decision_engine
 
     @staticmethod
     def _safe_float(val, default: float = 0.0) -> float:
@@ -320,6 +349,12 @@ class TradingLoop:
                 "signal_timestamp": str(signal.timestamp) if getattr(signal, "timestamp", None) is not None else None,
                 "confidence": float(indicators_info.get("confidence", 0.0)) if isinstance(indicators_info, dict) else 0.0,
                 "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else "",
+                "1h_pred": indicators_info.get("1h_pred") if isinstance(indicators_info, dict) else None,
+                "1h_conf": indicators_info.get("1h_conf") if isinstance(indicators_info, dict) else None,
+                "15m_pred": indicators_info.get("15m_pred") if isinstance(indicators_info, dict) else None,
+                "15m_conf": indicators_info.get("15m_conf") if isinstance(indicators_info, dict) else None,
+                "4h_pred": indicators_info.get("4h_pred") if isinstance(indicators_info, dict) else None,
+                "4h_conf": indicators_info.get("4h_conf") if isinstance(indicators_info, dict) else None,
             },
             "bot_context": {
                 "side": side,
@@ -367,6 +402,34 @@ class TradingLoop:
             result = self._normalize_ai_confirm_entry_result(result_raw, decision_id)
 
         root = Path(__file__).resolve().parent.parent
+        engine_eval = None
+        try:
+            engine = self._get_decision_engine()
+            if engine and isinstance(payload.get("market_context", {}).get("ohlcv"), list):
+                engine_eval = engine.evaluate(
+                    symbol=symbol,
+                    side=side,
+                    signal_payload=payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {},
+                    ohlcv=payload.get("market_context", {}).get("ohlcv") or [],
+                )
+        except Exception:
+            engine_eval = None
+
+        if isinstance(engine_eval, dict):
+            try:
+                signal_logger.info(
+                    f"DECISION ENGINE: {symbol} {side} action={payload.get('signal', {}).get('action')} "
+                    f"score={engine_eval.get('score')} decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
+                    f"codes={engine_eval.get('reason_codes')}"
+                )
+                if isinstance(engine_eval.get("engine"), dict):
+                    signal_logger.info(
+                        "DECISION ENGINE DETAILS: "
+                        + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
+                    )
+            except Exception:
+                pass
+
         append_jsonl(
             str(root / "logs" / "ai_entry_audit.jsonl"),
             {
@@ -379,9 +442,14 @@ class TradingLoop:
                 "request": payload,
                 "response": result,
                 "response_raw": result_raw,
+                "decision_engine": engine_eval,
             },
         )
 
+        if isinstance(engine_eval, dict):
+            out = dict(result)
+            out["decision_engine"] = engine_eval
+            return out
         return result
     
     def _validate_mtf_models(self):
@@ -1243,6 +1311,51 @@ class TradingLoop:
             # Log ALL non-HOLD signals to signals.log
             if signal.action != Action.HOLD:
                 signal_logger.info(f"SIGNAL GEN: {symbol} {signal.action.value} Conf={confidence:.2f} Price={current_price:.2f} Reason={signal.reason}")
+                try:
+                    engine = self._get_decision_engine()
+                    if engine:
+                        ohlcv = [
+                            {
+                                "time": int(r.get("timestamp", 0)),
+                                "open": float(r.get("open", 0.0)),
+                                "high": float(r.get("high", 0.0)),
+                                "low": float(r.get("low", 0.0)),
+                                "close": float(r.get("close", 0.0)),
+                                "volume": float(r.get("volume", 0.0)),
+                            }
+                            for r in df.tail(60).to_dict(orient="records")
+                        ]
+                        eval_payload = {
+                            "action": signal.action.value,
+                            "price": float(current_price),
+                            "confidence": float(confidence),
+                            "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else "",
+                            "1h_pred": indicators_info.get("1h_pred") if isinstance(indicators_info, dict) else None,
+                            "1h_conf": indicators_info.get("1h_conf") if isinstance(indicators_info, dict) else None,
+                            "15m_pred": indicators_info.get("15m_pred") if isinstance(indicators_info, dict) else None,
+                            "15m_conf": indicators_info.get("15m_conf") if isinstance(indicators_info, dict) else None,
+                            "4h_pred": indicators_info.get("4h_pred") if isinstance(indicators_info, dict) else None,
+                            "4h_conf": indicators_info.get("4h_conf") if isinstance(indicators_info, dict) else None,
+                        }
+                        engine_eval = engine.evaluate(
+                            symbol=symbol,
+                            side="Buy" if signal.action == Action.LONG else "Sell",
+                            signal_payload=eval_payload,
+                            ohlcv=ohlcv,
+                        )
+                        if isinstance(indicators_info, dict):
+                            indicators_info["decision_engine_eval"] = engine_eval
+                            signal.indicators_info = indicators_info
+                        signal_logger.info(
+                            f"ENGINE EVAL: {symbol} action={signal.action.value} score={engine_eval.get('score')} "
+                            f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} codes={engine_eval.get('reason_codes')}"
+                        )
+                        if isinstance(engine_eval, dict) and isinstance(engine_eval.get("engine"), dict):
+                            signal_logger.info(
+                                "ENGINE DETAILS: " + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
+                            )
+                except Exception:
+                    pass
             
             logger.info(f"[{symbol}] ⏭️ Signal generated at {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, continuing processing...")
 
@@ -1562,29 +1675,87 @@ class TradingLoop:
                 )
                 return
 
+            if not is_add and bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)):
+                engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
+                eng = indicators_info.get("decision_engine_eval") if isinstance(indicators_info, dict) else None
+                if isinstance(eng, dict):
+                    eng_d = str(eng.get("decision", "")).lower()
+                    eng_mult = eng.get("size_multiplier")
+                    if eng_d not in ("allow", "reduce", "veto"):
+                        eng_d = "veto"
+                    if engine_mode == "enforce" and eng_d == "veto":
+                        try:
+                            root = Path(__file__).resolve().parent.parent
+                            append_jsonl(
+                                str(root / "logs" / "ai_entry_audit.jsonl"),
+                                {
+                                    "event_type": "entry_blocked",
+                                    "symbol": symbol,
+                                    "side": side,
+                                    "decision_id": None,
+                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "decision_source": "engine",
+                                    "ai": None,
+                                    "engine": eng,
+                                    "reason_codes": eng.get("reason_codes"),
+                                    "notes": "Blocked by decision engine",
+                                },
+                            )
+                        except Exception:
+                            pass
+                        return
+                    if engine_mode == "enforce" and eng_mult is not None:
+                        try:
+                            signal.indicators_info["ai_size_multiplier"] = float(eng_mult)
+                        except Exception:
+                            signal.indicators_info["ai_size_multiplier"] = 1.0
+                    if engine_mode == "enforce" and eng_d == "reduce":
+                        if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
+                            signal.indicators_info["ai_size_multiplier"] = 0.25
+
             if not is_add and getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False):
                 decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
                 if not isinstance(signal.indicators_info, dict):
                     signal.indicators_info = {}
                 signal.indicators_info["ai_entry_confirmation"] = decision
-                if isinstance(decision, dict):
-                    d = str(decision.get("decision", "")).lower()
-                    decision_id = decision.get("decision_id")
-                    mult = decision.get("size_multiplier")
-                    codes = decision.get("reason_codes")
-                    logger.info(
-                        f"[{symbol}] 🤖 AI entry decision={d} mult={mult} codes={codes} decision_id={decision_id}"
-                    )
-                    if d not in ("allow", "reduce", "veto"):
-                        d = "veto"
-                else:
-                    d = "veto"
+                ai_mode = str(getattr(self.settings.ml_strategy, "ai_entry_confirmation_mode", "enforce"))
+                engine_enabled = bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False))
+                engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
 
-                if d == "veto":
-                    logger.info(
-                        f"[{symbol}] ⛔ AI Agent veto entry: decision_id={decision.get('decision_id')} "
-                        f"codes={decision.get('reason_codes')} notes={decision.get('notes')}"
-                    )
+                ai_d = "veto"
+                ai_mult = None
+                if isinstance(decision, dict):
+                    ai_d = str(decision.get("decision", "")).lower()
+                    ai_mult = decision.get("size_multiplier")
+                    if ai_d not in ("allow", "reduce", "veto"):
+                        ai_d = "veto"
+
+                eng = decision.get("decision_engine") if isinstance(decision, dict) else None
+                eng_d = None
+                eng_mult = None
+                if isinstance(eng, dict):
+                    eng_d = str(eng.get("decision", "")).lower()
+                    eng_mult = eng.get("size_multiplier")
+                    if eng_d not in ("allow", "reduce", "veto"):
+                        eng_d = "veto"
+
+                d_source = "ai"
+                d = ai_d
+                mult = ai_mult
+                if engine_enabled and engine_mode == "enforce" and eng_d:
+                    d_source = "engine"
+                    d = eng_d
+                    mult = eng_mult
+
+                decision_id = decision.get("decision_id") if isinstance(decision, dict) else None
+                codes = decision.get("reason_codes") if isinstance(decision, dict) else None
+                logger.info(
+                    f"[{symbol}] 🤖 Entry decision_source={d_source} decision={d} mult={mult} codes={codes} decision_id={decision_id}"
+                )
+
+                if ai_mode == "shadow":
+                    logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked")
+                elif d == "veto":
                     try:
                         root = Path(__file__).resolve().parent.parent
                         append_jsonl(
@@ -1593,24 +1764,25 @@ class TradingLoop:
                                 "event_type": "entry_blocked",
                                 "symbol": symbol,
                                 "side": side,
-                                "decision_id": decision.get("decision_id"),
+                                "decision_id": decision_id,
                                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                                "ai": decision,
-                                "reason_codes": decision.get("reason_codes") if isinstance(decision, dict) else None,
+                                "decision_source": d_source,
+                                "ai": decision if isinstance(decision, dict) else None,
+                                "engine": eng if isinstance(eng, dict) else None,
+                                "reason_codes": codes if isinstance(codes, list) else None,
                                 "notes": decision.get("notes") if isinstance(decision, dict) else None,
                             },
                         )
                     except Exception:
                         pass
                     return
-                if isinstance(decision, dict) and decision.get("size_multiplier") is not None:
+
+                if ai_mode != "shadow" and mult is not None:
                     try:
-                        signal.indicators_info["ai_size_multiplier"] = float(decision.get("size_multiplier"))
+                        signal.indicators_info["ai_size_multiplier"] = float(mult)
                     except Exception:
                         signal.indicators_info["ai_size_multiplier"] = 1.0
-                if isinstance(decision, dict) and str(decision.get("decision", "")).lower() == "reduce":
-                    if not isinstance(signal.indicators_info, dict):
-                        signal.indicators_info = {}
+                if ai_mode != "shadow" and d == "reduce":
                     if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
                         signal.indicators_info["ai_size_multiplier"] = 0.25
             

@@ -3,8 +3,9 @@ import subprocess
 import sys
 import pandas as pd
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Iterable
 from bot.config import AppSettings
 from bot.state import BotState
 from bot.ml.strategy_ml import MLStrategy
@@ -244,3 +245,52 @@ class ModelManager:
             self.state.symbol_models[symbol] = model_path
         self.state.save()
         print(f"[model_manager] Applied model {model_path} for {symbol}")
+
+    def cleanup_old_inactive_models(
+        self,
+        active_model_paths: Iterable[str],
+        min_age_days: int = 7,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        active_set = {
+            str(Path(p).resolve())
+            for p in active_model_paths
+            if isinstance(p, str) and p.strip()
+        }
+        threshold = datetime.now() - timedelta(days=max(1, int(min_age_days)))
+        deleted: list[str] = []
+        candidates: list[str] = []
+        skipped_active: list[str] = []
+        skipped_young: list[str] = []
+        failed: list[Dict[str, str]] = []
+
+        for model_file in self.models_dir.glob("*.pkl"):
+            try:
+                model_path = str(model_file.resolve())
+                if model_path in active_set:
+                    skipped_active.append(str(model_file.name))
+                    continue
+                model_mtime = datetime.fromtimestamp(model_file.stat().st_mtime)
+                if model_mtime > threshold:
+                    skipped_young.append(str(model_file.name))
+                    continue
+                candidates.append(str(model_file.name))
+                if not dry_run:
+                    model_file.unlink(missing_ok=True)
+                    deleted.append(str(model_file.name))
+            except Exception as e:
+                failed.append({"file": str(model_file.name), "error": str(e)})
+
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "min_age_days": max(1, int(min_age_days)),
+            "candidate_count": len(candidates),
+            "candidate_files": candidates,
+            "deleted_count": len(deleted),
+            "skipped_active_count": len(skipped_active),
+            "skipped_young_count": len(skipped_young),
+            "failed_count": len(failed),
+            "deleted_files": deleted,
+            "failed_files": failed,
+        }
