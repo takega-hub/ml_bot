@@ -127,6 +127,22 @@ class BybitClient:
                 return resp
             except Exception as e:
                 error_str = str(e).lower()
+                if isinstance(e, KeyError) and "x-bapi-limit-reset-timestamp" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = delay * (2 ** attempt)
+                        print(f"[bybit] Rate limit header missing in pybit response, retrying in {wait_time:.1f}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
+                if "10006" in error_str or "too many visits" in error_str or "rate limit" in error_str:
+                    if attempt < max_retries - 1:
+                        wait_time = delay * (2 ** attempt)
+                        print(f"[bybit] Rate limit error: {e}, retrying in {wait_time:.1f}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    raise
+
                 # Проверяем, не связана ли ошибка с синхронизацией времени
                 if "timestamp" in error_str or "recv_window" in error_str or "10002" in error_str:
                     # Парсим информацию о времени из сообщения об ошибке

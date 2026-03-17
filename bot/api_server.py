@@ -4,10 +4,12 @@ REST API для мобильного приложения (iPhone).
 Аутентификация: заголовок X-API-Key (MOBILE_API_KEY в .env).
 """
 import asyncio
+from collections import defaultdict, deque
 import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import statistics
 import sys
@@ -25,6 +27,156 @@ from .audit_logger import append_jsonl
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+_SIGNAL_LOG_PATTERN = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?SIGNAL GEN:\s+"
+    r"(?P<pair>[A-Z0-9]+)\s+(?P<direction>LONG|SHORT)\s+Conf=(?P<conf>[0-9]*\.?[0-9]+)",
+    re.IGNORECASE,
+)
+_TIMEFRAME_TO_MINUTES = {"15m": 15, "1h": 60}
+
+
+def _parse_datetime_filter(value: Optional[str], *, is_end: bool = False) -> Optional[datetime]:
+    if not value:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    parsed: Optional[datetime] = None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d")
+            if is_end:
+                parsed = parsed.replace(hour=23, minute=59, second=59)
+        except Exception as exc:
+            raise ValueError(f"Invalid datetime format: {value}") from exc
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _slot_floor(timestamp: datetime, timeframe: str) -> datetime:
+    minutes = _TIMEFRAME_TO_MINUTES[timeframe]
+    floored_minute = (timestamp.minute // minutes) * minutes
+    return timestamp.replace(minute=floored_minute, second=0, microsecond=0)
+
+
+def _normalize_signal(direction: str, conf: float) -> float:
+    base = conf - 0.5
+    return base if direction == "LONG" else -base
+
+
+def _parse_signals_for_dashboard(
+    log_path: Path,
+    timeframe: str,
+    agg_method: str,
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    pairs_filter: Optional[set[str]],
+    strong_threshold: float,
+    max_lines: int,
+) -> Dict[str, Any]:
+    if not log_path.exists():
+        return {
+            "points": [],
+            "pairs": [],
+            "time_slots": [],
+            "total_raw_signals": 0,
+            "total_points": 0,
+            "strong_threshold": strong_threshold,
+        }
+
+    tail_lines: deque[str] = deque(maxlen=max_lines)
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            tail_lines.append(line.rstrip("\n"))
+
+    grouped: Dict[tuple[datetime, str], List[Dict[str, Any]]] = defaultdict(list)
+    pair_activity: Dict[str, int] = defaultdict(int)
+    total_raw_signals = 0
+
+    for line in tail_lines:
+        m = _SIGNAL_LOG_PATTERN.search(line)
+        if not m:
+            continue
+
+        try:
+            ts = datetime.strptime(m.group("timestamp"), "%Y-%m-%d %H:%M:%S")
+            pair = m.group("pair").upper()
+            direction = m.group("direction").upper()
+            conf = float(m.group("conf"))
+        except Exception:
+            continue
+
+        if conf < 0:
+            conf = 0.0
+        if conf > 1:
+            conf = 1.0
+
+        if start_dt and ts < start_dt:
+            continue
+        if end_dt and ts > end_dt:
+            continue
+        if pairs_filter and pair not in pairs_filter:
+            continue
+
+        total_raw_signals += 1
+        pair_activity[pair] += 1
+        slot = _slot_floor(ts, timeframe)
+        y_value = _normalize_signal(direction, conf)
+        grouped[(slot, pair)].append(
+            {
+                "timestamp": ts,
+                "pair": pair,
+                "direction": direction,
+                "conf": conf,
+                "y": y_value,
+            }
+        )
+
+    points: List[Dict[str, Any]] = []
+    for (slot, pair), entries in grouped.items():
+        if agg_method == "mean":
+            y_value = sum(e["y"] for e in entries) / len(entries)
+            conf_value = sum(e["conf"] for e in entries) / len(entries)
+            direction = "LONG" if y_value >= 0 else "SHORT"
+            source_ts = max(e["timestamp"] for e in entries)
+        else:
+            latest = max(entries, key=lambda item: item["timestamp"])
+            y_value = latest["y"]
+            conf_value = latest["conf"]
+            direction = latest["direction"]
+            source_ts = latest["timestamp"]
+
+        points.append(
+            {
+                "time_slot": slot.isoformat(),
+                "timestamp": source_ts.isoformat(),
+                "pair": pair,
+                "direction": direction,
+                "conf": round(conf_value, 6),
+                "y_value": round(y_value, 6),
+                "is_strong": abs(y_value) > strong_threshold,
+            }
+        )
+
+    points.sort(key=lambda p: (p["time_slot"], p["pair"]))
+    pairs_sorted = sorted(pair_activity.items(), key=lambda kv: kv[1], reverse=True)
+    time_slots_sorted = sorted({p["time_slot"] for p in points})
+    return {
+        "points": points,
+        "pairs": [p for p, _ in pairs_sorted],
+        "pair_activity": [{"pair": p, "count": c} for p, c in pairs_sorted],
+        "time_slots": time_slots_sorted,
+        "total_raw_signals": total_raw_signals,
+        "total_points": len(points),
+        "strong_threshold": strong_threshold,
+    }
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1782,6 +1934,89 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         # Convert to list sorted by date
         result = [{"date": k, "pnl": round(v, 2)} for k, v in sorted(daily_map.items())]
         return {"data": result}
+
+    @app.get("/api/analytics/signals_dashboard", dependencies=[Depends(verify_api_key)])
+    def get_signals_dashboard(
+        timeframe: str = "15m",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        pairs: Optional[str] = None,
+        agg_method: str = "last",
+        strong_threshold: float = 0.15,
+        limit_pairs: int = 10,
+        max_lines: int = 50000,
+    ):
+        tf = (timeframe or "15m").strip().lower()
+        if tf not in _TIMEFRAME_TO_MINUTES:
+            raise HTTPException(status_code=400, detail="timeframe must be '15m' or '1h'")
+
+        agg = (agg_method or "last").strip().lower()
+        if agg not in {"last", "mean"}:
+            raise HTTPException(status_code=400, detail="agg_method must be 'last' or 'mean'")
+
+        if strong_threshold < 0:
+            raise HTTPException(status_code=400, detail="strong_threshold must be >= 0")
+        if limit_pairs <= 0:
+            raise HTTPException(status_code=400, detail="limit_pairs must be > 0")
+        if max_lines <= 0:
+            raise HTTPException(status_code=400, detail="max_lines must be > 0")
+
+        try:
+            start_dt = _parse_datetime_filter(start_date, is_end=False)
+            end_dt = _parse_datetime_filter(end_date, is_end=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if start_dt and end_dt and start_dt > end_dt:
+            raise HTTPException(status_code=400, detail="start_date must be <= end_date")
+
+        pairs_filter: Optional[set[str]] = None
+        if pairs:
+            parsed_pairs = {
+                token.strip().upper()
+                for token in pairs.split(",")
+                if token and token.strip()
+            }
+            if parsed_pairs:
+                pairs_filter = parsed_pairs
+
+        data = _parse_signals_for_dashboard(
+            log_path=PROJECT_ROOT / "logs" / "signals.log",
+            timeframe=tf,
+            agg_method=agg,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            pairs_filter=pairs_filter,
+            strong_threshold=strong_threshold,
+            max_lines=max_lines,
+        )
+        top_pairs = data["pairs"][:limit_pairs]
+        if pairs_filter:
+            selected_pairs = sorted(pairs_filter)
+        else:
+            selected_pairs = top_pairs
+        selected_set = set(selected_pairs)
+        filtered_points = [p for p in data["points"] if p["pair"] in selected_set]
+
+        return {
+            "timeframe": tf,
+            "agg_method": agg,
+            "strong_threshold": strong_threshold,
+            "start_date": start_date,
+            "end_date": end_date,
+            "pairs_requested": sorted(list(pairs_filter)) if pairs_filter else None,
+            "pairs_selected": selected_pairs,
+            "top_pairs": top_pairs,
+            "pair_activity": data["pair_activity"],
+            "time_slots": sorted({p["time_slot"] for p in filtered_points}),
+            "points": filtered_points,
+            "meta": {
+                "log_path": str(PROJECT_ROOT / "logs" / "signals.log"),
+                "total_raw_signals": data["total_raw_signals"],
+                "total_points": len(filtered_points),
+                "max_lines_used": max_lines,
+            },
+        }
 
     class ClosePositionBody(BaseModel):
         symbol: str
