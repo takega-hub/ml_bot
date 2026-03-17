@@ -2301,6 +2301,8 @@ class TradingLoop:
         pullback_enabled = self.settings.ml_strategy.pullback_enabled
         pullback_ema_period = self.settings.ml_strategy.pullback_ema_period
         pullback_pct = self.settings.ml_strategy.pullback_pct
+        pullback_enter_on_continuation = bool(getattr(self.settings.ml_strategy, "pullback_enter_on_continuation", True))
+        pullback_max_bars = self.settings.ml_strategy.pullback_max_bars
         
         if not pullback_enabled:
             return False
@@ -2322,6 +2324,13 @@ class TradingLoop:
                     ema_value = None
             
             if signal.action == Action.LONG:
+                if pullback_enter_on_continuation and int(pending_signal.get("bars_waited", 0)) <= max(1, int(pullback_max_bars)):
+                    continuation_level = signal_high * (1 + pullback_pct)
+                    if high >= continuation_level:
+                        logger.info(
+                            f"[{symbol}] ✅ Pullback bypass: continuation up to {continuation_level:.2f} (high={high:.2f})"
+                        )
+                        return True
                 # LONG: ждем откат к EMA или к уровню -0.3% от high сигнальной свечи
                 pullback_level = signal_high * (1 - pullback_pct)
                 
@@ -2336,6 +2345,13 @@ class TradingLoop:
                     logger.info(f"[{symbol}] ✅ Pullback condition met: price reached pullback level {pullback_level:.2f} (low={low:.2f})")
                     return True
             else:  # SHORT
+                if pullback_enter_on_continuation and int(pending_signal.get("bars_waited", 0)) <= max(1, int(pullback_max_bars)):
+                    continuation_level = signal_low * (1 - pullback_pct)
+                    if low <= continuation_level:
+                        logger.info(
+                            f"[{symbol}] ✅ Pullback bypass: continuation down to {continuation_level:.2f} (low={low:.2f})"
+                        )
+                        return True
                 # SHORT: ждем откат вверх к EMA или к уровню +0.3% от low сигнальной свечи
                 pullback_level = signal_low * (1 + pullback_pct)
                 

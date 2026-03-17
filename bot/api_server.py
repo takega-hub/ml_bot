@@ -28,9 +28,14 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_SIGNAL_LOG_PATTERN = re.compile(
+_SIGNAL_LOG_PATTERN_SIGNAL_GEN = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?SIGNAL GEN:\s+"
     r"(?P<pair>[A-Z0-9]+)\s+(?P<direction>LONG|SHORT)\s+Conf=(?P<conf>[0-9]*\.?[0-9]+)",
+    re.IGNORECASE,
+)
+_SIGNAL_LOG_PATTERN_SIGNAL_LINE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?\[(?P<pair>[A-Z0-9]+)\]\s+"
+    r"Signal:\s+(?P<direction>LONG|SHORT|HOLD)\b.*?Confidence:\s+(?P<conf>[0-9]*\.?[0-9]+)%",
     re.IGNORECASE,
 )
 _TIMEFRAME_TO_MINUTES = {"15m": 15, "1h": 60}
@@ -67,11 +72,44 @@ def _slot_floor(timestamp: datetime, timeframe: str) -> datetime:
 
 
 def _normalize_signal(direction: str, conf: float) -> float:
+    if direction == "HOLD":
+        return 0.0
     return conf if direction == "LONG" else -conf
 
 
+def _parse_signal_line(line: str) -> Optional[Dict[str, Any]]:
+    m = _SIGNAL_LOG_PATTERN_SIGNAL_GEN.search(line)
+    source = "signal_gen"
+    if not m:
+        m = _SIGNAL_LOG_PATTERN_SIGNAL_LINE.search(line)
+        source = "signal_line"
+    if not m:
+        return None
+
+    try:
+        ts = datetime.strptime(m.group("timestamp"), "%Y-%m-%d %H:%M:%S")
+        pair = m.group("pair").upper()
+        direction = m.group("direction").upper()
+        conf = float(m.group("conf"))
+    except Exception:
+        return None
+
+    if source == "signal_line":
+        conf = conf / 100.0
+
+    if conf < 0:
+        conf = 0.0
+    if conf > 1:
+        conf = 1.0
+
+    if direction not in {"LONG", "SHORT", "HOLD"}:
+        return None
+
+    return {"timestamp": ts, "pair": pair, "direction": direction, "conf": conf}
+
+
 def _parse_signals_for_dashboard(
-    log_path: Path,
+    log_paths: List[Path],
     timeframe: str,
     agg_method: str,
     start_dt: Optional[datetime],
@@ -80,7 +118,8 @@ def _parse_signals_for_dashboard(
     strong_threshold: float,
     max_lines: int,
 ) -> Dict[str, Any]:
-    if not log_path.exists():
+    existing_paths = [p for p in log_paths if p.exists()]
+    if not existing_paths:
         return {
             "points": [],
             "pairs": [],
@@ -90,60 +129,59 @@ def _parse_signals_for_dashboard(
             "strong_threshold": strong_threshold,
         }
 
-    tail_lines: deque[str] = deque(maxlen=max_lines)
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            tail_lines.append(line.rstrip("\n"))
-
     grouped: Dict[tuple[datetime, str], List[Dict[str, Any]]] = defaultdict(list)
     pair_activity: Dict[str, int] = defaultdict(int)
     total_raw_signals = 0
+    seen: set[tuple[str, str, str, float]] = set()
 
-    for line in tail_lines:
-        m = _SIGNAL_LOG_PATTERN.search(line)
-        if not m:
-            continue
+    for log_path in existing_paths:
+        tail_lines: deque[str] = deque(maxlen=max_lines)
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                tail_lines.append(line.rstrip("\n"))
 
-        try:
-            ts = datetime.strptime(m.group("timestamp"), "%Y-%m-%d %H:%M:%S")
-            pair = m.group("pair").upper()
-            direction = m.group("direction").upper()
-            conf = float(m.group("conf"))
-        except Exception:
-            continue
+        for line in tail_lines:
+            rec = _parse_signal_line(line)
+            if not rec:
+                continue
 
-        if conf < 0:
-            conf = 0.0
-        if conf > 1:
-            conf = 1.0
+            ts = rec["timestamp"]
+            pair = rec["pair"]
+            direction = rec["direction"]
+            conf = float(rec["conf"])
 
-        if start_dt and ts < start_dt:
-            continue
-        if end_dt and ts > end_dt:
-            continue
-        if pairs_filter and pair not in pairs_filter:
-            continue
+            key = (ts.isoformat(), pair, direction, round(conf, 6))
+            if key in seen:
+                continue
+            seen.add(key)
 
-        total_raw_signals += 1
-        pair_activity[pair] += 1
-        slot = _slot_floor(ts, timeframe)
-        y_value = _normalize_signal(direction, conf)
-        grouped[(slot, pair)].append(
-            {
-                "timestamp": ts,
-                "pair": pair,
-                "direction": direction,
-                "conf": conf,
-                "y": y_value,
-            }
-        )
+            if start_dt and ts < start_dt:
+                continue
+            if end_dt and ts > end_dt:
+                continue
+            if pairs_filter and pair not in pairs_filter:
+                continue
+
+            total_raw_signals += 1
+            pair_activity[pair] += 1
+            slot = _slot_floor(ts, timeframe)
+            y_value = _normalize_signal(direction, conf)
+            grouped[(slot, pair)].append(
+                {
+                    "timestamp": ts,
+                    "pair": pair,
+                    "direction": direction,
+                    "conf": conf,
+                    "y": y_value,
+                }
+            )
 
     points: List[Dict[str, Any]] = []
     for (slot, pair), entries in grouped.items():
         if agg_method == "mean":
             y_value = sum(e["y"] for e in entries) / len(entries)
             conf_value = sum(e["conf"] for e in entries) / len(entries)
-            direction = "LONG" if y_value >= 0 else "SHORT"
+            direction = "HOLD" if abs(y_value) < 1e-12 else ("LONG" if y_value >= 0 else "SHORT")
             source_ts = max(e["timestamp"] for e in entries)
         else:
             latest = max(entries, key=lambda item: item["timestamp"])
@@ -160,7 +198,7 @@ def _parse_signals_for_dashboard(
                 "direction": direction,
                 "conf": round(conf_value, 6),
                 "y_value": round(y_value, 6),
-                "is_strong": abs(y_value) > strong_threshold,
+                "is_strong": (direction != "HOLD") and (abs(conf_value) >= strong_threshold),
             }
         )
 
@@ -945,6 +983,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "mtf_confidence_threshold_15m": getattr(m, "mtf_confidence_threshold_15m", 0.35),
             "mtf_alignment_mode": getattr(m, "mtf_alignment_mode", "strict"),
             "atr_filter_enabled": getattr(m, "atr_filter_enabled", False),
+            "pullback_enabled": getattr(m, "pullback_enabled", True),
+            "pullback_enter_on_continuation": getattr(m, "pullback_enter_on_continuation", True),
             "follow_btc_filter_enabled": getattr(m, "follow_btc_filter_enabled", True),
             "follow_btc_override_confidence": getattr(m, "follow_btc_override_confidence", 0.80),
             "auto_optimize_strategies": getattr(m, "auto_optimize_strategies", False),
@@ -994,6 +1034,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         for key in (
             "use_mtf_strategy",
             "atr_filter_enabled",
+            "pullback_enabled",
+            "pullback_enter_on_continuation",
             "follow_btc_filter_enabled",
             "auto_optimize_strategies",
             "use_fixed_sl_from_risk",
@@ -1980,7 +2022,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 pairs_filter = parsed_pairs
 
         base_data = _parse_signals_for_dashboard(
-            log_path=PROJECT_ROOT / "logs" / "signals.log",
+            log_paths=[
+                PROJECT_ROOT / "logs" / "signals.log",
+                PROJECT_ROOT / "logs" / "bot.log",
+            ],
             timeframe=tf,
             agg_method=agg,
             start_dt=start_dt,
@@ -2012,7 +2057,10 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "time_slots": sorted({p["time_slot"] for p in filtered_points}),
             "points": filtered_points,
             "meta": {
-                "log_path": str(PROJECT_ROOT / "logs" / "signals.log"),
+                "log_paths": [
+                    str(PROJECT_ROOT / "logs" / "signals.log"),
+                    str(PROJECT_ROOT / "logs" / "bot.log"),
+                ],
                 "total_raw_signals": base_data["total_raw_signals"],
                 "total_points": len(filtered_points),
                 "max_lines_used": max_lines,

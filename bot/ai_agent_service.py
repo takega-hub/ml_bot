@@ -1387,7 +1387,35 @@ REGIME_MEMORY:
     def get_research_experiments(self) -> List[Dict[str, Any]]:
         project_root = Path(__file__).resolve().parent.parent
         store = ExperimentStore(project_root / "experiments.json")
-        return store.list()
+        experiments = store.list()
+        known_ids = set()
+        for e in experiments:
+            if isinstance(e, dict):
+                eid = e.get("id")
+                if isinstance(eid, str) and eid:
+                    known_ids.add(eid)
+
+        meta_dir = project_root / "experiment_meta"
+        if meta_dir.exists():
+            for p in sorted(meta_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        rec = json.load(f)
+                    if not isinstance(rec, dict):
+                        continue
+                    eid = rec.get("id") or p.stem
+                    if not isinstance(eid, str) or not eid:
+                        continue
+                    if eid in known_ids:
+                        continue
+                    rec["id"] = eid
+                    experiments.append(rec)
+                    known_ids.add(eid)
+                except Exception:
+                    continue
+
+        experiments.sort(key=lambda x: (x.get("created_at") is None, x.get("created_at", "")), reverse=True)
+        return experiments
 
     def stop_research_experiment(self, experiment_id: str) -> Dict[str, Any]:
         process = self.research_processes.get(experiment_id)

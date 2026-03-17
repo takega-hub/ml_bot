@@ -82,6 +82,7 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     
     # Вход по откату (pullback): ожидание отката к EMA или уровню перед входом
     pullback_enabled: bool = True  # Включить вход по откату (по умолчанию включен - показал улучшение)
+    pullback_enter_on_continuation: bool = True  # Войти по продолжению движения, если отката нет
     pullback_ema_period: int = 9  # Период EMA для отката (9 или 20)
     pullback_pct: float = 0.003  # 0.3% от high/low сигнальной свечи
     pullback_max_bars: int = 3  # Максимальная задержка входа (1-3 свечи)
@@ -550,6 +551,10 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.atr_min_pct = float(ml_dict["atr_min_pct"])
                 if "atr_max_pct" in ml_dict:
                     settings.ml_strategy.atr_max_pct = float(ml_dict["atr_max_pct"])
+                if "pullback_enabled" in ml_dict:
+                    settings.ml_strategy.pullback_enabled = bool(ml_dict["pullback_enabled"])
+                if "pullback_enter_on_continuation" in ml_dict:
+                    settings.ml_strategy.pullback_enter_on_continuation = bool(ml_dict["pullback_enter_on_continuation"])
                 if "follow_btc_filter_enabled" in ml_dict:
                     settings.ml_strategy.follow_btc_filter_enabled = bool(ml_dict["follow_btc_filter_enabled"])
                 if "follow_btc_override_confidence" in ml_dict:
