@@ -4840,6 +4840,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
         exp = store.get(experiment_id)
         if not exp:
+            project_root = Path(__file__).resolve().parent.parent
+            removed_paths: List[str] = []
+            meta_path = project_root / "experiment_meta" / f"{experiment_id}.json"
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                    removed_paths.append(str(meta_path))
+                except Exception as e:
+                    logger.error(f"Failed to remove meta file {meta_path}: {e}", exc_info=True)
+            artifacts_dir = project_root / "experiment_artifacts" / experiment_id
+            if artifacts_dir.exists():
+                try:
+                    shutil.rmtree(artifacts_dir)
+                    removed_paths.append(str(artifacts_dir))
+                except Exception as e:
+                    logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
+            if paper_trading_manager:
+                try:
+                    paper_trading_manager.delete_session(experiment_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+            if removed_paths:
+                return {
+                    "ok": True,
+                    "experiment_id": experiment_id,
+                    "force": force,
+                    "strategy_reset": False,
+                    "removed_paths": removed_paths,
+                    "removed_model_paths": [],
+                    "orphan": True,
+                }
             raise HTTPException(status_code=404, detail="Experiment not found")
         analyzer = ExperimentAnalyzer(store.list())
         impact = None
@@ -4886,6 +4917,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
         exp = store.get(experiment_id)
         if not exp:
+            project_root = Path(__file__).resolve().parent.parent
+            removed_paths: List[str] = []
+            meta_path = project_root / "experiment_meta" / f"{experiment_id}.json"
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                    removed_paths.append(str(meta_path))
+                except Exception as e:
+                    logger.error(f"Failed to remove meta file {meta_path}: {e}", exc_info=True)
+            artifacts_dir = project_root / "experiment_artifacts" / experiment_id
+            if artifacts_dir.exists():
+                try:
+                    shutil.rmtree(artifacts_dir)
+                    removed_paths.append(str(artifacts_dir))
+                except Exception as e:
+                    logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
+            if paper_trading_manager:
+                try:
+                    paper_trading_manager.delete_session(experiment_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+            if removed_paths:
+                return {
+                    "ok": True,
+                    "experiment_id": experiment_id,
+                    "force": force,
+                    "strategy_reset": False,
+                    "removed_paths": removed_paths,
+                    "removed_model_paths": [],
+                    "orphan": True,
+                }
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         heartbeat_at = exp.get("heartbeat_at") or exp.get("updated_at")
@@ -4986,6 +5048,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
         exp = store.get(experiment_id)
         if not exp:
+            project_root = Path(__file__).resolve().parent.parent
+            removed_paths: List[str] = []
+            meta_path = project_root / "experiment_meta" / f"{experiment_id}.json"
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                    removed_paths.append(str(meta_path))
+                except Exception as e:
+                    logger.error(f"Failed to remove meta file {meta_path}: {e}", exc_info=True)
+            artifacts_dir = project_root / "experiment_artifacts" / experiment_id
+            if artifacts_dir.exists():
+                try:
+                    shutil.rmtree(artifacts_dir)
+                    removed_paths.append(str(artifacts_dir))
+                except Exception as e:
+                    logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
+            if paper_trading_manager:
+                try:
+                    paper_trading_manager.delete_session(experiment_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+            if removed_paths:
+                return {
+                    "ok": True,
+                    "experiment_id": experiment_id,
+                    "force": force,
+                    "strategy_reset": False,
+                    "removed_paths": removed_paths,
+                    "removed_model_paths": [],
+                    "orphan": True,
+                }
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         status = str(exp.get("status") or "unknown")
@@ -5067,6 +5160,37 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         store = ExperimentStore(Path(__file__).resolve().parent.parent / "experiments.json")
         exp = store.get(experiment_id)
         if not exp:
+            project_root = Path(__file__).resolve().parent.parent
+            removed_paths: List[str] = []
+            meta_path = project_root / "experiment_meta" / f"{experiment_id}.json"
+            if meta_path.exists():
+                try:
+                    meta_path.unlink()
+                    removed_paths.append(str(meta_path))
+                except Exception as e:
+                    logger.error(f"Failed to remove meta file {meta_path}: {e}", exc_info=True)
+            artifacts_dir = project_root / "experiment_artifacts" / experiment_id
+            if artifacts_dir.exists():
+                try:
+                    shutil.rmtree(artifacts_dir)
+                    removed_paths.append(str(artifacts_dir))
+                except Exception as e:
+                    logger.error(f"Failed to remove artifacts dir {artifacts_dir}: {e}", exc_info=True)
+            if paper_trading_manager:
+                try:
+                    paper_trading_manager.delete_session(experiment_id)
+                except Exception as e:
+                    logger.error(f"Failed to delete paper trading session for {experiment_id}: {e}", exc_info=True)
+            if removed_paths:
+                return {
+                    "ok": True,
+                    "experiment_id": experiment_id,
+                    "force": force,
+                    "strategy_reset": False,
+                    "removed_paths": removed_paths,
+                    "removed_model_paths": [],
+                    "orphan": True,
+                }
             raise HTTPException(status_code=404, detail="Experiment not found")
 
         status = str(exp.get("status") or "unknown")

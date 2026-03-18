@@ -1194,6 +1194,14 @@ class TradingLoop:
                     indicators_info = s.indicators_info if isinstance(s.indicators_info, dict) else {}
                     confidence = indicators_info.get("confidence", 0) if isinstance(indicators_info, dict) else 0
                     signal_strength = indicators_info.get("strength", "") if isinstance(indicators_info, dict) else ""
+                    signal_parameters = {}
+                    if isinstance(indicators_info, dict) and isinstance(indicators_info.get("decision_engine_eval"), dict):
+                        signal_parameters["decision_engine_eval"] = indicators_info.get("decision_engine_eval")
+                        if isinstance(indicators_info.get("engine_decision_id"), str):
+                            signal_parameters["engine_decision_id"] = indicators_info.get("engine_decision_id")
+                    ai_entry_confirmation = indicators_info.get("ai_entry_confirmation") if isinstance(indicators_info, dict) else None
+                    if isinstance(ai_entry_confirmation, dict):
+                        signal_parameters["ai_entry_confirmation"] = ai_entry_confirmation
                     trade = TradeRecord(
                         symbol=symbol,
                         side=side if side in ("Buy", "Sell") else ("Buy" if has_pos == Bias.LONG else "Sell"),
@@ -1209,6 +1217,7 @@ class TradingLoop:
                         leverage=self.settings.leverage,
                         margin_usd=float(rec.get("expected_margin_usd") or 0.0),
                         signal_strength=str(signal_strength),
+                        signal_parameters=signal_parameters,
                     )
                     self.state.add_trade(trade)
                     logger.info(f"[{symbol}] 🔄 Added filled pullback limit entry to state (qty={size}, avg={entry_price})")
@@ -1377,6 +1386,8 @@ class TradingLoop:
                             "price": float(current_price),
                             "confidence": float(confidence),
                             "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else "",
+                            "stop_loss": float(signal.stop_loss) if signal.stop_loss else None,
+                            "take_profit": float(signal.take_profit) if signal.take_profit else None,
                             "1h_pred": indicators_info.get("1h_pred") if isinstance(indicators_info, dict) else None,
                             "1h_conf": indicators_info.get("1h_conf") if isinstance(indicators_info, dict) else None,
                             "15m_pred": indicators_info.get("15m_pred") if isinstance(indicators_info, dict) else None,
@@ -1390,8 +1401,12 @@ class TradingLoop:
                             signal_payload=eval_payload,
                             ohlcv=ohlcv,
                         )
+                        if isinstance(engine_eval, dict) and not engine_eval.get("decision_id"):
+                            engine_eval["decision_id"] = str(uuid.uuid4())
                         if isinstance(indicators_info, dict):
                             indicators_info["decision_engine_eval"] = engine_eval
+                            if isinstance(engine_eval, dict) and isinstance(engine_eval.get("decision_id"), str):
+                                indicators_info["engine_decision_id"] = engine_eval.get("decision_id")
                             signal.indicators_info = indicators_info
                         signal_logger.info(
                             f"ENGINE EVAL: {symbol} action={signal.action.value} score={engine_eval.get('score')} "
@@ -2137,6 +2152,10 @@ class TradingLoop:
                         'stop_loss_pct': sl_pct,
                         'risk_reward_ratio': (tp_pct / sl_pct) if (tp_pct and sl_pct and sl_pct > 0) else None,
                     }
+                    if isinstance(indicators_info, dict) and isinstance(indicators_info.get("decision_engine_eval"), dict):
+                        signal_parameters["decision_engine_eval"] = indicators_info.get("decision_engine_eval")
+                        if isinstance(indicators_info.get("engine_decision_id"), str):
+                            signal_parameters["engine_decision_id"] = indicators_info.get("engine_decision_id")
                     ai_entry_confirmation = indicators_info.get("ai_entry_confirmation") if isinstance(indicators_info, dict) else None
                     if isinstance(ai_entry_confirmation, dict):
                         signal_parameters["ai_entry_confirmation"] = ai_entry_confirmation
@@ -4061,7 +4080,15 @@ class TradingLoop:
             
             # Обновляем статус сделки (может установить кулдаун от убытков)
             # Передаем реальную комиссию (если она была рассчитана)
-            self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, exit_reason, commission=total_fee_usd)
+            self.state.update_trade_on_close(
+                symbol,
+                exit_price,
+                pnl_usd,
+                pnl_pct,
+                exit_reason,
+                commission=total_fee_usd,
+                enable_loss_cooldown=bool(getattr(self.settings.risk, "enable_loss_cooldown", False)),
+            )
             
             # Устанавливаем кулдаун до закрытия следующей свечи (15 минут)
             # Этот кулдаун не перезапишет более длительный кулдаун от убытков
@@ -4122,19 +4149,41 @@ class TradingLoop:
                         pnl_usd -= fee_usd
                         if margin > 0:
                             pnl_pct = (pnl_usd / margin) * 100
-                    self.state.update_trade_on_close(symbol, exit_price, pnl_usd, pnl_pct, "MANUAL_CLOSE", commission=fee_usd)
+                    self.state.update_trade_on_close(
+                        symbol,
+                        exit_price,
+                        pnl_usd,
+                        pnl_pct,
+                        "MANUAL_CLOSE",
+                        commission=fee_usd,
+                        enable_loss_cooldown=bool(getattr(self.settings.risk, "enable_loss_cooldown", False)),
+                    )
                     # Устанавливаем кулдаун до закрытия следующей свечи
                     self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
                 else:
                     # Если не удалось получить цену, используем entry_price с нулевым PnL
-                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
+                    self.state.update_trade_on_close(
+                        symbol,
+                        local_pos.entry_price,
+                        0.0,
+                        0.0,
+                        "ERROR_CLOSE",
+                        enable_loss_cooldown=bool(getattr(self.settings.risk, "enable_loss_cooldown", False)),
+                    )
                     # Устанавливаем кулдаун до закрытия следующей свечи
                     self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
             except Exception as e2:
                 logger.error(f"Error in fallback close handling for {symbol}: {e2}")
                 # Последняя попытка - закрываем с entry_price
                 try:
-                    self.state.update_trade_on_close(symbol, local_pos.entry_price, 0.0, 0.0, "ERROR_CLOSE")
+                    self.state.update_trade_on_close(
+                        symbol,
+                        local_pos.entry_price,
+                        0.0,
+                        0.0,
+                        "ERROR_CLOSE",
+                        enable_loss_cooldown=bool(getattr(self.settings.risk, "enable_loss_cooldown", False)),
+                    )
                     # Устанавливаем кулдаун до закрытия следующей свечи
                     self.state.set_cooldown_until_next_candle(symbol, self.settings.timeframe)
                 except:

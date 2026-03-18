@@ -1,0 +1,158 @@
+{
+  "risk_settings": {
+    "margin_pct_balance": 0.2,
+    "base_order_usd": 15.0,
+    "stop_loss_pct": 0.005,
+    "take_profit_pct": 0.02,
+    "enable_trailing_stop": false,
+    "trailing_stop_activation_pct": 0.01,
+    "trailing_stop_distance_pct": 0.005,
+    "enable_partial_close": false,
+    "enable_breakeven": true,
+    "breakeven_level1_activation_pct": 0.01,
+    "breakeven_level1_sl_pct": 0.003,
+    "breakeven_level2_activation_pct": 0.02,
+    "breakeven_level2_sl_pct": 0.01,
+    "enable_loss_cooldown": false,
+    "fee_rate": 0.0006,
+    "mid_term_tp_pct": 0.025,
+    "long_term_tp_pct": 0.04,
+    "long_term_sl_pct": 0.02,
+    "long_term_ignore_reverse": true,
+    "dca_enabled": true,
+    "dca_drawdown_pct": 0.003,
+    "dca_max_adds": 2,
+    "dca_min_confidence": 0.6,
+    "reverse_on_strong_signal": true,
+    "reverse_min_confidence": 0.6,
+    "reverse_min_strength": "сильное",
+    "enable_dynamic_risk": true,
+    "atr_period": 14,
+    "atr_multiplier_sl": 1.5,
+    "atr_multiplier_tp": 2.5,
+    "enable_entry_filters": true,
+    "min_pullback_pct": 0.001,
+    "max_pullback_pct": 0.005,
+    "trailing_stop_step_atr_multiplier": 0.5,
+    "tp_reentry_enabled": true,
+    "tp_reentry_wait_candles": 2,
+    "tp_reentry_window_candles": 8,
+    "tp_reentry_min_pullback_pct": 0.001,
+    "tp_reentry_max_pullback_pct": 0.015,
+    "tp_reentry_breakout_buffer_pct": 0.001,
+    "tp_reentry_volume_factor": 1.5,
+    "tp_reentry_sr_lookback": 20,
+    "tp_reentry_trend_lookback": 20,
+    "tp_reentry_min_trend_slope": 0.0,
+    "max_position_usd": 200.0,
+    "position_size_mode": "percentage",
+    "add_order_usd": 50.0,
+    "partial_close_pct": 0.5,
+    "partial_close_at_tp_pct": 0.5,
+    "partial_close_levels": [
+      [
+        0.5,
+        0.5
+      ],
+      [
+        0.75,
+        0.25
+      ]
+    ],
+    "loss_cooldown_minutes": 120,
+    "max_consecutive_losses": 2,
+    "enable_profit_protection": true,
+    "profit_protection_activation_pct": 0.005,
+    "profit_protection_retreat_pct": 0.002,
+    "time_stop_minutes": 360,
+    "early_exit_minutes": 60,
+    "early_exit_min_profit_pct": 0.003,
+    "enable_dynamic_position_sizing": true,
+    "volatility_reduction_factor": 0.5,
+    "high_volatility_atr_multiplier": 1.5
+  },
+  "ml_settings": {
+    "confidence_threshold": 0.35,
+    "min_confidence_for_trade": 0.5,
+    "use_mtf_strategy": true,
+    "mtf_confidence_threshold_1h": 0.5,
+    "mtf_confidence_threshold_15m": 0.35,
+    "mtf_alignment_mode": "strict",
+    "mtf_require_alignment": true,
+    "auto_optimize_strategies": false,
+    "auto_optimize_day": "sunday",
+    "auto_optimize_hour": 3,
+    "atr_filter_enabled": false,
+    "atr_min_pct": 0.3,
+    "atr_max_pct": 2,
+    "use_dynamic_ensemble_weights": false,
+    "adx_trend_threshold": 25,
+    "adx_flat_threshold": 20,
+    "trend_weights": null,
+    "flat_weights": null,
+    "use_fixed_sl_from_risk": false,
+    "ai_entry_confirmation_enabled": false,
+    "ai_fallback_force_enabled": false,
+    "decision_engine_enabled": true,
+    "decision_engine_mode": "enforce",
+    "decision_engine_allow_score": 0.15,
+    "decision_engine_reduce_score": 0.05,
+    "decision_engine_w_ml_confidence": 1.0,
+    "decision_engine_w_mtf_alignment": 0.7,
+    "decision_engine_w_atr_regime": 0.4,
+    "decision_engine_w_sr_proximity": 0.7,
+    "decision_engine_w_trend_slope": 0.05,
+    "decision_engine_w_history_edge": 0.0,
+    "decision_engine_atr_prefer_min_pct": 0.2,
+    "decision_engine_atr_prefer_max_pct": 2.5
+  },
+  "state_closed_trades": {
+    "n_closed": 1,
+    "pnl_sum_usd": -9.615448528000005,
+    "win_rate": 0.0,
+    "by_reason": {
+      "SL": {
+        "n": 1,
+        "pnl_sum": -9.615448528000005
+      }
+    },
+    "by_symbol_top": [
+      {
+        "symbol": "BTCUSDT",
+        "n": 1,
+        "pnl_sum": -9.615448528000005,
+        "wins": 0,
+        "win_rate": 0.0
+      }
+    ]
+  },
+  "trades_log_scan": {
+    "n_close_lines": 143,
+    "pnl_sum": -53.10541099999997,
+    "win_rate": 0.20279720279720279,
+    "pnl_avg": -0.37136651048951025,
+    "pnl_median": -0.33,
+    "p95_loss": -1.5,
+    "reasons": {
+      "SL": 114,
+      "TP": 29
+    }
+  },
+  "signals_engine_scan": {
+    "n_engine_eval": 1654,
+    "by_decision": {
+      "allow": 1593,
+      "reduce": 17,
+      "veto": 44
+    },
+    "score_allow_avg": 0.9979526472895647,
+    "score_allow_p25": 0.6428647161205098,
+    "score_allow_p75": 1.3566869480497938,
+    "score_reduce_avg": 0.10448769842283567,
+    "score_reduce_p25": 0.07030621506187444,
+    "score_reduce_p75": 0.13076448682081065,
+    "score_veto_avg": -0.2016121725832609,
+    "score_veto_p25": -0.3252773230740939,
+    "score_veto_p75": -0.08940338983052526
+  }
+}

@@ -344,12 +344,38 @@ class BotState:
 
     def add_trade(self, trade: TradeRecord):
         ai = None
+        engine_id = None
+        engine_eval = None
         if isinstance(trade.signal_parameters, dict):
             ai = trade.signal_parameters.get("ai_entry_confirmation")
+            engine_id = trade.signal_parameters.get("engine_decision_id")
+            engine_eval = trade.signal_parameters.get("decision_engine_eval")
         ai_part = ""
         if isinstance(ai, dict) and ai.get("decision_id"):
             ai_part = f" | AI: {ai.get('decision')} | AI_ID: {ai.get('decision_id')}"
-        trade_logger.info(f"TRADE OPEN: {trade.symbol} | Side: {trade.side} | Entry: {trade.entry_price} | Size: {trade.qty} | Reason: {trade.entry_reason}{ai_part}")
+        eng_part = ""
+        if isinstance(engine_id, str) and engine_id:
+            eng_part = f" | ENG_ID: {engine_id}"
+        trade_logger.info(f"TRADE OPEN: {trade.symbol} | Side: {trade.side} | Entry: {trade.entry_price} | Size: {trade.qty} | Reason: {trade.entry_reason}{ai_part}{eng_part}")
+
+        if isinstance(engine_id, str) and engine_id and isinstance(engine_eval, dict):
+            try:
+                root = Path(__file__).resolve().parent.parent
+                append_jsonl(
+                    str(root / "logs" / "decision_engine_audit.jsonl"),
+                    {
+                        "event_type": "engine_entry",
+                        "decision_id": engine_id,
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "symbol": trade.symbol,
+                        "side": trade.side,
+                        "entry_price": trade.entry_price,
+                        "qty": trade.qty,
+                        "engine_eval": engine_eval,
+                    },
+                )
+            except Exception:
+                pass
         
         with self.lock:
             self.trades.append(trade)
@@ -592,7 +618,8 @@ class BotState:
         pnl_usd: float, 
         pnl_pct: float,
         exit_reason: str = "",
-        commission: float = 0.0
+        commission: float = 0.0,
+        enable_loss_cooldown: bool = True,
     ):
         """
         Обновляет сделку при закрытии и проверяет необходимость cooldown.
@@ -617,12 +644,17 @@ class BotState:
                     break
 
         ai = None
+        engine_id = None
         if closed_trade and isinstance(closed_trade.signal_parameters, dict):
             ai = closed_trade.signal_parameters.get("ai_entry_confirmation")
+            engine_id = closed_trade.signal_parameters.get("engine_decision_id")
         ai_part = ""
         if isinstance(ai, dict) and ai.get("decision_id"):
             ai_part = f" | AI: {ai.get('decision')} | AI_ID: {ai.get('decision_id')}"
-        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.6f} ({pnl_pct:.4f}%) | Fee: ${commission:.4f} | Reason: {exit_reason}{ai_part}")
+        eng_part = ""
+        if isinstance(engine_id, str) and engine_id:
+            eng_part = f" | ENG_ID: {engine_id}"
+        trade_logger.info(f"TRADE CLOSE: {symbol} | Exit: {exit_price} | PnL: ${pnl_usd:.6f} ({pnl_pct:.4f}%) | Fee: ${commission:.4f} | Reason: {exit_reason}{ai_part}{eng_part}")
         
         # Экспортируем закрытую сделку в Excel
         if closed_trade:
@@ -666,12 +698,31 @@ class BotState:
                 )
             except Exception:
                 pass
+
+        if isinstance(engine_id, str) and engine_id:
+            try:
+                root = Path(__file__).resolve().parent.parent
+                append_jsonl(
+                    str(root / "logs" / "decision_engine_audit.jsonl"),
+                    {
+                        "event_type": "engine_trade_outcome",
+                        "decision_id": engine_id,
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "side": closed_trade.side if closed_trade else None,
+                        "entry_time": closed_trade.entry_time if closed_trade else None,
+                        "exit_time": closed_trade.exit_time if closed_trade else None,
+                        "exit_reason": closed_trade.exit_reason if closed_trade else exit_reason,
+                        "pnl_usd": pnl_usd,
+                        "pnl_pct": pnl_pct,
+                        "commission": commission,
+                    },
+                )
+            except Exception:
+                pass
         
-        # Проверяем, была ли сделка убыточной
-        if pnl_usd < 0:
+        if enable_loss_cooldown and pnl_usd < 0:
             consecutive_losses = self.get_consecutive_losses(symbol)
-            
-            # Устанавливаем cooldown при необходимости
             if consecutive_losses > 0:
                 reason = f"{consecutive_losses} убыток(ов) подряд"
                 self.set_cooldown(symbol, consecutive_losses, reason)

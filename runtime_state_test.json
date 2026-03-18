@@ -1,0 +1,52 @@
+{
+  "is_running": false,
+  "active_symbols": [
+    "BTCUSDT"
+  ],
+  "known_symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "ADAUSDT"
+  ],
+  "symbol_models": {},
+  "symbol_strategies": {},
+  "trades": [
+    {
+      "symbol": "TESTUSDT",
+      "side": "Buy",
+      "entry_price": 100.0,
+      "exit_price": 101.0,
+      "qty": 1.0,
+      "pnl_usd": 1.0,
+      "pnl_pct": 1.0,
+      "entry_time": "2026-03-18T13:46:56.156228",
+      "exit_time": "2026-03-18T13:46:56.159310",
+      "status": "closed",
+      "model_name": "",
+      "horizon": "short_term",
+      "dca_count": 0,
+      "entry_reason": "test",
+      "exit_reason": "TP",
+      "confidence": 0.0,
+      "take_profit": null,
+      "stop_loss": null,
+      "leverage": 1,
+      "margin_usd": 0.0,
+      "commission": 0.01,
+      "signal_strength": "",
+      "signal_parameters": {
+        "engine_decision_id": "3bb33695-80c4-4e50-a349-0ecc5526b36e",
+        "decision_engine_eval": {
+          "decision_id": "3bb33695-80c4-4e50-a349-0ecc5526b36e",
+          "decision": "allow",
+          "score": 1.0
+        }
+      }
+    }
+  ],
+  "signals": [],
+  "cooldowns": {},
+  "tp_reentry": {}
+}

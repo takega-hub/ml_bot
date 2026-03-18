@@ -246,6 +246,8 @@ class SignalDecisionEngine:
         price = _safe_float(signal_payload.get("price"))
         ml_conf = _safe_float(signal_payload.get("confidence"), 0.0) or 0.0
         strength = str(signal_payload.get("strength") or "")
+        sl_price = _safe_float(signal_payload.get("stop_loss"))
+        tp_price = _safe_float(signal_payload.get("take_profit"))
         pred_1h = signal_payload.get("1h_pred")
         conf_1h = _safe_float(signal_payload.get("1h_conf"))
         pred_15m = signal_payload.get("15m_pred")
@@ -331,6 +333,27 @@ class SignalDecisionEngine:
             align_score = _clamp(align_score / align_w, -1.0, 1.0)
         hist_edge = self._history_edge(symbol)
 
+        rr_ratio = None
+        rr_score = 0.0
+        if tp_price and sl_price and float(price) > 0:
+            denom = abs(float(price) - float(sl_price))
+            if denom > 0:
+                rr_ratio = abs(float(tp_price) - float(price)) / denom
+                rr_score = _clamp((rr_ratio - 1.2) / 1.0, -1.0, 1.0)
+
+        barrier_score = 0.0
+        if tp_price and float(tp_price) > 0:
+            tp_dist = abs(float(tp_price) - float(price))
+            if tp_dist > 0:
+                if action == "LONG" and r1 is not None and float(tp_price) > float(price):
+                    if float(r1) > float(price) and float(r1) < float(tp_price):
+                        frac = (float(r1) - float(price)) / tp_dist
+                        barrier_score -= _clamp((0.60 - frac) / 0.60, 0.0, 1.0)
+                if action == "SHORT" and s1 is not None and float(tp_price) < float(price):
+                    if float(s1) < float(price) and float(s1) > float(tp_price):
+                        frac = (float(price) - float(s1)) / tp_dist
+                        barrier_score -= _clamp((0.60 - frac) / 0.60, 0.0, 1.0)
+
         w = cfg.weights
         score = (
             w.w_ml_confidence * ml_score
@@ -341,6 +364,11 @@ class SignalDecisionEngine:
             + w.w_history_edge * hist_edge
         )
 
+        if align_w > 0 and align_score < -0.15:
+            score -= 0.8
+
+        score += 0.35 * rr_score
+        score += 0.25 * barrier_score
 
         decision = "veto"
         size_multiplier = 1.0
@@ -362,6 +390,10 @@ class SignalDecisionEngine:
 
         if atr_pct is None:
             reason_codes.append("ENGINE_NO_ATR")
+        if align_w > 0 and align_score < -0.15:
+            reason_codes.append("ENGINE_MTF_CONFLICT")
+        if rr_ratio is not None and rr_ratio < 0.9:
+            reason_codes.append("ENGINE_BAD_RR")
         if r1 is None or s1 is None:
             reason_codes.append("ENGINE_WEAK_SR")
         if strength:
@@ -378,6 +410,9 @@ class SignalDecisionEngine:
                 "ml_conf": ml_conf,
                 "ml_score": ml_score,
                 "mtf_alignment": align_score,
+                "rr_ratio": rr_ratio,
+                "rr_score": rr_score,
+                "tp_barrier_score": barrier_score,
                 "atr_pct": atr_pct,
                 "atr_score": atr_score,
                 "sr_score": sr_score,

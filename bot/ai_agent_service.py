@@ -718,29 +718,154 @@ class AIAgentService:
 
     async def confirm_entry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.validate_confirm_entry_request(payload)
-        if not self.api_key:
+        started = time.time()
+        request_id = str(payload.get("request_id") or "")
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        def _latency_ms() -> int:
+            return int(max(0.0, (time.time() - started) * 1000.0))
+
+        def _clamp(x: float, lo: float, hi: float) -> float:
+            return max(lo, min(hi, x))
+
+        def _extract_json_block(text: str) -> str:
+            if "```json" in text:
+                return text.split("```json", 1)[1].split("```", 1)[0].strip()
+            if "```" in text:
+                return text.split("```", 1)[1].split("```", 1)[0].strip()
+            return text.strip()
+
+        def _normalize_decision(val: Any) -> str:
+            s = str(val or "").strip()
+            low = s.lower()
+            up = s.upper()
+            if low in ("allow", "reduce", "veto"):
+                return low
+            if up in ("APPROVE", "APPROVED", "ALLOW"):
+                return "allow"
+            if up in ("REDUCE", "DECREASE", "SMALLER"):
+                return "reduce"
+            if up in ("REJECT", "REJECTED", "DENY", "DENIED", "VETO", "BLOCK", "BLOCKED", "WAIT", "HOLD"):
+                return "veto"
+            return "veto"
+
+        def _fallback() -> Dict[str, Any]:
+            s = payload.get("signal") if isinstance(payload.get("signal"), dict) else {}
+            ob = payload.get("market_context", {}).get("orderbook") if isinstance(payload.get("market_context"), dict) else {}
+            rt = payload.get("market_context", {}).get("recent_trades") if isinstance(payload.get("market_context"), dict) else {}
+            pol = payload.get("bot_context", {}).get("ai_fallback_policy") if isinstance(payload.get("bot_context"), dict) else {}
+
+            conf = 0.0
+            try:
+                conf = float(s.get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            spread_pct = None
+            try:
+                spread_pct = float(ob.get("spread_pct"))
+            except Exception:
+                spread_pct = None
+            imbalance_5 = None
+            try:
+                imbalance_5 = float(ob.get("imbalance_5"))
+            except Exception:
+                imbalance_5 = None
+            buy_sell_ratio = None
+            try:
+                buy_sell_ratio = float(rt.get("buy_sell_ratio"))
+            except Exception:
+                buy_sell_ratio = None
+            depth_5 = None
+            try:
+                depth_5 = float(ob.get("bid_vol_5") or 0) + float(ob.get("ask_vol_5") or 0)
+            except Exception:
+                depth_5 = None
+
+            spread_reduce = float(pol.get("spread_reduce_pct", 0.10) or 0.10)
+            spread_veto = float(pol.get("spread_veto_pct", 0.25) or 0.25)
+            min_depth_5 = float(pol.get("min_depth_usd_5", 0.0) or 0.0)
+            imb_reduce = float(pol.get("imbalance_abs_reduce", 0.60) or 0.60)
+            of_low = float(pol.get("orderflow_ratio_low", 0.40) or 0.40)
+            of_high = float(pol.get("orderflow_ratio_high", 2.50) or 2.50)
+
+            veto = []
+            reduce = []
+            if conf < 0.50:
+                veto.append("low_confidence")
+            elif conf < 0.60:
+                reduce.append("moderate_confidence")
+
+            if spread_pct is not None:
+                if spread_pct >= spread_veto:
+                    veto.append("high_spread")
+                elif spread_pct >= spread_reduce:
+                    reduce.append("high_spread")
+
+            if depth_5 is not None and depth_5 < min_depth_5:
+                veto.append("low_depth")
+
+            if imbalance_5 is not None and abs(imbalance_5) >= imb_reduce:
+                reduce.append("market_imbalance")
+
+            if buy_sell_ratio is not None:
+                if buy_sell_ratio >= max(of_high * 1.5, of_high + 1.0):
+                    veto.append("high_buy_sell_ratio")
+                elif buy_sell_ratio >= of_high or buy_sell_ratio <= of_low:
+                    reduce.append("high_buy_sell_ratio")
+
+            decision = "allow"
+            size_multiplier = 1.0
+            if veto:
+                decision = "veto"
+            elif reduce:
+                decision = "reduce"
+                size_multiplier = 0.5 if conf >= 0.65 else 0.25
+
+            reason_codes = []
+            if bool(pol.get("force_enabled")):
+                reason_codes.append("FORCED_FALLBACK")
+            reason_codes += veto + reduce
             return {
-                "decision": "REJECT",
-                "confidence": 0.0,
-                "reason": "AI Agent не настроен: отсутствует OPENROUTER_API_KEY.",
-                "risk_flags": ["ai_unavailable"],
-                "tp_adjustment": None,
-                "sl_adjustment": None,
+                "decision": decision,
+                "confidence": _clamp(conf, 0.0, 1.0),
+                "risk_score": 50 if decision == "allow" else (35 if decision == "reduce" else 20),
+                "size_multiplier": size_multiplier,
+                "reason_codes": reason_codes,
+                "notes": "Fallback confirm_entry",
+                "decision_id": request_id,
+                "timestamp_utc": now_ts,
+                "latency_ms": _latency_ms(),
             }
-        if not HAS_REQUESTS:
-            return {
-                "decision": "REJECT",
-                "confidence": 0.0,
-                "reason": "AI Agent недоступен: пакет requests не установлен в окружении.",
-                "risk_flags": ["ai_unavailable"],
-                "tp_adjustment": None,
-                "sl_adjustment": None,
-            }
+
+        pol = payload.get("bot_context", {}).get("ai_fallback_policy") if isinstance(payload.get("bot_context"), dict) else {}
+        if bool(pol.get("force_enabled")):
+            return _fallback()
+
+        if not self.api_key or not HAS_REQUESTS:
+            out = _fallback()
+            out["decision"] = "veto"
+            out["reason_codes"] = ["AI_UNAVAILABLE"] + list(out.get("reason_codes") or [])
+            out["notes"] = "AI unavailable, fallback used"
+            return out
+
         prompt = (
-            "Ты — AI фильтр входа для крипто-бота. Оцени вход и верни строго JSON с полями "
-            "decision, confidence, reason, risk_flags, tp_adjustment, sl_adjustment.\n\n"
+            "Ты — AI gatekeeper перед входом в сделку. Верни строго JSON без текста вокруг.\n"
+            "Твоя цель: не блокировать всё подряд. Используй:\n"
+            "- allow: вход разумный\n"
+            "- reduce: вход допустим, но риск повышен (уменьши размер)\n"
+            "- veto: вход плохой/опасный\n\n"
+            "Формат ответа:\n"
+            "{\n"
+            "  \"decision\": \"allow|reduce|veto\",\n"
+            "  \"confidence\": 0.0,\n"
+            "  \"risk_score\": 0,\n"
+            "  \"size_multiplier\": 1.0,\n"
+            "  \"reason_codes\": [\"...\"],\n"
+            "  \"notes\": \"до 30 слов\"\n"
+            "}\n\n"
             f"PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}"
         )
+
         try:
             loop = asyncio.get_event_loop()
             content = await loop.run_in_executor(
@@ -750,33 +875,68 @@ class AIAgentService:
                         {"role": "system", "content": "You are an expert trading gatekeeper. Output valid JSON only."},
                         {"role": "user", "content": prompt},
                     ],
-                    max_tokens=500,
-                    temperature=0.1,
+                    max_tokens=450,
+                    temperature=0.2,
                 ),
             )
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].strip()
-            result = json.loads(content)
-            decision = str(result.get("decision") or "REJECT").upper()
-            if decision not in {"APPROVE", "REJECT", "WAIT"}:
-                decision = "REJECT"
-            result["decision"] = decision
-            result["confidence"] = float(result.get("confidence") or 0.0)
-            if not isinstance(result.get("risk_flags"), list):
-                result["risk_flags"] = []
-            return result
+            data = json.loads(_extract_json_block(content))
+            if not isinstance(data, dict):
+                return _fallback()
+
+            decision = _normalize_decision(data.get("decision"))
+            try:
+                confidence = float(data.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            confidence = _clamp(confidence, 0.0, 1.0)
+
+            try:
+                risk_score = int(data.get("risk_score") or 50)
+            except Exception:
+                risk_score = 50
+            risk_score = int(_clamp(float(risk_score), 0.0, 100.0))
+
+            size_multiplier = data.get("size_multiplier", 1.0)
+            try:
+                size_multiplier = float(size_multiplier)
+            except Exception:
+                size_multiplier = 1.0
+            if decision == "reduce" and size_multiplier not in (0.1, 0.25, 0.5):
+                size_multiplier = 0.25
+            if decision != "reduce":
+                size_multiplier = 1.0
+
+            reason_codes = data.get("reason_codes")
+            if not isinstance(reason_codes, list):
+                reason_codes = data.get("risk_flags")
+            if not isinstance(reason_codes, list):
+                reason_codes = []
+            reason_codes = [str(x) for x in reason_codes if x is not None]
+
+            notes = data.get("notes")
+            if not isinstance(notes, str) or not notes:
+                notes = data.get("reason")
+            if not isinstance(notes, str):
+                notes = ""
+
+            return {
+                "decision": decision,
+                "confidence": confidence,
+                "risk_score": risk_score,
+                "size_multiplier": size_multiplier,
+                "reason_codes": reason_codes,
+                "notes": notes,
+                "decision_id": request_id,
+                "timestamp_utc": now_ts,
+                "latency_ms": _latency_ms(),
+            }
         except Exception as e:
             logger.error(f"AI confirm_entry failed: {e}")
-            return {
-                "decision": "REJECT",
-                "confidence": 0.0,
-                "reason": f"Ошибка AI анализа: {e}",
-                "risk_flags": ["ai_error"],
-                "tp_adjustment": None,
-                "sl_adjustment": None,
-            }
+            out = _fallback()
+            out["decision"] = "veto"
+            out["reason_codes"] = ["ai_error"] + list(out.get("reason_codes") or [])
+            out["notes"] = f"AI error: {e}"
+            return out
 
     def _build_research_ai_plan(
         self,
@@ -1420,10 +1580,6 @@ REGIME_MEMORY:
                                 if cur in (None, "", [], {}):
                                     target[k] = v
                         continue
-                    rec["id"] = eid
-                    experiments.append(rec)
-                    known_ids.add(eid)
-                    exp_by_id[eid] = rec
                 except Exception:
                     continue
 

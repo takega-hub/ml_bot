@@ -1,0 +1,254 @@
+{
+  "generated_at": "2026-03-18T10:37:48.541574Z",
+  "paths": {
+    "signals": "C:\\Users\\takeg\\OneDrive\\Документы\\vibecodding\\ml_bot\\logs\\signals.log",
+    "trades": "C:\\Users\\takeg\\OneDrive\\Документы\\vibecodding\\ml_bot\\logs\\trades.log"
+  },
+  "engine_evals": 1654,
+  "trade_opens": 143,
+  "trade_closes": 143,
+  "match_window_seconds": 21600,
+  "result": {
+    "n_labeled": 20,
+    "baseline": {
+      "pnl_sum": -20.313694,
+      "n": 20.0,
+      "win_rate": 0.1,
+      "profit_factor": 0.061779910776761315
+    },
+    "min_trades_constraint": 5,
+    "best": {
+      "objective": 0.4860049999999999,
+      "allow": 1.45,
+      "reduce": 1.2,
+      "metrics": {
+        "pnl_sum": 0.4895049999999999,
+        "n": 7.0,
+        "win_rate": 0.2857142857142857,
+        "profit_factor": 1.5771709127696727
+      }
+    },
+    "top": [
+      {
+        "objective": 0.4860049999999999,
+        "allow": 1.45,
+        "reduce": 1.2,
+        "metrics": {
+          "pnl_sum": 0.4895049999999999,
+          "n": 7.0,
+          "win_rate": 0.2857142857142857,
+          "profit_factor": 1.5771709127696727
+        }
+      },
+      {
+        "objective": 0.4860049999999999,
+        "allow": 1.5,
+        "reduce": 1.2,
+        "metrics": {
+          "pnl_sum": 0.4895049999999999,
+          "n": 7.0,
+          "win_rate": 0.2857142857142857,
+          "profit_factor": 1.5771709127696727
+        }
+      },
+      {
+        "objective": 0.4377174999999999,
+        "allow": 1.45,
+        "reduce": 1.15,
+        "metrics": {
+          "pnl_sum": 0.44171749999999993,
+          "n": 8.0,
+          "win_rate": 0.25,
+          "profit_factor": 1.493044133905794
+        }
+      },
+      {
+        "objective": 0.4377174999999999,
+        "allow": 1.5,
+        "reduce": 1.15,
+        "metrics": {
+          "pnl_sum": 0.44171749999999993,
+          "n": 8.0,
+          "win_rate": 0.25,
+          "profit_factor": 1.493044133905794
+        }
+      },
+      {
+        "objective": 0.41932775,
+        "allow": 1.55,
+        "reduce": 1.2,
+        "metrics": {
+          "pnl_sum": 0.42282775,
+          "n": 7.0,
+          "win_rate": 0.2857142857142857,
+          "profit_factor": 1.4985523710929347
+        }
+      },
+      {
+        "objective": 0.41932775,
+        "allow": 1.6,
+        "reduce": 1.2,
+        "metrics": {
+          "pnl_sum": 0.42282775,
+          "n": 7.0,
+          "win_rate": 0.2857142857142857,
+          "profit_factor": 1.4985523710929347
+        }
+      },
+      {
+        "objective": 0.37104025,
+        "allow": 1.55,
+        "reduce": 1.15,
+        "metrics": {
+          "pnl_sum": 0.37504025,
+          "n": 8.0,
+          "win_rate": 0.25,
+          "profit_factor": 1.4186191292875254
+        }
+      },
+      {
+        "objective": 0.37104025,
+        "allow": 1.6,
+        "reduce": 1.15,
+        "metrics": {
+          "pnl_sum": 0.37504025,
+          "n": 8.0,
+          "win_rate": 0.25,
+          "profit_factor": 1.4186191292875254
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.45,
+        "reduce": 1.0,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.45,
+        "reduce": 1.05,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.45,
+        "reduce": 1.1,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.5,
+        "reduce": 1.0,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.5,
+        "reduce": 1.05,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.28159874999999984,
+        "allow": 1.5,
+        "reduce": 1.1,
+        "metrics": {
+          "pnl_sum": 0.28659874999999985,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2726870087051376
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.55,
+        "reduce": 1.0,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.55,
+        "reduce": 1.05,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.55,
+        "reduce": 1.1,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.6,
+        "reduce": 1.0,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.6,
+        "reduce": 1.05,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      },
+      {
+        "objective": 0.21492149999999993,
+        "allow": 1.6,
+        "reduce": 1.1,
+        "metrics": {
+          "pnl_sum": 0.21992149999999994,
+          "n": 10.0,
+          "win_rate": 0.2,
+          "profit_factor": 1.2092463277838683
+        }
+      }
+    ]
+  }
+}
