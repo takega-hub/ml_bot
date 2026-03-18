@@ -68,6 +68,11 @@
 ```text
 /tool get_trade_history {"limit":10}
 /tool update_risk_settings {"request_id":"req_1742123001","updates":{"base_order_usd":20}}
+/tool get_logs_tail {"log_type":"errors","lines":200}
+/tool get_ml_settings {}
+/tool update_ml_settings {"request_id":"req_1742123003_ml","updates":{"confidence_threshold":0.33,"decision_engine_enabled":true}}
+/tool list_docs {}
+/tool read_doc {"filename":"MAIN_AI_AGENT_USER_GUIDE.md"}
 /tool apply_research_experiment {"request_id":"req_1742123002","experiment_id":"exp_123"}
 ```
 
@@ -165,9 +170,36 @@ req_1742123555123_risk
 ## 6.3 Управление риском и боевые действия
 
 - `update_risk_settings` (high)
+- `update_ml_settings` (high)
 - `apply_research_experiment` (critical)
 - `stop_bot` (critical)
 - `emergency_stop_all` (critical)
+
+## 6.4 Настройки, логи и документы
+
+- `list_api_routes` — список доступных API-роутов (для навигации по функциям)
+- `get_settings_snapshot` — сводка настроек (`/api/settings`)
+- `get_risk_snapshot` — текущие risk-настройки (`/api/risk`)
+- `get_ml_settings` — текущие ML-настройки (`/api/ml`)
+- `get_logs_tail` — хвост логов (`bot|trades|signals|errors|ai`)
+- `get_tool_execution_log` — аудит вызовов инструментов чат-агента
+- `list_docs` — список файлов в `docs/`
+- `read_doc` — чтение документа из `docs/`
+- `list_log_files` — список файлов в `logs/`
+- `read_log_tail` — хвост конкретного файла из `logs/`
+
+## 6.5 Модели и оптимизация
+
+- `get_models_overview` — активные модели по символам (single/mtf)
+- `get_models_for_symbol` — список моделей/статистики по символу
+- `apply_best_model_for_symbol` (high) — применить лучшую MTF-комбинацию
+- `apply_model_for_symbol` (high) — применить конкретную модель по имени
+- `cleanup_old_inactive_models` — чистка старых неактивных моделей
+- `test_model_background` — тест модели в фоне (single/mtf)
+- `retrain_models` (critical) — переобучение (в фоне, ресурсоёмко)
+- `run_strategy_optimization` (critical) — оптимизация стратегий (в фоне, ресурсоёмко)
+- `get_latest_optimization_results` — последний отчёт оптимизации
+- `get_latest_optimization_chart_info` — информация о последнем графике оптимизации
 
 ---
 

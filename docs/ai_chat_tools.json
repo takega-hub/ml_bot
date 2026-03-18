@@ -421,6 +421,388 @@
       "preconditions": [
         "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
       ]
+    },
+    {
+      "name": "list_api_routes",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/internal/routes",
+      "goal": "Получить список доступных API-эндпоинтов для навигации по функциям бота.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_settings_snapshot",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/settings",
+      "goal": "Получить сводку текущих настроек (символы, плечо, базовые пороги).",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_risk_snapshot",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/risk",
+      "goal": "Получить текущие risk-настройки.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_ml_settings",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/ml",
+      "goal": "Получить текущие ML-настройки (пороги, режимы, decision engine).",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "update_ml_settings",
+      "risk_tier": "high",
+      "method": "PUT",
+      "endpoint": "/api/ml",
+      "goal": "Обновить whitelisted ML-настройки (частично).",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "updates"
+        ],
+        "properties": {
+          "updates": {
+            "type": "object",
+            "properties": {
+              "use_mtf_strategy": { "type": "boolean" },
+              "atr_filter_enabled": { "type": "boolean" },
+              "pullback_enabled": { "type": "boolean" },
+              "pullback_enter_on_continuation": { "type": "boolean" },
+              "follow_btc_filter_enabled": { "type": "boolean" },
+              "auto_optimize_strategies": { "type": "boolean" },
+              "use_fixed_sl_from_risk": { "type": "boolean" },
+              "ai_entry_confirmation_enabled": { "type": "boolean" },
+              "ai_fallback_force_enabled": { "type": "boolean" },
+              "decision_engine_enabled": { "type": "boolean" },
+              "mtf_confidence_threshold_1h": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "mtf_confidence_threshold_15m": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "confidence_threshold": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "min_confidence_for_trade": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "follow_btc_override_confidence": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "ai_fallback_spread_reduce_pct": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "ai_fallback_spread_veto_pct": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "ai_fallback_min_depth_usd_5": { "type": "number", "minimum": 0 },
+              "ai_fallback_imbalance_abs_reduce": { "type": "number", "minimum": 0, "maximum": 5.0 },
+              "ai_fallback_orderflow_ratio_low": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "ai_fallback_orderflow_ratio_high": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_allow_score": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_reduce_score": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_ml_confidence": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_mtf_alignment": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_atr_regime": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_sr_proximity": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_trend_slope": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_w_history_edge": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_atr_prefer_min_pct": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "decision_engine_atr_prefer_max_pct": { "type": "number", "minimum": 0, "maximum": 10.0 },
+              "pullback_limit_roll_min_requote_pct": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "pullback_limit_roll_conf_drop_pct": { "type": "number", "minimum": 0, "maximum": 1.0 },
+              "mtf_alignment_mode": { "type": "string" },
+              "auto_optimize_day": { "type": "string" },
+              "auto_optimize_hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+              "decision_engine_mode": { "type": "string" },
+              "ai_entry_confirmation_mode": { "type": "string" },
+              "pullback_entry_mode": { "type": "string" }
+            },
+            "additionalProperties": false,
+            "minProperties": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Сначала выполнить get_bot_status и get_ml_settings",
+        "Показать diff до/после и получить подтверждение"
+      ]
+    },
+    {
+      "name": "get_logs_tail",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/logs",
+      "goal": "Получить хвост логов для диагностики (bot/trades/signals/errors/ai).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "log_type": {
+            "type": "string",
+            "enum": ["bot", "trades", "signals", "errors", "ai"]
+          },
+          "lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_tool_execution_log",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/ai/chat/tool_execution_log",
+      "goal": "Получить аудит выполнения инструментов чат-агента.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "event_type": { "type": "string" },
+          "tool_name": { "type": "string" },
+          "risk_tier": { "type": "string" },
+          "ok": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_docs",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/internal/docs/list",
+      "goal": "Получить список документов в папке docs/.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_doc",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/internal/docs/read",
+      "goal": "Прочитать документ из папки docs/ для анализа и обновлений.",
+      "input_schema": {
+        "type": "object",
+        "required": ["filename"],
+        "properties": {
+          "filename": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,200}\\.(md|json|txt)$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_log_files",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/internal/logs/list",
+      "goal": "Получить список файлов в папке logs/.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_log_tail",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/internal/logs/tail",
+      "goal": "Прочитать хвост конкретного файла логов для диагностики.",
+      "input_schema": {
+        "type": "object",
+        "required": ["filename"],
+        "properties": {
+          "filename": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]{1,200}\\.(log|jsonl|txt)$"
+          },
+          "lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_models_overview",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/models",
+      "goal": "Получить обзор активных моделей по символам (single/mtf).",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_models_for_symbol",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/models/{symbol}",
+      "goal": "Получить список моделей и статистику для символа.",
+      "input_schema": {
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+          "symbol": { "type": "string", "pattern": "^[A-Z0-9]{5,20}$" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "apply_best_model_for_symbol",
+      "risk_tier": "high",
+      "method": "POST",
+      "endpoint": "/api/models/{symbol}/apply_best",
+      "goal": "Применить лучшую MTF комбинацию моделей для символа.",
+      "input_schema": {
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+          "symbol": { "type": "string", "pattern": "^[A-Z0-9]{5,20}$" }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Сначала выполнить get_models_for_symbol",
+        "Показать ожидаемый эффект и получить подтверждение"
+      ]
+    },
+    {
+      "name": "apply_model_for_symbol",
+      "risk_tier": "high",
+      "method": "POST",
+      "endpoint": "/api/models/{symbol}/apply",
+      "goal": "Применить выбранную модель (single/mtf) для символа.",
+      "input_schema": {
+        "type": "object",
+        "required": ["symbol", "mode"],
+        "properties": {
+          "symbol": { "type": "string", "pattern": "^[A-Z0-9]{5,20}$" },
+          "mode": { "type": "string", "enum": ["single", "mtf"] },
+          "model_name": { "type": "string" },
+          "model_1h_name": { "type": "string" },
+          "model_15m_name": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Сначала выполнить get_models_for_symbol",
+        "Показать diff модели и получить подтверждение"
+      ]
+    },
+    {
+      "name": "cleanup_old_inactive_models",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/models/cleanup_old_inactive",
+      "goal": "Удалить старые неактивные модели, чтобы освободить место.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "test_model_background",
+      "risk_tier": "medium",
+      "method": "POST",
+      "endpoint": "/api/models/test",
+      "goal": "Запустить бэкграунд тест выбранной модели.",
+      "input_schema": {
+        "type": "object",
+        "required": ["symbol", "mode"],
+        "properties": {
+          "symbol": { "type": "string", "pattern": "^[A-Z0-9]{5,20}$" },
+          "mode": { "type": "string", "enum": ["single", "mtf"] },
+          "model_name": { "type": "string" },
+          "model_1h_name": { "type": "string" },
+          "model_15m_name": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "retrain_models",
+      "risk_tier": "critical",
+      "method": "POST",
+      "endpoint": "/api/models/retrain",
+      "goal": "Запустить переобучение моделей (ресурсоёмко).",
+      "input_schema": {
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+          "symbol": { "type": "string", "pattern": "^[A-Z0-9]{5,20}$" }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
+      ]
+    },
+    {
+      "name": "run_strategy_optimization",
+      "risk_tier": "critical",
+      "method": "POST",
+      "endpoint": "/api/optimization/run",
+      "goal": "Запустить оптимизацию стратегий (ресурсоёмко).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "symbols_csv": { "type": "string" },
+          "days": { "type": "integer", "minimum": 1, "maximum": 3650 },
+          "skip_training": { "type": "boolean" },
+          "skip_comparison": { "type": "boolean" },
+          "skip_mtf": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      },
+      "preconditions": [
+        "Получить явное подтверждение фразой ПОДТВЕРЖДАЮ"
+      ]
+    },
+    {
+      "name": "get_latest_optimization_results",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/optimization/latest",
+      "goal": "Получить последние результаты оптимизации стратегий.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_latest_optimization_chart_info",
+      "risk_tier": "low",
+      "method": "GET",
+      "endpoint": "/api/optimization/chart",
+      "goal": "Получить информацию о последнем графике сравнения стратегий.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
     }
   ],
   "orchestration_examples": [

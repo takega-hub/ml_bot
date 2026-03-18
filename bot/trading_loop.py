@@ -1622,6 +1622,11 @@ class TradingLoop:
                     if wait_until.tzinfo is None:
                         wait_until = wait_until.tz_localize("UTC")
                     ok, detail = self._eval_tp_reentry(symbol, guard, df_for_strategy, signal.action)
+                    if isinstance(detail, str) and detail.startswith("tp_reentry_eval_error:"):
+                        self.state.tp_reentry_record_allow(symbol, detail)
+                        logger.warning(f"[{symbol}] ⚠️ TP reentry eval error (fail-open): {detail}")
+                        self.state.clear_tp_reentry_guard(symbol)
+                        guard = None
                     if now_utc < wait_until:
                         self.state.tp_reentry_record_skip(symbol, f"tp_reentry_wait {detail}", True)
                         logger.info(

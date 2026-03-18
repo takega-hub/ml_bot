@@ -2712,12 +2712,31 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 if not changed:
                     return "Изменений не обнаружено."
                 return "; ".join(changed)
+            if tool_name == "update_ml_settings":
+                updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
+                before = _ml_to_dict(settings.ml_strategy)
+                changed = []
+                for k, v in updates.items():
+                    old_v = before.get(k)
+                    if old_v != v:
+                        changed.append(f"{k}: {old_v} -> {v}")
+                if not changed:
+                    return "Изменений не обнаружено."
+                return "; ".join(changed)
             if tool_name == "apply_research_experiment":
                 return f"Будет применён эксперимент {arguments.get('experiment_id')} в рабочую стратегию."
             if tool_name == "stop_bot":
                 return "Будет остановлена торговля бота."
             if tool_name == "emergency_stop_all":
                 return "Бот будет остановлен, открытые позиции будут закрыты."
+            if tool_name == "apply_best_model_for_symbol":
+                return f"Будет применена лучшая MTF комбинация моделей для {arguments.get('symbol')}."
+            if tool_name == "apply_model_for_symbol":
+                return f"Будет применена модель для {arguments.get('symbol')} (mode={arguments.get('mode')})."
+            if tool_name == "retrain_models":
+                return f"Будет запущено переобучение моделей для {arguments.get('symbol')}."
+            if tool_name == "run_strategy_optimization":
+                return "Будет запущена оптимизация стратегий."
             return f"Будет выполнено действие {tool_name}."
 
         async def _run_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -2730,6 +2749,26 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     limit = int(arguments.get("limit") or 50)
                     limit = max(1, min(200, limit))
                     return {"ok": True, "result": get_history_trades(limit=limit)}
+                if tool_name == "list_api_routes":
+                    routes: List[Dict[str, Any]] = []
+                    for r in getattr(app, "routes", []) or []:
+                        path = getattr(r, "path", None)
+                        methods = getattr(r, "methods", None)
+                        name = getattr(r, "name", None)
+                        if not path:
+                            continue
+                        m = []
+                        if isinstance(methods, (set, list, tuple)):
+                            m = sorted([str(x) for x in methods if x])
+                        routes.append({"path": str(path), "methods": m, "name": str(name) if name else None})
+                    routes = sorted(routes, key=lambda x: (x.get("path") or ""))
+                    return {"ok": True, "result": {"routes": routes, "count": len(routes)}}
+                if tool_name == "get_settings_snapshot":
+                    return {"ok": True, "result": get_settings()}
+                if tool_name == "get_risk_snapshot":
+                    return {"ok": True, "result": get_risk()}
+                if tool_name == "get_ml_settings":
+                    return {"ok": True, "result": get_ml()}
                 if tool_name == "get_ai_research_status":
                     return {"ok": True, "result": get_research_status()}
                 if tool_name == "get_experiment_health":
@@ -2789,6 +2828,353 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 if tool_name == "update_risk_settings":
                     updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
                     return {"ok": True, "result": put_risk(updates)}
+                if tool_name == "update_ml_settings":
+                    updates = arguments.get("updates") if isinstance(arguments.get("updates"), dict) else {}
+                    return {"ok": True, "result": put_ml(updates)}
+                if tool_name == "get_logs_tail":
+                    log_type = str(arguments.get("log_type") or "bot").strip().lower() or "bot"
+                    lines = int(arguments.get("lines") or 200)
+                    lines = max(1, min(500, lines))
+                    return {"ok": True, "result": get_logs(log_type=log_type, lines=lines)}
+                if tool_name == "get_tool_execution_log":
+                    n = max(1, min(500, int(arguments.get("limit") or 50)))
+                    path = PROJECT_ROOT / "logs" / "tool_execution_log.jsonl"
+                    if not path.exists():
+                        return {"ok": True, "result": {"events": [], "path": str(path), "limit": n}}
+                    rows: List[Dict[str, Any]] = []
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                        et = str(arguments.get("event_type") or "").strip().lower()
+                        tn = str(arguments.get("tool_name") or "").strip().lower()
+                        rt = str(arguments.get("risk_tier") or "").strip().lower()
+                        ok_filter = arguments.get("ok")
+                        ok_present = isinstance(ok_filter, bool)
+                        for line in reversed(lines):
+                            s = line.strip()
+                            if not s:
+                                continue
+                            try:
+                                rec = json.loads(s)
+                            except Exception:
+                                continue
+                            if not isinstance(rec, dict):
+                                continue
+                            if et and str(rec.get("event_type") or "").strip().lower() != et:
+                                continue
+                            if tn and str(rec.get("tool_name") or "").strip().lower() != tn:
+                                continue
+                            if rt and str(rec.get("risk_tier") or "").strip().lower() != rt:
+                                continue
+                            if ok_present and bool(rec.get("ok")) != bool(ok_filter):
+                                continue
+                            rows.append(rec)
+                            if len(rows) >= n:
+                                break
+                    except Exception as e:
+                        return {"ok": False, "error": f"Failed to read tool execution log: {e}"}
+                    return {
+                        "ok": True,
+                        "result": {
+                            "events": rows,
+                            "path": str(path),
+                            "limit": n,
+                            "filters": {
+                                "event_type": arguments.get("event_type"),
+                                "tool_name": arguments.get("tool_name"),
+                                "risk_tier": arguments.get("risk_tier"),
+                                "ok": arguments.get("ok"),
+                            },
+                        },
+                    }
+                if tool_name == "list_docs":
+                    docs_dir = PROJECT_ROOT / "docs"
+                    if not docs_dir.exists():
+                        return {"ok": True, "result": {"files": [], "path": str(docs_dir)}}
+                    files = []
+                    for p in docs_dir.iterdir():
+                        if p.is_file():
+                            files.append(p.name)
+                    files = sorted(files)
+                    return {"ok": True, "result": {"files": files, "path": str(docs_dir)}}
+                if tool_name == "read_doc":
+                    filename = str(arguments.get("filename") or "").strip()
+                    docs_dir = PROJECT_ROOT / "docs"
+                    base = docs_dir.resolve()
+                    target = (docs_dir / filename).resolve()
+                    if base != target and base not in target.parents:
+                        return {"ok": False, "error": "Invalid path"}
+                    if not target.exists() or not target.is_file():
+                        return {"ok": False, "error": f"File not found: {filename}"}
+                    lines_out: List[str] = []
+                    truncated = False
+                    try:
+                        with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                            for i, line in enumerate(f):
+                                if i >= 200:
+                                    truncated = True
+                                    break
+                                lines_out.append(line.rstrip("\n"))
+                    except Exception as e:
+                        return {"ok": False, "error": str(e)}
+                    return {
+                        "ok": True,
+                        "result": {
+                            "filename": filename,
+                            "path": str(target),
+                            "lines": lines_out,
+                            "truncated": truncated,
+                        },
+                    }
+                if tool_name == "list_log_files":
+                    logs_dir = PROJECT_ROOT / "logs"
+                    if not logs_dir.exists():
+                        return {"ok": True, "result": {"files": [], "path": str(logs_dir)}}
+                    files = []
+                    for p in logs_dir.iterdir():
+                        if p.is_file():
+                            files.append(p.name)
+                    files = sorted(files)
+                    return {"ok": True, "result": {"files": files, "path": str(logs_dir)}}
+                if tool_name == "read_log_tail":
+                    filename = str(arguments.get("filename") or "").strip()
+                    logs_dir = PROJECT_ROOT / "logs"
+                    base = logs_dir.resolve()
+                    target = (logs_dir / filename).resolve()
+                    if base != target and base not in target.parents:
+                        return {"ok": False, "error": "Invalid path"}
+                    if not target.exists() or not target.is_file():
+                        return {"ok": False, "error": f"File not found: {filename}"}
+                    n = int(arguments.get("lines") or 200)
+                    n = max(1, min(1000, n))
+                    try:
+                        with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                            raw = f.readlines()
+                        last = raw[-n:] if len(raw) > n else raw
+                        return {
+                            "ok": True,
+                            "result": {
+                                "filename": filename,
+                                "path": str(target),
+                                "lines": [l.rstrip("\n") for l in last],
+                            },
+                        }
+                    except Exception as e:
+                        return {"ok": False, "error": str(e)}
+                if tool_name == "get_models_overview":
+                    return {"ok": True, "result": get_models_list()}
+                if tool_name == "get_models_for_symbol":
+                    sym = str(arguments.get("symbol") or "").strip().upper()
+                    return {"ok": True, "result": get_models_for_symbol(sym)}
+                if tool_name == "apply_best_model_for_symbol":
+                    sym = str(arguments.get("symbol") or "").strip().upper()
+                    return {"ok": True, "result": post_apply_best_mtf(sym)}
+                if tool_name == "apply_model_for_symbol":
+                    sym = str(arguments.get("symbol") or "").strip().upper()
+                    mode = str(arguments.get("mode") or "single").strip().lower()
+                    model_name = str(arguments.get("model_name") or "").strip()
+                    model_1h_name = str(arguments.get("model_1h_name") or "").strip()
+                    model_15m_name = str(arguments.get("model_15m_name") or "").strip()
+                    inventory = get_models_for_symbol(sym)
+                    models = inventory.get("models") if isinstance(inventory, dict) else []
+                    if not isinstance(models, list):
+                        models = []
+                    def _find_path_by_name(name: str) -> Optional[str]:
+                        if not name:
+                            return None
+                        for row in models:
+                            if not isinstance(row, dict):
+                                continue
+                            if str(row.get("name") or "") == name:
+                                p = row.get("path")
+                                return str(p) if isinstance(p, str) and p.strip() else None
+                        for row in models:
+                            if not isinstance(row, dict):
+                                continue
+                            if str(row.get("name") or "").lower() == name.lower():
+                                p = row.get("path")
+                                return str(p) if isinstance(p, str) and p.strip() else None
+                        return None
+                    if mode == "mtf":
+                        p1h = _find_path_by_name(model_1h_name)
+                        p15m = _find_path_by_name(model_15m_name)
+                        if not p1h or not p15m:
+                            return {"ok": False, "error": "MTF requires model_1h_name and model_15m_name from get_models_for_symbol"}
+                        body = ApplyModelBody(mode="mtf", model_1h_path=p1h, model_15m_path=p15m)
+                        return {"ok": True, "result": post_apply_model(sym, body)}
+                    p = _find_path_by_name(model_name)
+                    if not p:
+                        return {"ok": False, "error": "Single mode requires model_name from get_models_for_symbol"}
+                    body = ApplyModelBody(mode="single", model_path=p)
+                    return {"ok": True, "result": post_apply_model(sym, body)}
+                if tool_name == "cleanup_old_inactive_models":
+                    return {"ok": True, "result": post_cleanup_old_inactive_models(ModelsCleanupBody())}
+                if tool_name == "test_model_background":
+                    import threading
+                    sym = str(arguments.get("symbol") or "").strip().upper()
+                    mode = str(arguments.get("mode") or "single").strip().lower()
+                    model_name = str(arguments.get("model_name") or "").strip()
+                    model_1h_name = str(arguments.get("model_1h_name") or "").strip()
+                    model_15m_name = str(arguments.get("model_15m_name") or "").strip()
+                    days = 14
+                    if not model_manager:
+                        return {"ok": False, "error": "Model manager not available"}
+                    inventory = get_models_for_symbol(sym)
+                    models = inventory.get("models") if isinstance(inventory, dict) else []
+                    if not isinstance(models, list):
+                        models = []
+                    def _find_path_by_name(name: str) -> Optional[str]:
+                        if not name:
+                            return None
+                        for row in models:
+                            if not isinstance(row, dict):
+                                continue
+                            if str(row.get("name") or "") == name:
+                                p = row.get("path")
+                                return str(p) if isinstance(p, str) and p.strip() else None
+                        for row in models:
+                            if not isinstance(row, dict):
+                                continue
+                            if str(row.get("name") or "").lower() == name.lower():
+                                p = row.get("path")
+                                return str(p) if isinstance(p, str) and p.strip() else None
+                        return None
+                    paths: List[str] = []
+                    if mode == "mtf":
+                        p1h = _find_path_by_name(model_1h_name)
+                        p15m = _find_path_by_name(model_15m_name)
+                        if not p1h or not p15m:
+                            return {"ok": False, "error": "MTF requires model_1h_name and model_15m_name from get_models_for_symbol"}
+                        paths = [p1h, p15m]
+                    else:
+                        p = _find_path_by_name(model_name) if model_name else state.symbol_models.get(sym)
+                        if not p:
+                            return {"ok": False, "error": "Single mode requires model_name or active model for symbol"}
+                        paths = [str(p)]
+                    def _run_test():
+                        try:
+                            if tg_bot:
+                                _send_telegram_sync(f"🧪 Started testing model(s) for {sym}...")
+                            state.add_notification(f"Started testing {sym}", "info")
+                            for mp in paths:
+                                results = model_manager.test_model(mp, sym, days=days)
+                                if results:
+                                    model_manager.save_model_test_result(sym, mp, results)
+                            state.add_notification(f"Testing finished for {sym}", "success")
+                            if tg_bot:
+                                _send_telegram_sync(f"✅ Testing finished for {sym}")
+                        except Exception as e:
+                            logger.error(f"Error in background test for {sym}: {e}")
+                            if tg_bot:
+                                _send_telegram_sync(f"❌ Testing failed for {sym}: {e}")
+                            state.add_notification(f"Testing failed for {sym}", "error")
+                    threading.Thread(target=_run_test, daemon=True).start()
+                    return {"ok": True, "result": {"ok": True, "symbol": sym, "models": paths, "message": "Test started in background"}}
+                if tool_name == "retrain_models":
+                    import threading
+                    sym = str(arguments.get("symbol") or "").strip().upper()
+                    script = PROJECT_ROOT / "retrain_ml_optimized.py"
+                    if not script.exists():
+                        return {"ok": False, "error": "retrain_ml_optimized.py not found"}
+                    def _run_retrain_task():
+                        try:
+                            if tg_bot:
+                                _send_telegram_sync(f"🔄 Retraining started for {sym} via Chat Agent...")
+                            state.add_notification(f"Started retraining {sym}", "info")
+                            result = subprocess.run(
+                                [sys.executable, str(script), "--symbol", sym],
+                                cwd=str(PROJECT_ROOT),
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                            )
+                            if result.returncode == 0:
+                                logger.info(f"Retrain finished for {sym}")
+                                if tg_bot:
+                                    _send_telegram_sync(f"✅ Retraining finished for {sym} successfully.")
+                                state.add_notification(f"Retraining finished for {sym}", "success")
+                            else:
+                                logger.error(f"Retrain failed for {sym}: {result.stderr}")
+                                if tg_bot:
+                                    err_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                                    _send_telegram_sync(f"❌ Retraining failed for {sym}.\nError: {err_msg}")
+                                state.add_notification(f"Retraining failed for {sym}", "error")
+                        except Exception as e:
+                            logger.error(f"Retrain exception: {e}")
+                            if tg_bot:
+                                _send_telegram_sync(f"❌ Retraining error for {sym}: {e}")
+                            state.add_notification(f"Retraining error for {sym}", "error")
+                    threading.Thread(target=_run_retrain_task, daemon=True).start()
+                    return {"ok": True, "result": {"ok": True, "symbol": sym, "message": "Retrain started in background"}}
+                if tool_name == "run_strategy_optimization":
+                    import threading
+                    script = PROJECT_ROOT / "auto_strategy_optimizer.py"
+                    if not script.exists():
+                        return {"ok": False, "error": "auto_strategy_optimizer.py not found"}
+                    symbols_csv = str(arguments.get("symbols_csv") or "").strip()
+                    days = int(arguments.get("days") or 30)
+                    days = max(1, min(3650, days))
+                    skip_training = bool(arguments.get("skip_training", False))
+                    skip_comparison = bool(arguments.get("skip_comparison", False))
+                    skip_mtf = bool(arguments.get("skip_mtf", False))
+                    def _run_optimizer_task():
+                        try:
+                            if tg_bot:
+                                _send_telegram_sync("🚀 Optimization started via Chat Agent...")
+                            state.add_notification("Started strategy optimization", "info")
+                            cmd = [sys.executable, str(script), "--days", str(days)]
+                            if symbols_csv:
+                                cmd.extend(["--symbols", symbols_csv])
+                            if skip_training:
+                                cmd.append("--skip-training")
+                            if skip_comparison:
+                                cmd.append("--skip-comparison")
+                            if skip_mtf:
+                                cmd.append("--skip-mtf-testing")
+                            result = subprocess.run(
+                                cmd,
+                                cwd=str(PROJECT_ROOT),
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                            )
+                            if result.returncode == 0:
+                                logger.info("Optimization finished successfully")
+                                if tg_bot:
+                                    _send_telegram_sync("✅ Strategy optimization completed successfully.")
+                                state.add_notification("Optimization completed", "success")
+                            else:
+                                logger.error(f"Optimization failed: {result.stderr}")
+                                if tg_bot:
+                                    err_msg = result.stderr[:200] if result.stderr else "Unknown error"
+                                    _send_telegram_sync(f"❌ Optimization failed.\nError: {err_msg}")
+                                state.add_notification("Optimization failed", "error")
+                        except Exception as e:
+                            logger.error(f"Optimization exception: {e}")
+                            state.add_notification("Optimization error", "error")
+                    threading.Thread(target=_run_optimizer_task, daemon=True).start()
+                    return {"ok": True, "result": {"ok": True, "message": "Optimization started in background"}}
+                if tool_name == "get_latest_optimization_results":
+                    return {"ok": True, "result": get_latest_optimization()}
+                if tool_name == "get_latest_optimization_chart_info":
+                    opt_dir = PROJECT_ROOT / "optimization_results"
+                    if not opt_dir.exists():
+                        return {"ok": True, "result": {"found": False}}
+                    files = sorted(opt_dir.glob("comparison_chart_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if not files:
+                        return {"ok": True, "result": {"found": False}}
+                    p = files[0]
+                    return {
+                        "ok": True,
+                        "result": {
+                            "found": True,
+                            "filename": p.name,
+                            "path": str(p),
+                            "timestamp": p.stat().st_mtime,
+                        },
+                    }
                 if tool_name == "apply_research_experiment":
                     experiment_id = str(arguments.get("experiment_id") or "")
                     return {"ok": True, "result": await post_apply_experiment(ApplyExperimentBody(experiment_id=experiment_id))}

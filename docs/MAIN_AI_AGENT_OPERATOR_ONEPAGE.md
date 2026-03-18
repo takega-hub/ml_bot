@@ -18,6 +18,8 @@
    - `/market BTCUSDT`
 5. Проверить качество последних сделок:
    - `/riskcheck`
+6. Если есть ошибки/аномалии — сразу снять хвост ошибок:
+   - `/tool get_logs_tail {"log_type":"errors","lines":200}`
 
 Если есть pending из прошлой сессии — сначала `/cancel`.
 
@@ -142,6 +144,8 @@
 
 /tool get_trade_history {"limit":10}
 /tool update_risk_settings {"request_id":"req_1742","updates":{"base_order_usd":20}}
+/tool get_logs_tail {"log_type":"errors","lines":200}
+/tool get_ml_settings {}
 ```
 
 ---
