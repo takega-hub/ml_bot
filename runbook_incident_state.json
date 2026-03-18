@@ -1,0 +1,15 @@
+{
+  "incidents": [
+    {
+      "timestamp": "2026-03-16T12:10:10.755177+00:00",
+      "level": "high",
+      "symbol": "BTCUSDT",
+      "details": {
+        "week_pnl": 0.0,
+        "negatives_last10": 9,
+        "consecutive_losses_last10": 4,
+        "total_pnl_last10": -5.4339159
+      }
+    }
+  ]
+}

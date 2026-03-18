@@ -1388,12 +1388,14 @@ REGIME_MEMORY:
         project_root = Path(__file__).resolve().parent.parent
         store = ExperimentStore(project_root / "experiments.json")
         experiments = store.list()
+        exp_by_id: Dict[str, Dict[str, Any]] = {}
         known_ids = set()
         for e in experiments:
             if isinstance(e, dict):
                 eid = e.get("id")
                 if isinstance(eid, str) and eid:
                     known_ids.add(eid)
+                    exp_by_id[eid] = e
 
         meta_dir = project_root / "experiment_meta"
         if meta_dir.exists():
@@ -1407,14 +1409,33 @@ REGIME_MEMORY:
                     if not isinstance(eid, str) or not eid:
                         continue
                     if eid in known_ids:
+                        target = exp_by_id.get(eid)
+                        if isinstance(target, dict):
+                            for k, v in rec.items():
+                                if k == "id":
+                                    continue
+                                if v in (None, "", [], {}):
+                                    continue
+                                cur = target.get(k)
+                                if cur in (None, "", [], {}):
+                                    target[k] = v
                         continue
                     rec["id"] = eid
                     experiments.append(rec)
                     known_ids.add(eid)
+                    exp_by_id[eid] = rec
                 except Exception:
                     continue
 
-        experiments.sort(key=lambda x: (x.get("created_at") is None, x.get("created_at", "")), reverse=True)
+        def _parse_iso(s: Any) -> datetime:
+            try:
+                if isinstance(s, str) and s:
+                    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+            except Exception:
+                pass
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+        experiments.sort(key=lambda x: _parse_iso(x.get("created_at")), reverse=True)
         return experiments
 
     def stop_research_experiment(self, experiment_id: str) -> Dict[str, Any]:

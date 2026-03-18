@@ -154,8 +154,16 @@ class ExperimentStore:
         return exp if isinstance(exp, dict) else None
 
     def list(self) -> List[Dict[str, Any]]:
-        experiments = list(self.read_all().values())
-        experiments.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        data = self.read_all()
+        experiments: List[Dict[str, Any]] = []
+        for experiment_id, exp in data.items():
+            if not isinstance(exp, dict):
+                continue
+            if not isinstance(exp.get("id"), str) or not str(exp.get("id") or "").strip():
+                exp = dict(exp)
+                exp["id"] = str(experiment_id)
+            experiments.append(exp)
+        experiments.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
         return experiments
 
 
