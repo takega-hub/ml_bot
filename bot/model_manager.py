@@ -260,6 +260,8 @@ class ModelManager:
         threshold = datetime.now() - timedelta(days=max(1, int(min_age_days)))
         deleted: list[str] = []
         candidates: list[str] = []
+        candidates_experiment: list[str] = []
+        candidates_non_experiment: list[str] = []
         skipped_active: list[str] = []
         skipped_young: list[str] = []
         failed: list[Dict[str, str]] = []
@@ -270,11 +272,16 @@ class ModelManager:
                 if model_path in active_set:
                     skipped_active.append(str(model_file.name))
                     continue
+                is_experiment_model = "__exp_" in model_file.stem.lower()
                 model_mtime = datetime.fromtimestamp(model_file.stat().st_mtime)
-                if model_mtime > threshold:
+                if (not is_experiment_model) and model_mtime > threshold:
                     skipped_young.append(str(model_file.name))
                     continue
                 candidates.append(str(model_file.name))
+                if is_experiment_model:
+                    candidates_experiment.append(str(model_file.name))
+                else:
+                    candidates_non_experiment.append(str(model_file.name))
                 if not dry_run:
                     model_file.unlink(missing_ok=True)
                     deleted.append(str(model_file.name))
@@ -285,8 +292,11 @@ class ModelManager:
             "ok": True,
             "dry_run": bool(dry_run),
             "min_age_days": max(1, int(min_age_days)),
+            "experiment_models_included": True,
             "candidate_count": len(candidates),
             "candidate_files": candidates,
+            "candidate_experiment_count": len(candidates_experiment),
+            "candidate_non_experiment_count": len(candidates_non_experiment),
             "deleted_count": len(deleted),
             "skipped_active_count": len(skipped_active),
             "skipped_young_count": len(skipped_young),

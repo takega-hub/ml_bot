@@ -1934,6 +1934,100 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    class LogsClearBody(BaseModel):
+        log_type: str = "bot"
+
+    def _truncate_rotating_handler_file(target_path: Path) -> bool:
+        try:
+            from logging.handlers import RotatingFileHandler
+        except Exception:
+            return False
+
+        try:
+            target_resolved = str(target_path.resolve())
+        except Exception:
+            target_resolved = str(target_path)
+
+        candidates = [logging.getLogger(), logging.getLogger("main")]
+        for lg in candidates:
+            for h in getattr(lg, "handlers", []) or []:
+                try:
+                    if not isinstance(h, RotatingFileHandler):
+                        continue
+                    base = getattr(h, "baseFilename", None)
+                    if not base:
+                        continue
+                    try:
+                        base_resolved = str(Path(base).resolve())
+                    except Exception:
+                        base_resolved = str(base)
+                    if base_resolved != target_resolved:
+                        continue
+                    h.acquire()
+                    try:
+                        if h.stream is None:
+                            h.stream = h._open()
+                        h.stream.seek(0)
+                        h.stream.truncate(0)
+                        h.stream.flush()
+                    finally:
+                        h.release()
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    def _clear_log_group(base_file: Path) -> Dict[str, Any]:
+        cleared: list[str] = []
+        failed: list[Dict[str, str]] = []
+
+        base_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if base_file.exists():
+                if not _truncate_rotating_handler_file(base_file):
+                    try:
+                        base_file.unlink(missing_ok=True)
+                        cleared.append(base_file.name)
+                    except Exception:
+                        with open(base_file, "w", encoding="utf-8"):
+                            pass
+                        cleared.append(base_file.name)
+                else:
+                    cleared.append(base_file.name)
+            else:
+                with open(base_file, "w", encoding="utf-8"):
+                    pass
+                cleared.append(base_file.name)
+        except Exception as e:
+            failed.append({"file": base_file.name, "error": str(e)})
+
+        for p in sorted(base_file.parent.glob(f"{base_file.name}.*")):
+            if not p.is_file():
+                continue
+            try:
+                p.unlink(missing_ok=True)
+                cleared.append(p.name)
+            except Exception as e:
+                failed.append({"file": p.name, "error": str(e)})
+
+        return {"cleared_files": cleared, "failed_files": failed}
+
+    @app.post("/api/logs/clear", dependencies=[Depends(verify_api_key)])
+    def post_clear_logs(body: LogsClearBody):
+        log_type = (body.log_type or "").strip().lower()
+        if log_type not in ("bot", "errors"):
+            raise HTTPException(status_code=400, detail="Only bot and errors logs can be cleared")
+
+        path_map = {"bot": "logs/bot.log", "errors": "logs/errors.log"}
+        base = PROJECT_ROOT / path_map[log_type]
+        result = _clear_log_group(base)
+        return {
+            "ok": len(result["failed_files"]) == 0,
+            "log_type": log_type,
+            **result,
+        }
+
     # --- Analytics: equity curve for PnL visualization ---
     @app.get("/api/analytics/equity_curve", dependencies=[Depends(verify_api_key)])
     def get_equity_curve():
