@@ -250,6 +250,8 @@ class RiskParams:
     # Параметры стоп-лосса и тейк-профита
     stop_loss_pct: float = 0.03  # 3% от входа (снижено с 10% для жесткого контроля рисков)
     take_profit_pct: float = 0.015  # 1.5% от входа (снижено для повышения вероятности исполнения)
+
+    use_take_profit: bool = True
     
     # Трейлинг стоп
     enable_trailing_stop: bool = True
@@ -1087,6 +1089,8 @@ def _load_risk_settings(settings: AppSettings) -> None:
             risk.stop_loss_pct = float(data["stop_loss_pct"])
         if "take_profit_pct" in data:
             risk.take_profit_pct = float(data["take_profit_pct"])
+        if "use_take_profit" in data:
+            risk.use_take_profit = bool(data["use_take_profit"])
         if "enable_trailing_stop" in data:
             risk.enable_trailing_stop = bool(data["enable_trailing_stop"])
         if "trailing_stop_activation_pct" in data:

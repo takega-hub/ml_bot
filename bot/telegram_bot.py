@@ -2414,7 +2414,8 @@ class TelegramBot:
             text += f"💰 Фиксированная сумма: ${risk.base_order_usd:.2f}\n"
             text += f"ℹ️ Используется меньшее значение\n"
             text += f"📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
-            text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n"
+            tp_suffix = "(ставим ордер TP на бирже)" if getattr(risk, "use_take_profit", True) else "(не ставим TP на бирже; выход по трейлингу/SL/логике)"
+            text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}% {tp_suffix}\n"
             text += f"💸 Комиссия (per side): {risk.fee_rate*100:.4f}%\n\n"
             text += (
                 f"🧭 Горизонт: mid TP≥{risk.mid_term_tp_pct*100:.2f}% | "
@@ -2449,6 +2450,7 @@ class TelegramBot:
             keyboard.extend([
                 [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
                 [InlineKeyboardButton(f"📈 TP: {risk.take_profit_pct*100:.2f}%", callback_data="edit_risk_take_profit_pct")],
+                [InlineKeyboardButton(f"🎯 TP ордер: {'✅' if getattr(risk, 'use_take_profit', True) else '❌'}", callback_data="toggle_risk_use_take_profit")],
                 [InlineKeyboardButton(f"💸 Комиссия: {risk.fee_rate*100:.4f}%", callback_data="edit_risk_fee_rate")],
                 [InlineKeyboardButton(f"🧭 Mid TP: {risk.mid_term_tp_pct*100:.2f}%", callback_data="edit_risk_mid_term_tp_pct")],
                 [InlineKeyboardButton(f"🧭 Long TP: {risk.long_term_tp_pct*100:.2f}%", callback_data="edit_risk_long_term_tp_pct")],
@@ -2581,7 +2583,9 @@ class TelegramBot:
         """Переключает булеву настройку риска"""
         risk = self.settings.risk
         
-        if setting_name == "enable_trailing_stop":
+        if setting_name == "use_take_profit":
+            risk.use_take_profit = not bool(getattr(risk, "use_take_profit", True))
+        elif setting_name == "enable_trailing_stop":
             risk.enable_trailing_stop = not risk.enable_trailing_stop
         elif setting_name == "enable_partial_close":
             risk.enable_partial_close = not risk.enable_partial_close
@@ -2763,6 +2767,7 @@ class TelegramBot:
                 "base_order_usd": self.settings.risk.base_order_usd,
                 "stop_loss_pct": self.settings.risk.stop_loss_pct,
                 "take_profit_pct": self.settings.risk.take_profit_pct,
+                "use_take_profit": bool(getattr(self.settings.risk, "use_take_profit", True)),
                 "enable_trailing_stop": self.settings.risk.enable_trailing_stop,
                 "trailing_stop_activation_pct": self.settings.risk.trailing_stop_activation_pct,
                 "trailing_stop_distance_pct": self.settings.risk.trailing_stop_distance_pct,
@@ -2963,7 +2968,8 @@ class TelegramBot:
         text += f"ℹ️ Используется меньшее значение\n"
         
         text += f"\n📉 Stop Loss: {risk.stop_loss_pct*100:.2f}%\n"
-        text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}%\n\n"
+        tp_suffix = "(ставим ордер TP на бирже)" if getattr(risk, "use_take_profit", True) else "(не ставим TP на бирже; выход по трейлингу/SL/логике)"
+        text += f"📈 Take Profit: {risk.take_profit_pct*100:.2f}% {tp_suffix}\n\n"
         text += f"💸 Комиссия (per side): {risk.fee_rate*100:.4f}%\n\n"
         text += (
             f"🧭 Горизонт: mid TP≥{risk.mid_term_tp_pct*100:.2f}% | "
@@ -2997,6 +3003,7 @@ class TelegramBot:
         keyboard.extend([
             [InlineKeyboardButton(f"📉 SL: {risk.stop_loss_pct*100:.2f}%", callback_data="edit_risk_stop_loss_pct")],
             [InlineKeyboardButton(f"📈 TP: {risk.take_profit_pct*100:.2f}%", callback_data="edit_risk_take_profit_pct")],
+            [InlineKeyboardButton(f"🎯 TP ордер: {'✅' if getattr(risk, 'use_take_profit', True) else '❌'}", callback_data="toggle_risk_use_take_profit")],
             [InlineKeyboardButton(f"💸 Комиссия: {risk.fee_rate*100:.4f}%", callback_data="edit_risk_fee_rate")],
             [InlineKeyboardButton(f"🧭 Mid TP: {risk.mid_term_tp_pct*100:.2f}%", callback_data="edit_risk_mid_term_tp_pct")],
             [InlineKeyboardButton(f"🧭 Long TP: {risk.long_term_tp_pct*100:.2f}%", callback_data="edit_risk_long_term_tp_pct")],

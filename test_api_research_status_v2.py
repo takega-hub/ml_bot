@@ -1,6 +1,12 @@
-from fastapi.testclient import TestClient
+import pytest
+import httpx
 
 from bot.api_server import create_app
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 class _DummyState:
@@ -15,7 +21,8 @@ class _DummySettings:
     leverage = 2
 
 
-def test_research_status_exposes_iteration_d_aliases(monkeypatch):
+@pytest.mark.anyio
+async def test_research_status_exposes_iteration_d_aliases(monkeypatch):
     experiment_payload = {
         "id": "exp_test_1",
         "symbol": "XRPUSDT",
@@ -65,6 +72,9 @@ def test_research_status_exposes_iteration_d_aliases(monkeypatch):
         lambda self: [experiment_payload],
     )
 
+    monkeypatch.setenv("MOBILE_API_KEY", "")
+    monkeypatch.setenv("ALLOWED_USER_ID", "")
+
     app = create_app(
         state=_DummyState(),
         bybit_client=None,
@@ -74,8 +84,11 @@ def test_research_status_exposes_iteration_d_aliases(monkeypatch):
         tg_bot=None,
     )
 
-    with TestClient(app) as client:
-        response = client.get("/api/ai/research/status")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/ai/research/status")
     assert response.status_code == 200
     body = response.json()
     assert "experiments" in body and isinstance(body["experiments"], list)
@@ -86,7 +99,8 @@ def test_research_status_exposes_iteration_d_aliases(monkeypatch):
     assert exp["analysis_summary"] == "ok"
 
 
-def test_research_status_has_alias_keys_even_when_results_missing(monkeypatch):
+@pytest.mark.anyio
+async def test_research_status_has_alias_keys_even_when_results_missing(monkeypatch):
     experiment_payload = {
         "id": "exp_test_2",
         "symbol": "BTCUSDT",
@@ -100,6 +114,9 @@ def test_research_status_has_alias_keys_even_when_results_missing(monkeypatch):
         lambda self: [experiment_payload],
     )
 
+    monkeypatch.setenv("MOBILE_API_KEY", "")
+    monkeypatch.setenv("ALLOWED_USER_ID", "")
+
     app = create_app(
         state=_DummyState(),
         bybit_client=None,
@@ -109,8 +126,11 @@ def test_research_status_has_alias_keys_even_when_results_missing(monkeypatch):
         tg_bot=None,
     )
 
-    with TestClient(app) as client:
-        response = client.get("/api/ai/research/status")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/api/ai/research/status")
     assert response.status_code == 200
     exp = response.json()["experiments"][0]
     assert "oos_metrics" in exp

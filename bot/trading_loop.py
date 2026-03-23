@@ -47,6 +47,8 @@ class TradingLoop:
         # Кэш сигнала BTCUSDT для проверки направления других пар (обновляется каждые 5 минут)
         self._btc_signal_cache: Optional[Dict] = None
         self._btc_signal_cache_time: Optional[float] = None
+
+        self._tp_cleared_for_symbol = set()
         
         # Ожидающие сигналы для входа по откату (pullback)
         # Структура: {symbol: [{'signal': Signal, 'signal_time': datetime, 'signal_high': float, 'signal_low': float, 'bars_waited': int}, ...]}
@@ -2017,12 +2019,15 @@ class TradingLoop:
             logger.info(f"[{symbol}] ✅ Position size calculated: qty={qty:.6f}, placing order...")
             
             try:
+                tp_to_send = None
+                if not is_add and bool(getattr(self.settings.risk, "use_take_profit", True)):
+                    tp_to_send = signal_tp
                 resp = self.bybit.place_order(
                     symbol=symbol,
                     side=side,
                     qty=qty,
                     order_type="Market",
-                    take_profit=None if is_add else signal_tp,
+                    take_profit=tp_to_send,
                     stop_loss=None if is_add else signal_sl,
                 )
             except InvalidRequestError as e:
@@ -3707,6 +3712,23 @@ class TradingLoop:
             entry_price = float(position_info.get("avgPrice", 0))
             mark_price = float(position_info.get("markPrice", entry_price))
             trailing_stop = position_info.get("trailingStop")
+
+            if not bool(getattr(self.settings.risk, "use_take_profit", True)):
+                if symbol not in self._tp_cleared_for_symbol:
+                    try:
+                        existing_tp = position_info.get("takeProfit")
+                        if existing_tp:
+                            existing_tp_f = float(existing_tp)
+                            if existing_tp_f > 0:
+                                resp = await asyncio.to_thread(
+                                    self.bybit.set_trading_stop,
+                                    symbol=symbol,
+                                    take_profit=0.0,
+                                )
+                                if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
+                                    self._tp_cleared_for_symbol.add(symbol)
+                    except Exception:
+                        pass
             
             if not entry_price or not mark_price:
                 return
@@ -3717,21 +3739,24 @@ class TradingLoop:
             else:  # Sell
                 pnl_pct = ((entry_price - mark_price) / entry_price)
             
-            # Проверяем, нужно ли активировать трейлинг стоп
-            if pnl_pct >= self.settings.risk.trailing_stop_activation_pct and not trailing_stop:
-                # Активируем трейлинг стоп
-                trailing_pct = self.settings.risk.trailing_stop_distance_pct * 100  # Bybit принимает в %
+            try:
+                trailing_stop_val = float(trailing_stop) if trailing_stop not in (None, "", 0, "0") else 0.0
+            except Exception:
+                trailing_stop_val = 0.0
+
+            if pnl_pct >= self.settings.risk.trailing_stop_activation_pct and trailing_stop_val <= 0:
+                trailing_distance = mark_price * self.settings.risk.trailing_stop_distance_pct
                 
-                logger.info(f"Activating trailing stop for {symbol}: {trailing_pct}% (PnL: {pnl_pct*100:.2f}%)")
+                logger.info(f"Activating trailing stop for {symbol}: distance={trailing_distance:.6f} (PnL: {pnl_pct*100:.2f}%)")
                 resp = await asyncio.to_thread(
                     self.bybit.set_trading_stop,
                     symbol=symbol,
-                    trailing_stop=trailing_pct
+                    trailing_stop=trailing_distance
                 )
                 
                 if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                     await self.notifier.medium(
-                        f"📊 ТРЕЙЛИНГ СТОП АКТИВИРОВАН\n{symbol} | {trailing_pct}%\nТекущий PnL: +{pnl_pct*100:.2f}%"
+                        f"📊 ТРЕЙЛИНГ СТОП АКТИВИРОВАН\n{symbol} | distance={trailing_distance:.2f}\nТекущий PnL: +{pnl_pct*100:.2f}%"
                     )
         
         except Exception as e:
@@ -3757,6 +3782,10 @@ class TradingLoop:
             entry_price = float(position_info.get("avgPrice", 0))
             mark_price = float(position_info.get("markPrice", entry_price))
             take_profit = position_info.get("takeProfit")
+            if not take_profit:
+                local_pos = self.state.get_open_position(symbol)
+                if local_pos and local_pos.take_profit:
+                    take_profit = local_pos.take_profit
             
             if not entry_price or not mark_price or not take_profit:
                 return
@@ -3806,17 +3835,21 @@ class TradingLoop:
                         if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                             # Обновляем количество в локальной позиции, чтобы корректно считать PnL при полном закрытии
                             try:
+                                new_qty = None
                                 with self.state.lock:
-                                    local_pos = self.state.get_open_position(symbol)
+                                    local_pos = None
+                                    for trade in reversed(self.state.trades):
+                                        if trade.symbol == symbol and trade.status == "open":
+                                            local_pos = trade
+                                            break
                                     if local_pos:
-                                        # Уменьшаем размер позиции
                                         new_qty = local_pos.qty - close_qty
-                                        # Если округление привело к 0 или меньше (чего быть не должно при partial close), ставим минимум
-                                        if new_qty < 0: 
+                                        if new_qty < 0:
                                             new_qty = 0
                                         local_pos.qty = new_qty
-                                        self.state.save()
-                                        logger.info(f"Updated local position size for {symbol} after partial close: {new_qty}")
+                                if new_qty is not None:
+                                    self.state.save()
+                                    logger.info(f"Updated local position size for {symbol} after partial close: {new_qty}")
                             except Exception as e_update:
                                 logger.error(f"Error updating local position size: {e_update}")
 
