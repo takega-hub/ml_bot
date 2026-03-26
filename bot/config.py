@@ -372,6 +372,7 @@ class SymbolMLSettings:
     # Параметры для этой пары
     confidence_threshold: Optional[float] = None
     min_signal_strength: Optional[str] = None
+    leverage: Optional[int] = None
     
     def to_dict(self) -> Dict:
         """Преобразует настройки в словарь"""
@@ -386,6 +387,8 @@ class SymbolMLSettings:
             result["confidence_threshold"] = self.confidence_threshold
         if self.min_signal_strength is not None:
             result["min_signal_strength"] = self.min_signal_strength
+        if self.leverage is not None:
+            result["leverage"] = self.leverage
         return result
     
     @classmethod
@@ -398,6 +401,7 @@ class SymbolMLSettings:
             model_path=data.get("model_path", None),
             confidence_threshold=data.get("confidence_threshold", None),
             min_signal_strength=data.get("min_signal_strength", None),
+            leverage=data.get("leverage", None),
         )
 
 
@@ -455,6 +459,14 @@ class AppSettings:
         if self.primary_symbol not in available_symbols:
             self.primary_symbol = self.active_symbols[0]
     
+    def get_leverage_for_symbol(self, symbol: str) -> int:
+        symbol = symbol.upper()
+        if symbol in self.symbol_ml_settings:
+            pair_leverage = self.symbol_ml_settings[symbol].leverage
+            if pair_leverage is not None:
+                return pair_leverage
+        return self.leverage
+
     def get_ml_settings_for_symbol(self, symbol: str) -> SymbolMLSettings:
         """Получает настройки ML для конкретной пары"""
         symbol = symbol.upper()

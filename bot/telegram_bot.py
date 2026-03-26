@@ -202,8 +202,10 @@ class TelegramBot:
                                     mark_price = entry_price
                                 
                                 unrealised_pnl = safe_float(p.get("unrealisedPnl"), 0)
-                                leverage_str = p.get("leverage", str(self.settings.leverage))
-                                leverage = safe_float(leverage_str, self.settings.leverage)
+                                symbol_for_lev = p.get("symbol", "")
+                                default_lev = self.settings.get_leverage_for_symbol(symbol_for_lev)
+                                leverage_str = p.get("leverage", str(default_lev))
+                                leverage = safe_float(leverage_str, default_lev)
                                 
                                 # Получаем маржу (пробуем разные поля)
                                 margin = safe_float(p.get("positionMargin"), 0)
@@ -477,6 +479,23 @@ class TelegramBot:
             if res is None:
                 await query.answer("⚠️ Достигнут лимит в 5 пар!", show_alert=True)
             await self.show_pairs_settings(query)
+        elif query.data.startswith("edit_pair_leverage_"):
+            symbol = query.data.replace("edit_pair_leverage_", "")
+            user_id = query.from_user.id
+            if not hasattr(self, 'waiting_for_pair_leverage'):
+                self.waiting_for_pair_leverage = {}
+            self.waiting_for_pair_leverage[user_id] = symbol
+            
+            pair_leverage = self.settings.get_leverage_for_symbol(symbol)
+            text = (
+                f"⚙️ <b>Настройка плеча для {symbol}</b>\n\n"
+                f"Текущее значение: <b>{pair_leverage}x</b>\n\n"
+                f"Введите новое значение плеча (от 1 до 100):\n"
+                f"<i>(При изменении плеча будут автоматически пересчитаны уровни TP/SL для новых сделок)</i>"
+            )
+            keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="settings_pairs")]]
+            await self.safe_edit_message(query, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            await query.answer()
         elif query.data == "history_menu":
             await self.show_history_menu(query)
         elif query.data == "history_signals":
@@ -685,7 +704,12 @@ class TelegramBot:
                 else:
                     button_text += f" ❄️({hours_left:.1f}ч)"
             
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"toggle_{s}")])
+            pair_leverage = self.settings.get_leverage_for_symbol(s)
+            
+            keyboard.append([
+                InlineKeyboardButton(button_text, callback_data=f"toggle_{s}"),
+                InlineKeyboardButton(f"⚙️ Плечо {pair_leverage}x", callback_data=f"edit_pair_leverage_{s}")
+            ])
             
             # Если пара в cooldown, добавляем кнопку для снятия разморозки
             if cooldown_info and cooldown_info.get("active"):
@@ -989,6 +1013,11 @@ class TelegramBot:
         if user_id in self.waiting_for_risk_setting:
             setting_name = self.waiting_for_risk_setting.pop(user_id)
             await self.process_risk_setting_input(update, setting_name, text)
+            return
+        
+        if user_id in getattr(self, 'waiting_for_pair_leverage', {}):
+            symbol = self.waiting_for_pair_leverage.pop(user_id)
+            await self.process_pair_leverage_input(update, symbol, text)
             return
         
         if user_id in self.waiting_for_ml_setting:
@@ -2177,6 +2206,38 @@ class TelegramBot:
             ])
         )
     
+    async def process_pair_leverage_input(self, update: Update, symbol: str, text: str):
+        try:
+            value = int(text.strip())
+            if not (1 <= value <= 100):
+                await update.message.reply_text("❌ Значение должно быть от 1 до 100")
+                return
+            
+            ml_settings = self.settings.get_ml_settings_for_symbol(symbol)
+            ml_settings.leverage = value
+            self.settings.set_ml_settings_for_symbol(symbol, ml_settings)
+            
+            from bot.config import save_symbol_ml_settings
+            save_symbol_ml_settings(self.settings)
+            
+            if hasattr(self, 'trading_loop') and self.trading_loop:
+                asyncio.create_task(self.trading_loop.update_leverage_for_symbol(symbol, value))
+            
+            text_resp = (
+                f"✅ <b>Плечо для {symbol} обновлено на {value}x!</b>\n\n"
+                f"Новые сделки будут открываться с этим плечом.\n"
+                f"Для существующих позиций отправлен запрос на обновление плеча и пересчет TP/SL."
+            )
+            
+            keyboard = [[InlineKeyboardButton("🔙 К настройкам пар", callback_data="settings_pairs")]]
+            await update.message.reply_text(text_resp, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат. Введите целое число (например: 10)")
+        except Exception as e:
+            logger.error(f"Error processing pair leverage input: {e}")
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
     async def process_ml_setting_input(self, update: Update, setting_name: str, text: str):
         """Обрабатывает ввод значения ML настройки"""
         try:
@@ -3146,8 +3207,10 @@ class TelegramBot:
                                 if margin == 0:
                                     # Рассчитываем маржу из стоимости позиции и плеча
                                     position_value = safe_float(p.get("positionValue"), 0)
-                                    leverage_str = p.get("leverage", str(self.settings.leverage))
-                                    leverage = safe_float(leverage_str, self.settings.leverage)
+                                    symbol_for_lev = p.get("symbol", "")
+                                    default_lev = self.settings.get_leverage_for_symbol(symbol_for_lev)
+                                    leverage_str = p.get("leverage", str(default_lev))
+                                    leverage = safe_float(leverage_str, default_lev)
                                     if position_value > 0 and leverage > 0:
                                         margin = position_value / leverage
                                 

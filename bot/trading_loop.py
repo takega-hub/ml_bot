@@ -361,7 +361,7 @@ class TradingLoop:
             },
             "bot_context": {
                 "side": side,
-                "leverage": int(self.settings.leverage),
+                "leverage": int(self.settings.get_leverage_for_symbol(symbol)),
                 "position_horizon": position_horizon or "",
                 "risk_settings": {
                     "base_order_usd": float(self.settings.risk.base_order_usd),
@@ -1216,7 +1216,7 @@ class TradingLoop:
                         confidence=confidence,
                         take_profit=s.take_profit or indicators_info.get("take_profit"),
                         stop_loss=s.stop_loss or indicators_info.get("stop_loss"),
-                        leverage=self.settings.leverage,
+                        leverage=self.settings.get_leverage_for_symbol(symbol),
                         margin_usd=float(rec.get("expected_margin_usd") or 0.0),
                         signal_strength=str(signal_strength),
                         signal_parameters=signal_parameters,
@@ -1231,7 +1231,7 @@ class TradingLoop:
                         qty=float(size),
                         status="open",
                         model_name=self.state.symbol_models.get(symbol, ""),
-                        leverage=self.settings.leverage,
+                        leverage=self.settings.get_leverage_for_symbol(symbol),
                     )
                     self.state.add_trade(trade)
                     logger.info(f"[{symbol}] 🔄 Added exchange position to state (qty={size}, avg={entry_price})")
@@ -1306,7 +1306,7 @@ class TradingLoop:
                         df_1h=df_1h_cached,  # 1h данные из кэша (если есть) или None (будет агрегировано)
                         has_position=has_pos,
                         current_price=current_price,
-                        leverage=self.settings.leverage,
+                        leverage=self.settings.get_leverage_for_symbol(symbol),
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
                         max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
                         stop_loss_pct=self.settings.risk.stop_loss_pct,
@@ -1320,7 +1320,7 @@ class TradingLoop:
                         df=df_for_strategy,
                         has_position=has_pos,
                         current_price=current_price,
-                        leverage=self.settings.leverage,
+                        leverage=self.settings.get_leverage_for_symbol(symbol),
                         target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
                         max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
                         stop_loss_pct=self.settings.risk.stop_loss_pct,
@@ -1935,10 +1935,12 @@ class TradingLoop:
 
         logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
 
+        leverage = self.settings.get_leverage_for_symbol(symbol)
+        
         if is_add:
-            base_position_size_usd = self.settings.risk.base_order_usd * self.settings.leverage
+            base_position_size_usd = self.settings.risk.base_order_usd * leverage
             position_size_usd = base_position_size_usd / 2.0
-            fixed_margin_usd = position_size_usd / self.settings.leverage
+            fixed_margin_usd = position_size_usd / leverage
         else:
             size_multiplier = 1.0
             if isinstance(indicators_info, dict) and "ai_size_multiplier" in indicators_info:
@@ -1951,13 +1953,13 @@ class TradingLoop:
             if size_multiplier > 2.0:
                 size_multiplier = 2.0
             fixed_margin_usd = self.settings.risk.base_order_usd * size_multiplier
-            position_size_usd = fixed_margin_usd * self.settings.leverage
+            position_size_usd = fixed_margin_usd * leverage
 
             max_position_usd = getattr(self.settings.risk, "max_position_usd", None)
             if isinstance(max_position_usd, (int, float)) and max_position_usd and max_position_usd > 0:
                 if position_size_usd > float(max_position_usd):
                     position_size_usd = float(max_position_usd)
-                    fixed_margin_usd = position_size_usd / self.settings.leverage
+                    fixed_margin_usd = position_size_usd / leverage
 
         if fixed_margin_usd > balance:
             logger.warning(
@@ -1965,7 +1967,7 @@ class TradingLoop:
                 f"using available balance"
             )
             fixed_margin_usd = balance
-            position_size_usd = fixed_margin_usd * self.settings.leverage
+            position_size_usd = fixed_margin_usd * leverage
 
         if entry_price <= 0:
             logger.error(f"[{symbol}] ❌ Invalid entry_price: {entry_price}")
@@ -1977,7 +1979,7 @@ class TradingLoop:
             f"balance=${balance:.2f}, "
             f"margin=${fixed_margin_usd:.2f}, "
             f"position_size_usd=${position_size_usd:.2f}, "
-            f"qty={total_qty:.6f}, leverage={self.settings.leverage}x"
+            f"qty={total_qty:.6f}, leverage={leverage}x"
         )
 
         rounded_qty = math.floor(total_qty / qty_step) * qty_step
@@ -2051,7 +2053,7 @@ class TradingLoop:
                         f"• Количество: {qty:.6f}\n"
                         f"• Размер позиции: ${position_size_usd:.2f}\n"
                         f"• Требуемая маржа: ${required_margin:.2f}\n"
-                        f"• Плечо: {self.settings.leverage}x\n"
+                        f"• Плечо: {self.settings.get_leverage_for_symbol(symbol)}x\n"
                     )
                     
                     if signal.take_profit and signal.stop_loss:
@@ -2187,7 +2189,7 @@ class TradingLoop:
                         confidence=confidence,
                         take_profit=signal_tp,
                         stop_loss=signal_sl,
-                        leverage=self.settings.leverage,
+                        leverage=self.settings.get_leverage_for_symbol(symbol),
                         margin_usd=margin_usd,
                         signal_strength=signal_strength,
                         signal_parameters=signal_parameters,
@@ -2213,7 +2215,7 @@ class TradingLoop:
                         f"• Количество: {qty:.6f}\n"
                         f"• Размер позиции: ${position_size_usd:.2f}\n"
                         f"• Требуемая маржа: ${required_margin:.2f}\n"
-                        f"• Плечо: {self.settings.leverage}x\n"
+                        f"• Плечо: {self.settings.get_leverage_for_symbol(symbol)}x\n"
                     )
                     
                     if signal.take_profit and signal.stop_loss:
@@ -2569,6 +2571,67 @@ class TradingLoop:
         })
         
         logger.info(f"[{symbol}] 📋 Added signal to pending pullback queue: {signal.action.value} @ {signal.price:.2f}")
+
+    async def update_leverage_for_symbol(self, symbol: str, new_leverage: int):
+        try:
+            logger.info(f"[{symbol}] Updating leverage on exchange to {new_leverage}x")
+            resp = await asyncio.to_thread(self.bybit.set_leverage, symbol, new_leverage)
+            if resp and resp.get("retCode") == 0:
+                logger.info(f"[{symbol}] Leverage updated successfully")
+            else:
+                logger.warning(f"[{symbol}] set_leverage returned: {resp}")
+            
+            pos = None
+            for p in self.state.trades:
+                if p.symbol == symbol and p.status == "open":
+                    pos = p
+                    break
+            
+            if not pos:
+                return
+            
+            logger.info(f"[{symbol}] Found open position, recalculating TP/SL for new leverage")
+            
+            sl_ratio = (self.settings.ml_strategy.max_loss_pct_margin / new_leverage) / 100.0
+            tp_ratio = (self.settings.ml_strategy.target_profit_pct_margin / new_leverage) / 100.0
+            
+            if pos.side == "Buy":
+                new_sl = pos.entry_price * (1 - sl_ratio)
+                new_tp = pos.entry_price * (1 + tp_ratio)
+            else:
+                new_sl = pos.entry_price * (1 + sl_ratio)
+                new_tp = pos.entry_price * (1 - tp_ratio)
+                
+            tick_size = self.bybit.get_tick_size(symbol)
+            if tick_size > 0:
+                places = max(0, int(-math.log10(tick_size)))
+                new_sl = round(new_sl, places)
+                new_tp = round(new_tp, places)
+                
+            logger.info(f"[{symbol}] New SL: {new_sl}, New TP: {new_tp}")
+            
+            update_resp = await asyncio.to_thread(
+                self.bybit.set_trading_stop,
+                symbol=symbol,
+                take_profit=new_tp,
+                stop_loss=new_sl
+            )
+            
+            if update_resp and update_resp.get("retCode") == 0:
+                logger.info(f"[{symbol}] TP/SL successfully updated on exchange")
+                pos.stop_loss = new_sl
+                pos.take_profit = new_tp
+                pos.leverage = new_leverage
+                self.state.save()
+                await self.notifier.info(f"✅ Плечо для {symbol} обновлено на {new_leverage}x.\nTP и SL пересчитаны:\nTP: {new_tp}\nSL: {new_sl}")
+            else:
+                logger.warning(f"[{symbol}] Failed to update TP/SL: {update_resp}")
+                
+        except Exception as e:
+            if "not modified" in str(e).lower() or "ErrCode: 34036" in str(e) or "ErrCode: 34040" in str(e) or "110043" in str(e):
+                logger.info(f"[{symbol}] Leverage or TP/SL not modified (already set)")
+            else:
+                logger.error(f"[{symbol}] Error updating leverage and TP/SL: {e}", exc_info=True)
 
     async def _cancel_pullback_entry_order(self, symbol: str, reason: str = "") -> None:
         rec = self.pending_pullback_entry_orders.get(symbol)
@@ -3652,7 +3715,7 @@ class TradingLoop:
                 df=btc_df.iloc[:-1] if len(btc_df) >= 2 else btc_df,
                 has_position=btc_has_pos,
                 current_price=btc_current_price,
-                leverage=self.settings.leverage
+                leverage=self.settings.get_leverage_for_symbol("BTCUSDT")
             )
             
             if btc_signal:
@@ -3986,7 +4049,7 @@ class TradingLoop:
                                     total_fee_usd = accumulated_fee
                                     
                                     # Рассчитываем процент PnL от начальной маржи
-                                    margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                                    margin = (local_pos.entry_price * local_pos.qty) / local_pos.leverage
                                     if margin > 0:
                                         pnl_pct = (pnl_usd / margin) * 100
                                     
@@ -4081,7 +4144,7 @@ class TradingLoop:
             logger.debug(f"PnL calculation start: pnl_usd={pnl_usd}, pnl_pct={pnl_pct}, exit_price={exit_price}")
             
             if pnl_usd == 0 and exit_price is not None:
-                leverage = self.settings.leverage
+                leverage = local_pos.leverage
                 
                 logger.debug(f"Manual PnL calculation for {symbol}: entry_price={local_pos.entry_price}, qty={local_pos.qty}, side={local_pos.side}, leverage={leverage}, exit_price={exit_price}")
                 
@@ -4180,7 +4243,7 @@ class TradingLoop:
                         pnl_pct = ((exit_price - local_pos.entry_price) / local_pos.entry_price) * 100
                     else:
                         pnl_pct = ((local_pos.entry_price - exit_price) / local_pos.entry_price) * 100
-                    margin = (local_pos.entry_price * local_pos.qty) / self.settings.leverage
+                    margin = (local_pos.entry_price * local_pos.qty) / local_pos.leverage
                     pnl_usd = (pnl_pct / 100) * margin
                     fee_usd = self._calculate_fees_usd(local_pos.entry_price, exit_price, local_pos.qty)
                     if fee_usd > 0:

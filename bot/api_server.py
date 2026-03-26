@@ -265,7 +265,9 @@ def _get_status_data(state, bybit_client, settings, trading_loop=None) -> Dict[s
                             unrealised_pnl = (mark_price - entry_price) * size
                         else:
                             unrealised_pnl = (entry_price - mark_price) * size
-                    leverage = _safe_float(p.get("leverage", settings.leverage), settings.leverage)
+                    sym_for_lev = p.get("symbol", "")
+                    default_lev = settings.get_leverage_for_symbol(sym_for_lev)
+                    leverage = _safe_float(p.get("leverage", default_lev), default_lev)
                     margin = _safe_float(p.get("positionMargin"), 0) or _safe_float(p.get("positionIM"), 0)
                     if margin == 0:
                         pv = _safe_float(p.get("positionValue"), 0)
@@ -785,6 +787,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             month_trades = [t for t in s_trades if t.exit_time and datetime.fromisoformat(t.exit_time) >= month_ago]
             
             stats[s] = {
+                "leverage": settings.get_leverage_for_symbol(s),
                 "week": calc_period_stats(week_trades),
                 "month": calc_period_stats(month_trades),
                 "all": calc_period_stats(s_trades)
@@ -845,6 +848,27 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         except Exception as e:
             logger.exception("Error adding pair")
             raise HTTPException(status_code=500, detail=str(e))
+
+    class PairLeverageBody(BaseModel):
+        leverage: int
+
+    @app.post("/api/pairs/{symbol}/leverage", dependencies=[Depends(verify_api_key)])
+    def post_pair_leverage(symbol: str, body: PairLeverageBody):
+        sym = symbol.upper()
+        if not (1 <= body.leverage <= 100):
+            raise HTTPException(status_code=400, detail="Leverage must be between 1 and 100")
+            
+        ml_settings = settings.get_ml_settings_for_symbol(sym)
+        ml_settings.leverage = body.leverage
+        settings.set_ml_settings_for_symbol(sym, ml_settings)
+        
+        from bot.config import save_symbol_ml_settings
+        save_symbol_ml_settings(settings)
+        
+        if trading_loop:
+            asyncio.create_task(trading_loop.update_leverage_for_symbol(sym, body.leverage))
+            
+        return {"ok": True, "symbol": sym, "leverage": body.leverage}
 
     # --- Risk (read + write to file and in-memory) ---
     def _risk_to_dict(r):
