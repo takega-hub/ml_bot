@@ -853,7 +853,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         leverage: int
 
     @app.post("/api/pairs/{symbol}/leverage", dependencies=[Depends(verify_api_key)])
-    def post_pair_leverage(symbol: str, body: PairLeverageBody):
+    async def post_pair_leverage(symbol: str, body: PairLeverageBody):
         sym = symbol.upper()
         if not (1 <= body.leverage <= 100):
             raise HTTPException(status_code=400, detail="Leverage must be between 1 and 100")
