@@ -900,6 +900,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "trailing_stop_distance": "trailing_stop_distance_pct",
             "breakeven_level1_activation": "breakeven_level1_activation_pct",
             "breakeven_level2_activation": "breakeven_level2_activation_pct",
+            "trailing_activation_mode": "trailing_activation_mode",
+            "trailing_activation_pct_margin": "trailing_activation_pct_margin",
+            "breakeven_activation_mode": "breakeven_activation_mode",
+            "breakeven_level1_activation_pct_margin": "breakeven_level1_activation_pct_margin",
+            "breakeven_level2_activation_pct_margin": "breakeven_level2_activation_pct_margin",
+            "dca_drawdown_mode": "dca_drawdown_mode",
+            "dca_drawdown_pct_margin": "dca_drawdown_pct_margin",
+            "partial_close_mode": "partial_close_mode",
+            "max_margin_usd": "max_margin_usd",
         }
         return aliases.get(k, k)
 
@@ -922,9 +931,26 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                            "trailing_stop_distance_pct", "breakeven_level1_activation_pct", "breakeven_level1_sl_pct",
                            "breakeven_level2_activation_pct", "breakeven_level2_sl_pct", "fee_rate",
                            "mid_term_tp_pct", "long_term_tp_pct", "long_term_sl_pct", "dca_drawdown_pct",
-                           "dca_min_confidence", "reverse_min_confidence") and isinstance(val, (int, float)):
+                           "dca_min_confidence", "reverse_min_confidence", "trailing_activation_pct_margin",
+                           "breakeven_level1_activation_pct_margin", "breakeven_level2_activation_pct_margin",
+                           "dca_drawdown_pct_margin", "partial_close_mode") and isinstance(val, (int, float)):
                     if val >= 1:
                         val = val / 100.0
+                
+                if key == "dca_drawdown_mode" and val not in ("price", "margin"):
+                    logger.warning(f"Invalid dca_drawdown_mode: {val}, using 'price'")
+                    val = "price"
+                if key == "partial_close_mode" and val not in ("price", "margin"):
+                    logger.warning(f"Invalid partial_close_mode: {val}, using 'price'")
+                    val = "price"
+                
+                if key == "trailing_activation_mode" and val not in ("price", "margin"):
+                    logger.warning(f"Invalid trailing_activation_mode: {val}, using 'price'")
+                    val = "price"
+                if key == "breakeven_activation_mode" and val not in ("price", "margin"):
+                    logger.warning(f"Invalid breakeven_activation_mode: {val}, using 'price'")
+                    val = "price"
+                    
                 setattr(risk, key, val)
                 applied_keys.append(key)
             else:

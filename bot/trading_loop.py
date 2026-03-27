@@ -10,6 +10,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Union, TYPE_CHECKING
 from bot.config import AppSettings
+from bot.config import (
+    get_trailing_activation_pct,
+    get_breakeven_activation_pct,
+    get_dca_drawdown_pct,
+    get_partial_close_progress_pct,
+    get_max_margin_usd,
+    calculate_margin_based_rr,
+    recalculate_tp_sl_for_leverage,
+    validate_leverage_settings,
+    DEFAULT_LEVERAGE,
+)
 from bot.state import BotState, TradeRecord
 from bot.exchange.bybit_client import BybitClient
 from bot.ml.strategy_ml import MLStrategy, build_ml_signals
@@ -1955,11 +1966,18 @@ class TradingLoop:
             fixed_margin_usd = self.settings.risk.base_order_usd * size_multiplier
             position_size_usd = fixed_margin_usd * leverage
 
+            max_margin_usd = get_max_margin_usd(self.settings, leverage)
+            if max_margin_usd and fixed_margin_usd > max_margin_usd:
+                fixed_margin_usd = max_margin_usd
+                position_size_usd = fixed_margin_usd * leverage
+                logger.info(f"[{symbol}] Position limited by max_margin_usd: ${max_margin_usd:.2f}")
+
             max_position_usd = getattr(self.settings.risk, "max_position_usd", None)
             if isinstance(max_position_usd, (int, float)) and max_position_usd and max_position_usd > 0:
                 if position_size_usd > float(max_position_usd):
                     position_size_usd = float(max_position_usd)
                     fixed_margin_usd = position_size_usd / leverage
+                    logger.info(f"[{symbol}] Position limited by max_position_usd: ${max_position_usd:.2f}")
 
         if fixed_margin_usd > balance:
             logger.warning(
@@ -2159,10 +2177,12 @@ class TradingLoop:
                     margin_usd = fixed_margin_usd
                     
                     # Параметры сигнала
+                    rr_mode = getattr(self.settings.risk, 'trailing_activation_mode', 'price')
                     signal_parameters = {
                         'take_profit_pct': tp_pct,
                         'stop_loss_pct': sl_pct,
                         'risk_reward_ratio': (tp_pct / sl_pct) if (tp_pct and sl_pct and sl_pct > 0) else None,
+                        'margin_based_rr': calculate_margin_based_rr(tp_pct, sl_pct, leverage, rr_mode),
                     }
                     if isinstance(indicators_info, dict) and isinstance(indicators_info.get("decision_engine_eval"), dict):
                         signal_parameters["decision_engine_eval"] = indicators_info.get("decision_engine_eval")
@@ -2289,9 +2309,12 @@ class TradingLoop:
             
             logger.debug(f"[{symbol}] update_breakeven_stop: side={side}, entry={entry_price:.6f}, mark={mark_price:.6f}, pnl_pct={pnl_pct:.2f}%, current_sl={current_sl}")
             
-            # Проверяем, нужно ли активировать безубыток (многоуровневый)
-            level1_activation = self.settings.risk.breakeven_level1_activation_pct * 100  # Конвертируем в %
-            level2_activation = self.settings.risk.breakeven_level2_activation_pct * 100  # Конвертируем в %
+            leverage = self.settings.get_leverage_for_symbol(symbol)
+            if leverage is None or leverage <= 0:
+                leverage = DEFAULT_LEVERAGE
+            
+            level1_activation = get_breakeven_activation_pct(self.settings, 1, leverage) * 100
+            level2_activation = get_breakeven_activation_pct(self.settings, 2, leverage) * 100
             level1_sl_pct = self.settings.risk.breakeven_level1_sl_pct
             level2_sl_pct = self.settings.risk.breakeven_level2_sl_pct
             
@@ -2574,10 +2597,18 @@ class TradingLoop:
 
     async def update_leverage_for_symbol(self, symbol: str, new_leverage: int):
         try:
-            logger.info(f"[{symbol}] Updating leverage on exchange to {new_leverage}x")
+            is_valid, error_msg = validate_leverage_settings(new_leverage)
+            if not is_valid:
+                logger.error(f"[{symbol}] Invalid leverage {new_leverage}: {error_msg}")
+                await self.notifier.error(f"❌ Ошибка: {error_msg}")
+                return
+            
+            old_leverage = self.settings.get_leverage_for_symbol(symbol)
+            logger.info(f"[{symbol}] Updating leverage from {old_leverage}x to {new_leverage}x")
+            
             resp = await asyncio.to_thread(self.bybit.set_leverage, symbol, new_leverage)
             if resp and resp.get("retCode") == 0:
-                logger.info(f"[{symbol}] Leverage updated successfully")
+                logger.info(f"[{symbol}] Leverage updated successfully on exchange")
             else:
                 logger.warning(f"[{symbol}] set_leverage returned: {resp}")
             
@@ -2588,42 +2619,45 @@ class TradingLoop:
                     break
             
             if not pos:
+                logger.info(f"[{symbol}] No open position, leverage settings updated")
                 return
             
             logger.info(f"[{symbol}] Found open position, recalculating TP/SL for new leverage")
             
-            sl_ratio = (self.settings.ml_strategy.max_loss_pct_margin / new_leverage) / 100.0
-            tp_ratio = (self.settings.ml_strategy.target_profit_pct_margin / new_leverage) / 100.0
-            
-            if pos.side == "Buy":
-                new_sl = pos.entry_price * (1 - sl_ratio)
-                new_tp = pos.entry_price * (1 + tp_ratio)
-            else:
-                new_sl = pos.entry_price * (1 + sl_ratio)
-                new_tp = pos.entry_price * (1 - tp_ratio)
-                
             tick_size = self.bybit.get_tick_size(symbol)
-            if tick_size > 0:
-                places = max(0, int(-math.log10(tick_size)))
-                new_sl = round(new_sl, places)
-                new_tp = round(new_tp, places)
+            if tick_size is None:
+                tick_size = 0.01
+            
+            tp, sl = recalculate_tp_sl_for_leverage(
+                entry_price=pos.entry_price,
+                side=pos.side,
+                leverage=new_leverage,
+                target_profit_pct_margin=self.settings.ml_strategy.target_profit_pct_margin,
+                max_loss_pct_margin=self.settings.ml_strategy.max_loss_pct_margin,
+                tick_size=tick_size
+            )
                 
-            logger.info(f"[{symbol}] New SL: {new_sl}, New TP: {new_tp}")
+            logger.info(f"[{symbol}] New SL: {sl}, New TP: {tp} (leverage: {old_leverage}x -> {new_leverage}x)")
             
             update_resp = await asyncio.to_thread(
                 self.bybit.set_trading_stop,
                 symbol=symbol,
-                take_profit=new_tp,
-                stop_loss=new_sl
+                take_profit=tp,
+                stop_loss=sl
             )
             
             if update_resp and update_resp.get("retCode") == 0:
                 logger.info(f"[{symbol}] TP/SL successfully updated on exchange")
-                pos.stop_loss = new_sl
-                pos.take_profit = new_tp
+                pos.stop_loss = sl
+                pos.take_profit = tp
                 pos.leverage = new_leverage
                 self.state.save()
-                await self.notifier.info(f"✅ Плечо для {symbol} обновлено на {new_leverage}x.\nTP и SL пересчитаны:\nTP: {new_tp}\nSL: {new_sl}")
+                await self.notifier.info(
+                    f"✅ Плечо для {symbol} обновлено: {old_leverage}x → {new_leverage}x\n"
+                    f"TP и SL пересчитаны:\n"
+                    f"TP: ${tp:.2f}\n"
+                    f"SL: ${sl:.2f}"
+                )
             else:
                 logger.warning(f"[{symbol}] Failed to update TP/SL: {update_resp}")
                 
@@ -3133,12 +3167,16 @@ class TradingLoop:
         if not current_price or not local_pos.entry_price:
             return False
 
+        leverage = local_pos.leverage if local_pos.leverage else DEFAULT_LEVERAGE
+        
+        dca_drawdown_pct = get_dca_drawdown_pct(self.settings, leverage)
+        
         if local_pos.side == "Buy":
             drawdown_pct = (local_pos.entry_price - current_price) / local_pos.entry_price
         else:
             drawdown_pct = (current_price - local_pos.entry_price) / local_pos.entry_price
 
-        return drawdown_pct >= self.settings.risk.dca_drawdown_pct
+        return drawdown_pct >= dca_drawdown_pct
 
     def _is_strong_reverse_signal(self, signal: Signal, confidence: float) -> bool:
         """Определяет, является ли обратный сигнал сильным для реверса."""
@@ -3796,6 +3834,12 @@ class TradingLoop:
             if not entry_price or not mark_price:
                 return
             
+            leverage = self.settings.get_leverage_for_symbol(symbol)
+            if leverage is None or leverage <= 0:
+                leverage = DEFAULT_LEVERAGE
+            
+            activation_pct = get_trailing_activation_pct(self.settings, leverage)
+            
             # Рассчитываем текущий PnL в процентах
             if side == "Buy":
                 pnl_pct = ((mark_price - entry_price) / entry_price)
@@ -3807,7 +3851,7 @@ class TradingLoop:
             except Exception:
                 trailing_stop_val = 0.0
 
-            if pnl_pct >= self.settings.risk.trailing_stop_activation_pct and trailing_stop_val <= 0:
+            if pnl_pct >= activation_pct and trailing_stop_val <= 0:
                 trailing_distance = mark_price * self.settings.risk.trailing_stop_distance_pct
                 
                 logger.info(f"Activating trailing stop for {symbol}: distance={trailing_distance:.6f} (PnL: {pnl_pct*100:.2f}%)")
@@ -3844,6 +3888,12 @@ class TradingLoop:
             side = position_info.get("side")
             entry_price = float(position_info.get("avgPrice", 0))
             mark_price = float(position_info.get("markPrice", entry_price))
+            leverage_str = position_info.get("leverage", "10")
+            try:
+                leverage = int(float(leverage_str))
+            except (ValueError, TypeError):
+                leverage = self.settings.get_leverage_for_symbol(symbol) or DEFAULT_LEVERAGE
+            
             take_profit = position_info.get("takeProfit")
             if not take_profit:
                 local_pos = self.state.get_open_position(symbol)
@@ -3868,9 +3918,12 @@ class TradingLoop:
             
             progress_pct = current_progress / distance_to_tp
             
+            # Корректируем прогресс с учетом режима и плеча
+            adjusted_progress = get_partial_close_progress_pct(self.settings, progress_pct, leverage)
+            
             # Проверяем уровни частичного закрытия
             for level_progress, close_pct in self.settings.risk.partial_close_levels:
-                if progress_pct >= level_progress:
+                if adjusted_progress >= level_progress:
                     # Проверяем, не закрывали ли мы уже на этом уровне
                     # (это можно отслеживать через метаданные в state)
                     
@@ -3882,7 +3935,11 @@ class TradingLoop:
                     close_qty = round(close_qty / qty_step) * qty_step
                     
                     if close_qty > 0:
-                        logger.info(f"Partial close {symbol}: {close_pct*100}% at {progress_pct*100:.1f}% to TP")
+                        mode = getattr(self.settings.risk, 'partial_close_mode', 'price')
+                        if mode == "margin":
+                            logger.info(f"Partial close {symbol}: {close_pct*100}% at {adjusted_progress*100:.1f}% margin-progress (raw: {progress_pct*100:.1f}%, leverage: {leverage}x)")
+                        else:
+                            logger.info(f"Partial close {symbol}: {close_pct*100}% at {progress_pct*100:.1f}% to TP")
                         
                         # Закрываем частично (reduce_only ордер)
                         close_side = "Sell" if side == "Buy" else "Buy"

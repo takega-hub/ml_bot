@@ -241,6 +241,7 @@ class RiskParams:
     
     # Размеры позиций
     max_position_usd: float = 200.0
+    max_margin_usd: float = None  # Максимальная маржа на позицию (опционально)
     position_size_mode: str = "percentage"  # УСТАРЕЛО: больше не используется, оставлено для обратной совместимости
     base_order_usd: float = 50.0  # Фиксированная сумма маржи в USD
     add_order_usd: float = 50.0
@@ -258,10 +259,18 @@ class RiskParams:
     trailing_stop_activation_pct: float = 0.007  # Активировать при прибыли 0.7%
     trailing_stop_distance_pct: float = 0.003  # Расстояние 0.3% от максимума
     
+    # Режим расчета порогов активации: "price" = % от цены, "margin" = % от маржи
+    trailing_activation_mode: str = "price"
+    trailing_activation_pct_margin: float = 7.0  # Активировать при прибыли 7% от маржи (для режима "margin")
+    breakeven_activation_mode: str = "price"
+    breakeven_level1_activation_pct_margin: float = 5.0  # Активировать 1-ю ступень при прибыли 5% от маржи
+    breakeven_level2_activation_pct_margin: float = 10.0  # Активировать 2-ю ступень при прибыли 10% от маржи
+    
     # Частичное закрытие
     enable_partial_close: bool = True
     partial_close_pct: float = 0.5  # Закрывать 50% позиции
     partial_close_at_tp_pct: float = 0.5  # При достижении 50% пути к TP
+    partial_close_mode: str = "price"  # "price" = % от цены, "margin" = % от маржи
     partial_close_levels: List[tuple] = field(default_factory=lambda: [(0.5, 0.5), (0.75, 0.25)])  # (прогресс к TP, % закрытия)
     
     # Защита от убытков
@@ -300,6 +309,8 @@ class RiskParams:
     dca_enabled: bool = False  # Отключено для снижения рисков
 
     dca_drawdown_pct: float = 0.003  # Усреднять при просадке 0.3%
+    dca_drawdown_mode: str = "price"  # "price" = % от цены, "margin" = % от маржи
+    dca_drawdown_pct_margin: float = 3.0  # Усреднять при просадке 3% от маржи
     dca_max_adds: int = 2
     dca_min_confidence: float = 0.6
 
@@ -336,6 +347,10 @@ class RiskParams:
             self.breakeven_level2_activation_pct /= 100.0
         if self.breakeven_level2_sl_pct >= 1:
             self.breakeven_level2_sl_pct /= 100.0
+        if self.trailing_activation_mode not in ("price", "margin"):
+            self.trailing_activation_mode = "price"
+        if self.breakeven_activation_mode not in ("price", "margin"):
+            self.breakeven_activation_mode = "price"
         if self.fee_rate >= 1:
             self.fee_rate /= 100.0
         if self.mid_term_tp_pct >= 1:
@@ -346,6 +361,10 @@ class RiskParams:
             self.long_term_sl_pct /= 100.0
         if self.dca_drawdown_pct >= 1:
             self.dca_drawdown_pct /= 100.0
+        if self.dca_drawdown_mode not in ("price", "margin"):
+            self.dca_drawdown_mode = "price"
+        if self.partial_close_mode not in ("price", "margin"):
+            self.partial_close_mode = "price"
         if self.reverse_min_confidence >= 1:
             self.reverse_min_confidence /= 100.0
 
@@ -1072,6 +1091,266 @@ def save_symbol_ml_settings(settings: AppSettings) -> None:
             json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[config] Warning: Error saving symbol ML settings: {e}")
+
+
+DEFAULT_LEVERAGE = 10
+
+
+def calculate_price_pct_from_margin_pct(margin_pct: float, leverage: int) -> float:
+    """
+    Конвертирует процент от маржи в процент от цены.
+    
+    Пример: при leverage=10, 10% прибыли от маржи = 1% прибыли от цены
+    
+    Args:
+        margin_pct: Процент прибыли от маржи (например, 10.0 для 10%)
+        leverage: Плечо
+        
+    Returns:
+        Процент от цены (decimal, например 0.01 для 1%)
+    """
+    if leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    return margin_pct / leverage / 100.0
+
+
+def calculate_margin_pct_from_price_pct(price_pct: float, leverage: int) -> float:
+    """
+    Конвертирует процент от цены в процент от маржи.
+    
+    Пример: при leverage=10, 1% прибыли от цены = 10% прибыли от маржи
+    
+    Args:
+        price_pct: Процент от цены (decimal, например 0.01 для 1%)
+        leverage: Плечо
+        
+    Returns:
+        Процент от маржи (decimal, например 0.1 для 10%)
+    """
+    if leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    return price_pct * leverage * 100.0
+
+
+def get_trailing_activation_pct(settings: "AppSettings", leverage: int = None) -> float:
+    """
+    Получает процент активации трейлинг стопа с учетом режима и плеча.
+    
+    Args:
+        settings: Настройки приложения
+        leverage: Плечо (если None, используется default)
+        
+    Returns:
+        Процент активации в виде decimal (0.007 = 0.7%)
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    mode = getattr(settings.risk, 'trailing_activation_mode', 'price')
+    
+    if mode == "margin":
+        margin_pct = getattr(settings.risk, 'trailing_activation_pct_margin', 7.0)
+        return calculate_price_pct_from_margin_pct(margin_pct, leverage)
+    else:
+        return settings.risk.trailing_stop_activation_pct
+
+
+def get_breakeven_activation_pct(settings: "AppSettings", level: int, leverage: int = None) -> float:
+    """
+    Получает процент активации безубытка с учетом режима и плеча.
+    
+    Args:
+        settings: Настройки приложения
+        level: Уровень безубытка (1 или 2)
+        leverage: Плечо (если None, используется default)
+        
+    Returns:
+        Процент активации в виде decimal (0.005 = 0.5%)
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    mode = getattr(settings.risk, 'breakeven_activation_mode', 'price')
+    
+    if mode == "margin":
+        if level == 1:
+            margin_pct = getattr(settings.risk, 'breakeven_level1_activation_pct_margin', 5.0)
+        else:
+            margin_pct = getattr(settings.risk, 'breakeven_level2_activation_pct_margin', 10.0)
+        return calculate_price_pct_from_margin_pct(margin_pct, leverage)
+    else:
+        if level == 1:
+            return settings.risk.breakeven_level1_activation_pct
+        else:
+            return settings.risk.breakeven_level2_activation_pct
+
+
+def recalculate_tp_sl_for_leverage(
+    entry_price: float,
+    side: str,
+    leverage: int,
+    target_profit_pct_margin: float = 18.0,
+    max_loss_pct_margin: float = 10.0,
+    tick_size: float = 0.01
+) -> tuple:
+    """
+    Пересчитывает TP и SL на основе плеча и процентов от маржи.
+    
+    Args:
+        entry_price: Цена входа
+        side: "Buy" или "Sell"
+        leverage: Плечо
+        target_profit_pct_margin: Целевая прибыль от маржи в %
+        max_loss_pct_margin: Максимальный убыток от маржи в %
+        tick_size: Размер тика для округления
+        
+    Returns:
+        (tp_price, sl_price)
+    """
+    if leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    sl_ratio = max_loss_pct_margin / leverage / 100.0
+    tp_ratio = target_profit_pct_margin / leverage / 100.0
+    
+    if side == "Buy":
+        sl = entry_price * (1 - sl_ratio)
+        tp = entry_price * (1 + tp_ratio)
+    else:
+        sl = entry_price * (1 + sl_ratio)
+        tp = entry_price * (1 - tp_ratio)
+    
+    if tick_size > 0:
+        places = max(0, int(-math.log10(tick_size)))
+        sl = round(sl, places)
+        tp = round(tp, places)
+    
+    return tp, sl
+
+
+def validate_leverage_settings(leverage: int) -> tuple:
+    """
+    Валидирует настройки плеча.
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    if leverage < 1:
+        return False, "Leverage must be at least 1"
+    if leverage > 100:
+        return False, "Leverage cannot exceed 100"
+    return True, ""
+
+
+def get_dca_drawdown_pct(settings: "AppSettings", leverage: int = None) -> float:
+    """
+    Получает процент просадки для DCA с учетом режима и плеча.
+    
+    Args:
+        settings: Настройки приложения
+        leverage: Плечо (если None, используется default)
+        
+    Returns:
+        Процент просадки в виде decimal (0.003 = 0.3%)
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    mode = getattr(settings.risk, 'dca_drawdown_mode', 'price')
+    
+    if mode == "margin":
+        margin_pct = getattr(settings.risk, 'dca_drawdown_pct_margin', 3.0)
+        return calculate_price_pct_from_margin_pct(margin_pct, leverage)
+    else:
+        return settings.risk.dca_drawdown_pct
+
+
+def get_partial_close_progress_pct(
+    settings: "AppSettings",
+    current_progress: float,
+    leverage: int = None
+) -> float:
+    """
+    Пересчитывает прогресс partial close с учетом режима и плеча.
+    
+    В режиме "margin" прогресс корректируется на коэффициент плеча,
+    чтобы 100% прогресса означало одинаковую прибыль от маржи
+    независимо от плеча.
+    
+    Args:
+        settings: Настройки приложения
+        current_progress: Прогресс в долях (0.5 = 50%)
+        leverage: Плечо
+        
+    Returns:
+        Скорректированный прогресс
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    partial_close_mode = getattr(settings.risk, 'partial_close_mode', 'price')
+    
+    if partial_close_mode == "margin":
+        return current_progress * leverage
+    else:
+        return current_progress
+
+
+def get_max_margin_usd(settings: "AppSettings", leverage: int = None) -> float:
+    """
+    Рассчитывает максимальную маржу на позицию с учетом плеча.
+    
+    Если задан max_margin_usd напрямую - возвращает его.
+    Иначе рассчитывает из max_position_usd / leverage.
+    
+    Args:
+        settings: Настройки приложения
+        leverage: Плечо
+        
+    Returns:
+        Максимальная маржа в USD
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    max_margin = getattr(settings.risk, 'max_margin_usd', None)
+    if max_margin and max_margin > 0:
+        return float(max_margin)
+    
+    max_position = getattr(settings.risk, 'max_position_usd', None)
+    if max_position and max_position > 0:
+        return float(max_position) / leverage
+    
+    return None
+
+
+def calculate_margin_based_rr(
+    tp_pct: float,
+    sl_pct: float,
+    leverage: int,
+    mode: str = "price"
+) -> float:
+    """
+    Рассчитывает Risk-Reward ratio с учетом режима и плеча.
+    
+    Args:
+        tp_pct: Take Profit в % от цены (decimal)
+        sl_pct: Stop Loss в % от цены (decimal)
+        leverage: Плечо
+        mode: Режим расчета ("price" или "margin")
+        
+    Returns:
+        Risk-Reward ratio
+    """
+    if not tp_pct or not sl_pct or sl_pct <= 0:
+        return None
+    
+    if mode == "margin":
+        tp_margin = tp_pct * leverage
+        sl_margin = sl_pct * leverage
+        return tp_margin / sl_margin
+    else:
+        return tp_pct / sl_pct
 
 
 def _get_risk_settings_file() -> Path:
