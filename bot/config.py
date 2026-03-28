@@ -293,7 +293,9 @@ class RiskParams:
     # Временные ограничения (Time Stop)
     time_stop_minutes: int = 360  # Максимальное время удержания позиции (6 часов)
     early_exit_minutes: int = 60  # Ранний выход если цена не идет в нашу сторону
-    early_exit_min_profit_pct: float = 0.003  # Минимальная прибыль через early_exit_minutes (0.3%)
+    early_exit_min_profit_pct: float = 0.003  # Минимальная прибыль через early_exit_minutes (0.3% от цены)
+    early_exit_mode: str = "margin"  # Режим расчета: "price" или "margin"
+    early_exit_min_profit_pct_margin: float = 2.0  # Минимальная прибыль 2% от маржи
 
     # Комиссия биржи (per side). Например 0.0006 = 0.06% за вход или выход
     # Обновлено до 0.001 (0.1%) так как многие пары имеют такую комиссию (Taker)
@@ -365,6 +367,8 @@ class RiskParams:
             self.dca_drawdown_mode = "price"
         if self.partial_close_mode not in ("price", "margin"):
             self.partial_close_mode = "price"
+        if self.early_exit_mode not in ("price", "margin"):
+            self.early_exit_mode = "margin"
         if self.reverse_min_confidence >= 1:
             self.reverse_min_confidence /= 100.0
 
@@ -1322,6 +1326,29 @@ def get_max_margin_usd(settings: "AppSettings", leverage: int = None) -> float:
         return float(max_position) / leverage
     
     return None
+
+
+def get_early_exit_profit_pct(settings: "AppSettings", leverage: int = None) -> float:
+    """
+    Получает минимальную прибыль для Early Exit с учетом режима и плеча.
+    
+    Args:
+        settings: Настройки приложения
+        leverage: Плечо (если None, используется default)
+        
+    Returns:
+        Минимальная прибыль в виде decimal (0.003 = 0.3%)
+    """
+    if leverage is None or leverage <= 0:
+        leverage = DEFAULT_LEVERAGE
+    
+    mode = getattr(settings.risk, 'early_exit_mode', 'margin')
+    
+    if mode == "margin":
+        margin_pct = getattr(settings.risk, 'early_exit_min_profit_pct_margin', 2.0)
+        return calculate_price_pct_from_margin_pct(margin_pct, leverage)
+    else:
+        return settings.risk.early_exit_min_profit_pct
 
 
 def calculate_margin_based_rr(

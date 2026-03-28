@@ -16,6 +16,7 @@ from bot.config import (
     get_dca_drawdown_pct,
     get_partial_close_progress_pct,
     get_max_margin_usd,
+    get_early_exit_profit_pct,
     calculate_margin_based_rr,
     recalculate_tp_sl_for_leverage,
     validate_leverage_settings,
@@ -3133,12 +3134,16 @@ class TradingLoop:
                 logger.warning(f"[{symbol}] Unusually long duration: {duration_minutes:.1f} min. createdTime={raw_created_time}, updatedTime={raw_updated_time}, open_time={open_time}, now={now}")
 
             early_exit_minutes = self.settings.risk.early_exit_minutes
-            min_profit_pct = self.settings.risk.early_exit_min_profit_pct
             
             if early_exit_minutes <= 0:
                 return
 
-            # Если прошло время раннего выхода, а прибыль все еще маленькая
+            leverage = position.get("leverage", DEFAULT_LEVERAGE)
+            if not leverage or leverage <= 0:
+                leverage = DEFAULT_LEVERAGE
+            
+            min_profit_pct = get_early_exit_profit_pct(self.settings, leverage)
+            
             if duration_minutes > early_exit_minutes:
                 entry_price = float(position.get("avgPrice", 0))
                 mark_price = float(position.get("markPrice", entry_price))
@@ -3153,7 +3158,9 @@ class TradingLoop:
                     pnl_pct = (entry_price - mark_price) / entry_price
                 
                 if pnl_pct < min_profit_pct:
-                    logger.info(f"[{symbol}] 📉 Early Exit triggered! Duration: {duration_minutes:.1f} min > {early_exit_minutes} min, PnL: {pnl_pct*100:.2f}% < {min_profit_pct*100:.2f}%")
+                    mode = self.settings.risk.early_exit_mode
+                    margin_pct = self.settings.risk.early_exit_min_profit_pct_margin
+                    logger.info(f"[{symbol}] 📉 Early Exit triggered! Duration: {duration_minutes:.1f} min > {early_exit_minutes} min, PnL: {pnl_pct*100:.2f}% < {min_profit_pct*100:.2f}% (mode: {mode}, margin: {margin_pct}%, leverage: {leverage}x)")
                     await self.close_position(symbol, f"Early Exit (Low PnL < {min_profit_pct*100:.1f}%)")
                     
         except Exception as e:
