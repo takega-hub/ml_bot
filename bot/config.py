@@ -260,9 +260,9 @@ class RiskParams:
     trailing_stop_distance_pct: float = 0.003  # Расстояние 0.3% от максимума
     
     # Режим расчета порогов активации: "price" = % от цены, "margin" = % от маржи
-    trailing_activation_mode: str = "price"
-    trailing_activation_pct_margin: float = 7.0  # Активировать при прибыли 7% от маржи (для режима "margin")
-    breakeven_activation_mode: str = "price"
+    trailing_activation_mode: str = "margin"  # По умолчанию - от маржи
+    trailing_activation_pct_margin: float = 7.0  # Активировать при прибыли 7% от маржи
+    breakeven_activation_mode: str = "margin"  # По умолчанию - от маржи
     breakeven_level1_activation_pct_margin: float = 5.0  # Активировать 1-ю ступень при прибыли 5% от маржи
     breakeven_level2_activation_pct_margin: float = 10.0  # Активировать 2-ю ступень при прибыли 10% от маржи
     
@@ -270,7 +270,7 @@ class RiskParams:
     enable_partial_close: bool = True
     partial_close_pct: float = 0.5  # Закрывать 50% позиции
     partial_close_at_tp_pct: float = 0.5  # При достижении 50% пути к TP
-    partial_close_mode: str = "price"  # "price" = % от цены, "margin" = % от маржи
+    partial_close_mode: str = "margin"  # По умолчанию - от маржи
     partial_close_levels: List[tuple] = field(default_factory=lambda: [(0.5, 0.5), (0.75, 0.25)])  # (прогресс к TP, % закрытия)
     
     # Защита от убытков
@@ -309,7 +309,7 @@ class RiskParams:
     dca_enabled: bool = False  # Отключено для снижения рисков
 
     dca_drawdown_pct: float = 0.003  # Усреднять при просадке 0.3%
-    dca_drawdown_mode: str = "price"  # "price" = % от цены, "margin" = % от маржи
+    dca_drawdown_mode: str = "margin"  # По умолчанию - от маржи
     dca_drawdown_pct_margin: float = 3.0  # Усреднять при просадке 3% от маржи
     dca_max_adds: int = 2
     dca_min_confidence: float = 0.6
