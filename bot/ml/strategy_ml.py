@@ -38,6 +38,7 @@ import pandas as pd
 from bot.strategy import Action, Bias, Signal
 from bot.ml.feature_engineering import FeatureEngineer
 from bot.config import StrategyParams
+from bot.config import calculate_price_pct_from_margin_pct, DEFAULT_LEVERAGE
 # Импортируем классы ансамбля для корректной десериализации pickle
 from bot.ml.model_trainer import PreTrainedVotingEnsemble, WeightedEnsemble, TripleEnsemble
 
@@ -958,16 +959,17 @@ class MLStrategy:
                 return sl, level_name, level_price
 
             # === РАСЧЕТ SL и TP (НОВАЯ ЛОГИКА С ATR) ===
-            # Используем фиксированные проценты из конфига по умолчанию
-            if stop_loss_pct:
-                sl_ratio = stop_loss_pct
+            # Всегда используем max_loss_pct_margin / target_profit_pct_margin с учетом плеча
+            # Это гарантирует нужный % от маржи независимо от плеча
+            if max_loss_pct_margin:
+                sl_ratio = calculate_price_pct_from_margin_pct(max_loss_pct_margin, leverage)
             else:
-                sl_ratio = (max_loss_pct_margin / leverage) / 100.0
+                sl_ratio = (10.0 / leverage) / 100.0  # Дефолт: 10% от маржи
 
-            if take_profit_pct:
-                tp_ratio = take_profit_pct
+            if target_profit_pct_margin:
+                tp_ratio = calculate_price_pct_from_margin_pct(target_profit_pct_margin, leverage)
             else:
-                tp_ratio = (target_profit_pct_margin / leverage) / 100.0
+                tp_ratio = (18.0 / leverage) / 100.0  # Дефолт: 18% от маржи
 
             # АДАПТАЦИЯ ПО ATR (если доступен) — только когда SL не фиксирован из риска
             # Если use_fixed_sl_from_risk: всегда используем sl_ratio/tp_ratio из риска (выше)
