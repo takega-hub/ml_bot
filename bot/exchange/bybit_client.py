@@ -60,7 +60,7 @@ class BybitClient:
         elif hasattr(self.session, '_http_manager') and hasattr(self.session._http_manager, 'recv_window'):
             self.session._http_manager.recv_window = 120000
 
-    def _retry_request(self, func, max_retries: int = 3, delay: float = 1.0, *args, **kwargs) -> Dict[str, Any]:
+    def _retry_request(self, func, max_retries: int = 5, delay: float = 2.0, *args, **kwargs) -> Dict[str, Any]:
         """Повторная попытка запроса при rate limit ошибках и ошибках синхронизации времени."""
         for attempt in range(max_retries):
             try:
@@ -84,6 +84,14 @@ class BybitClient:
                         time=time.time(),
                         response={"retCode": 401, "retMsg": ret_msg}
                     )
+                
+                # Проверяем на rate limit (10006) - Too many visits
+                if ret_code == 10006 or ret_code == 10019:
+                    if attempt < max_retries - 1:
+                        wait_time = delay * (2 ** attempt)  # экспоненциальная задержка
+                        print(f"[bybit] Rate limit (ErrCode: {ret_code}), retrying in {wait_time:.1f}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
                 
                 # Проверяем на rate limit (403) или другие временные ошибки
                 if ret_code == 403 and ("rate limit" in ret_msg.lower() or "usa" in ret_msg.lower()):

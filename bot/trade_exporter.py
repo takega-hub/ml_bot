@@ -155,8 +155,18 @@ def export_trades_to_excel(
             # Автоматическая ширина колонок
             from openpyxl.utils import get_column_letter
             for idx, col in enumerate(df.columns, 1):
+                # Безопасное вычисление длины с учетом NaN и разных типов
+                def safe_str_len(x):
+                    try:
+                        s = str(x)
+                        if s in ('nan', 'None', 'none', ''):
+                            return 0
+                        return len(s)
+                    except:
+                        return 0
+                
                 max_length = max(
-                    df[col].astype(str).map(len).max(),
+                    df[col].apply(safe_str_len).max(),
                     len(str(col))
                 )
                 col_letter = get_column_letter(idx)

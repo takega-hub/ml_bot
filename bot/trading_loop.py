@@ -2176,6 +2176,11 @@ class TradingLoop:
                     # Вычисляем маржу
                     margin_usd = fixed_margin_usd
                     
+                    # Получаем плечо для расчета RR
+                    leverage = self.settings.get_leverage_for_symbol(symbol)
+                    if leverage is None or leverage <= 0:
+                        leverage = DEFAULT_LEVERAGE
+                    
                     # Параметры сигнала
                     rr_mode = getattr(self.settings.risk, 'trailing_activation_mode', 'price')
                     signal_parameters = {
