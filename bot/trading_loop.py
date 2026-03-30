@@ -3138,11 +3138,19 @@ class TradingLoop:
             if early_exit_minutes <= 0:
                 return
 
-            leverage = position.get("leverage", DEFAULT_LEVERAGE)
-            if not leverage or leverage <= 0:
+            try:
+                leverage_raw = position.get("leverage", DEFAULT_LEVERAGE)
+                leverage = int(leverage_raw) if leverage_raw else DEFAULT_LEVERAGE
+                if leverage <= 0:
+                    leverage = DEFAULT_LEVERAGE
+            except (TypeError, ValueError):
                 leverage = DEFAULT_LEVERAGE
             
-            min_profit_pct = get_early_exit_profit_pct(self.settings, leverage)
+            try:
+                min_profit_pct = get_early_exit_profit_pct(self.settings, leverage)
+            except Exception as e:
+                logger.warning(f"[{symbol}] Error getting early_exit profit pct: {e}, using default")
+                min_profit_pct = self.settings.risk.early_exit_min_profit_pct
             
             if duration_minutes > early_exit_minutes:
                 entry_price = float(position.get("avgPrice", 0))
