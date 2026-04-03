@@ -261,7 +261,7 @@ class RiskParams:
     
     # Режим расчета порогов активации: "price" = % от цены, "margin" = % от маржи
     trailing_activation_mode: str = "margin"  # По умолчанию - от маржи
-    trailing_activation_pct_margin: float = 7.0  # Активировать при прибыли 7% от маржи
+    trailing_activation_pct_margin: float = 20.0  # Активировать при прибыли 20% от маржи
     breakeven_activation_mode: str = "margin"  # По умолчанию - от маржи
     breakeven_level1_activation_pct_margin: float = 5.0  # Активировать 1-ю ступень при прибыли 5% от маржи
     breakeven_level2_activation_pct_margin: float = 10.0  # Активировать 2-ю ступень при прибыли 10% от маржи
@@ -292,7 +292,7 @@ class RiskParams:
     
     # Временные ограничения (Time Stop)
     time_stop_minutes: int = 360  # Максимальное время удержания позиции (6 часов)
-    early_exit_minutes: int = 60  # Ранний выход если цена не идет в нашу сторону
+    early_exit_minutes: int = 0  # Ранний выход если цена не идет в нашу сторону (0 = отключено)
     early_exit_min_profit_pct: float = 0.003  # Минимальная прибыль через early_exit_minutes (0.3% от цены)
     early_exit_mode: str = "margin"  # Режим расчета: "price" или "margin"
     early_exit_min_profit_pct_margin: float = 2.0  # Минимальная прибыль 2% от маржи
