@@ -729,11 +729,17 @@ class AIAgentService:
             return max(lo, min(hi, x))
 
         def _extract_json_block(text: str) -> str:
+            text = text.strip()
             if "```json" in text:
                 return text.split("```json", 1)[1].split("```", 1)[0].strip()
             if "```" in text:
                 return text.split("```", 1)[1].split("```", 1)[0].strip()
-            return text.strip()
+            # Попытка найти JSON структуру напрямую
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1:
+                return text[start:end+1]
+            return text
 
         def _normalize_decision(val: Any) -> str:
             s = str(val or "").strip()
@@ -854,6 +860,10 @@ class AIAgentService:
             "- allow: вход разумный\n"
             "- reduce: вход допустим, но риск повышен (уменьши размер)\n"
             "- veto: вход плохой/опасный\n\n"
+            "Инструкции:\n"
+            "1. Учитывай `engine_score` (от 0 до 100) из Decision Engine. Высокий score (>70) подтверждает сигнал.\n"
+            "2. Анализируй `market_context.liquidations`. Крупные ликвидации против направления сигнала могут означать кульминацию и разворот.\n"
+            "3. Сопоставляй `orderbook` и `recent_trades` для подтверждения импульса.\n\n"
             "Формат ответа:\n"
             "{\n"
             "  \"decision\": \"allow|reduce|veto\",\n"

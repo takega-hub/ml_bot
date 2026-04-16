@@ -413,8 +413,9 @@ class TradingLoop:
             }
             result_raw = result
         else:
-            result_raw = await agent.confirm_entry(payload)
-            result = self._normalize_ai_confirm_entry_result(result_raw, decision_id)
+            # Агент уже возвращает нормализованный результат
+            result = await agent.confirm_entry(payload)
+            result_raw = result
 
         root = Path(__file__).resolve().parent.parent
         engine_eval = None
@@ -1430,6 +1431,31 @@ class TradingLoop:
                             signal_logger.info(
                                 "ENGINE DETAILS: " + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
                             )
+                        try:
+                            root = Path(__file__).resolve().parent.parent
+                            append_jsonl(
+                                str(root / "logs" / "decision_engine_audit.jsonl"),
+                                {
+                                    "event_type": "engine_signal",
+                                    "decision_id": engine_eval.get("decision_id") if isinstance(engine_eval, dict) else None,
+                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "symbol": symbol,
+                                    "timeframe": str(self.settings.timeframe),
+                                    "candle_timestamp": candle_timestamp.isoformat() if candle_timestamp is not None else None,
+                                    "signal": {
+                                        "action": signal.action.value,
+                                        "price": float(current_price),
+                                        "reason": signal.reason,
+                                        "confidence": float(confidence),
+                                        "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else "",
+                                        "take_profit": float(signal.take_profit) if signal.take_profit else None,
+                                        "stop_loss": float(signal.stop_loss) if signal.stop_loss else None,
+                                    },
+                                    "engine_eval": engine_eval,
+                                },
+                            )
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             
@@ -1800,6 +1826,22 @@ class TradingLoop:
                 if engine_mode == "enforce" and eng_d == "veto":
                     try:
                         root = Path(__file__).resolve().parent.parent
+                        try:
+                            append_jsonl(
+                                str(root / "logs" / "decision_engine_audit.jsonl"),
+                                {
+                                    "event_type": "engine_blocked",
+                                    "decision_id": eng.get("decision_id") if isinstance(eng, dict) else None,
+                                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                    "symbol": symbol,
+                                    "timeframe": str(self.settings.timeframe),
+                                    "side": side,
+                                    "engine_eval": eng,
+                                    "notes": "Blocked by decision engine",
+                                },
+                            )
+                        except Exception:
+                            pass
                         append_jsonl(
                             str(root / "logs" / "ai_entry_audit.jsonl"),
                             {
@@ -1871,7 +1913,7 @@ class TradingLoop:
             )
 
             if ai_mode == "shadow":
-                logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked")
+                logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked (AI decision: {d})")
             elif d == "veto":
                 try:
                     root = Path(__file__).resolve().parent.parent
@@ -2038,6 +2080,52 @@ class TradingLoop:
             qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision = qty_calc
 
             logger.info(f"[{symbol}] ✅ Position size calculated: qty={qty:.6f}, placing order...")
+
+            def _trim_resp(x):
+                if not isinstance(x, dict):
+                    return x
+                out = {}
+                for k in ("retCode", "retMsg", "time", "result"):
+                    if k in x:
+                        out[k] = x.get(k)
+                return out
+
+            engine_eval = signal.indicators_info.get("decision_engine_eval") if isinstance(signal.indicators_info, dict) else None
+            engine_id = None
+            if isinstance(engine_eval, dict) and isinstance(engine_eval.get("decision_id"), str):
+                engine_id = engine_eval.get("decision_id")
+            ai = signal.indicators_info.get("ai_entry_confirmation") if isinstance(signal.indicators_info, dict) else None
+            ai_id = ai.get("decision_id") if isinstance(ai, dict) else None
+            try:
+                root = Path(__file__).resolve().parent.parent
+                append_jsonl(
+                    str(root / "logs" / "trade_execution_audit.jsonl"),
+                    {
+                        "event_type": "order_attempt",
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "timeframe": str(self.settings.timeframe),
+                        "side": side,
+                        "is_add": bool(is_add),
+                        "qty": float(qty),
+                        "signal_price": float(signal.price),
+                        "tp": float(signal_tp) if signal_tp else None,
+                        "sl": float(signal_sl) if signal_sl else None,
+                        "use_take_profit": bool(getattr(self.settings.risk, "use_take_profit", True)),
+                        "expected_margin_usd": float(fixed_margin_usd),
+                        "expected_position_size_usd": float(position_size_usd),
+                        "leverage": int(self.settings.get_leverage_for_symbol(symbol)),
+                        "confidence": float(indicators_info.get("confidence", 0.0)) if isinstance(indicators_info, dict) else None,
+                        "strength": str(indicators_info.get("strength", "")) if isinstance(indicators_info, dict) else None,
+                        "engine_decision_id": engine_id,
+                        "engine_score": engine_eval.get("score") if isinstance(engine_eval, dict) else None,
+                        "engine_decision": engine_eval.get("decision") if isinstance(engine_eval, dict) else None,
+                        "ai_decision_id": ai_id if isinstance(ai_id, str) else None,
+                        "ai_decision": ai.get("decision") if isinstance(ai, dict) else None,
+                    },
+                )
+            except Exception:
+                pass
             
             try:
                 tp_to_send = None
@@ -2106,6 +2194,25 @@ class TradingLoop:
                 logger.info(f"[{symbol}] 📡 Order response: retCode={ret_code}, retMsg={ret_msg}, full_response={resp}")
             else:
                 logger.error(f"[{symbol}] ❌ Order response is None or empty!")
+
+            try:
+                root = Path(__file__).resolve().parent.parent
+                append_jsonl(
+                    str(root / "logs" / "trade_execution_audit.jsonl"),
+                    {
+                        "event_type": "order_response",
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "timeframe": str(self.settings.timeframe),
+                        "side": side,
+                        "is_add": bool(is_add),
+                        "engine_decision_id": engine_id,
+                        "ai_decision_id": ai_id if isinstance(ai_id, str) else None,
+                        "response": _trim_resp(resp),
+                    },
+                )
+            except Exception:
+                pass
             
             if resp and isinstance(resp, dict) and resp.get("retCode") == 0:
                 if is_add:

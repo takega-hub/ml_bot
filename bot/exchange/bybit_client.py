@@ -598,6 +598,25 @@ class BybitClient:
         except Exception as e:
             print(f"[bybit] Error getting recent trades for {symbol}: {e}")
             return []
+
+    def get_liquidations(self, symbol: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Получить историю ликвидаций для инструмента (категория linear).
+        """
+        try:
+            # В Bybit V5 для ликвидаций используется get_public_liquidation_history
+            resp = self._retry_request(
+                self.session.get_public_liquidation_history,
+                category="linear",
+                symbol=symbol,
+                limit=limit,
+            )
+            result = resp.get("result", {}) if isinstance(resp, dict) else {}
+            liquidations = result.get("list", []) or []
+            return liquidations
+        except Exception as e:
+            print(f"[bybit] Error getting liquidations for {symbol}: {e}")
+            return []
     
     def get_price_step(self, symbol: str) -> float:
         """Получить priceStep (шаг цены / tick size) для символа."""
