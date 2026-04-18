@@ -942,9 +942,7 @@ class MLStrategy:
                         logger.info(f"✅ Signal PASSED meta-filter (prob: {meta_prob:.2f})")
                 except Exception as e:
                     logger.error(f"[ml_strategy] Error in meta-filter: {e}")
-                    }
-                )
-            
+
             # === РАСЧЕТ SL ОТ УРОВНЕЙ + TP ПО RR 2-3:1 ===
             sl_price = None
             tp_price = None
