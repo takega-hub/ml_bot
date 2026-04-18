@@ -184,12 +184,34 @@ class FeatureEngineer:
         out = df.copy()
         for col in ["open", "high", "low", "close", "volume"]:
             if col not in out.columns:
-                return pd.DataFrame()
+                # Пытаемся найти колонки в другом регистре
+                found = False
+                for c in out.columns:
+                    if c.lower() == col:
+                        out[col] = out[c]
+                        found = True
+                        break
+                if not found:
+                    return pd.DataFrame()
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
         if "timestamp" in out.columns:
-            out = out.set_index("timestamp")
+            if not isinstance(out.index, pd.DatetimeIndex):
+                try:
+                    if pd.api.types.is_numeric_dtype(out["timestamp"]):
+                        out["timestamp"] = pd.to_datetime(out["timestamp"], unit="ms" if out["timestamp"].iloc[0] > 1e12 else "s")
+                    else:
+                        out["timestamp"] = pd.to_datetime(out["timestamp"])
+                    out = out.set_index("timestamp")
+                except Exception:
+                    # If conversion fails, try to set index directly if it's already datetime-like
+                    try:
+                        out = out.set_index("timestamp")
+                    except Exception:
+                        pass
 
+        # Basic features
+        out["turnover"] = out["close"] * out["volume"]
         out["sma_20"] = ta.sma(out["close"], length=20)
         out["sma_50"] = ta.sma(out["close"], length=50)
         out["ema_12"] = ta.ema(out["close"], length=12)
@@ -199,7 +221,10 @@ class FeatureEngineer:
         out["atr_pct"] = (out["atr"] / out["close"].replace(0, np.nan)) * 100
         out["volume_sma_20"] = ta.sma(out["volume"], length=20)
         out["volume_ratio"] = np.where(out["volume_sma_20"] > 0, out["volume"] / out["volume_sma_20"], 1.0)
+        out["price_change"] = out["close"].pct_change()
+        out["price_change_abs"] = out["price_change"].abs()
 
+        # Bollinger Bands
         bb = ta.bbands(out["close"], length=20, std=2)
         if bb is not None and not bb.empty:
             out["bb_upper"] = bb.iloc[:, 0]
@@ -210,6 +235,7 @@ class FeatureEngineer:
             out["bb_middle"] = out["close"]
             out["bb_lower"] = out["close"]
 
+        # MACD
         macd = ta.macd(out["close"])
         if macd is not None and not macd.empty:
             out["macd"] = macd.iloc[:, 0]
@@ -218,6 +244,7 @@ class FeatureEngineer:
             out["macd"] = 0.0
             out["macd_signal"] = 0.0
 
+        # ADX
         adx_df = ta.adx(out["high"], out["low"], out["close"], length=14)
         if adx_df is not None and not adx_df.empty:
             out["adx"] = adx_df.iloc[:, 0]
@@ -228,26 +255,31 @@ class FeatureEngineer:
             out["di_plus"] = 0.0
             out["di_minus"] = 0.0
 
-        out["adx_trend_up"] = (pd.to_numeric(out["di_plus"], errors="coerce").fillna(0.0) > pd.to_numeric(out["di_minus"], errors="coerce").fillna(0.0)).astype(int)
-        out["price_change"] = out["close"].pct_change()
-        out["price_change_abs"] = out["price_change"].abs()
+        # Lags
+        for lag in [1, 2, 3]:
+            out[f"close_lag_{lag}"] = out["close"].shift(lag)
+            out[f"volume_lag_{lag}"] = out["volume"].shift(lag)
+            out[f"price_change_lag_{lag}"] = out["price_change"].shift(lag)
+
+        # Volatility features
         out["volatility_10"] = out["close"].rolling(window=10, min_periods=3).std()
-        out["realized_volatility_20"] = out["price_change"].rolling(window=20, min_periods=5).std()
-        out["momentum_3"] = out["close"].pct_change(periods=3)
-        out["momentum_5"] = out["close"].pct_change(periods=5)
-        out["momentum_10"] = out["close"].pct_change(periods=10)
         out["dist_to_sma20_pct"] = ((out["close"] - out["sma_20"]) / out["sma_20"].replace(0, np.nan)) * 100
         out["dist_to_ema12_pct"] = ((out["close"] - out["ema_12"]) / out["ema_12"].replace(0, np.nan)) * 100
-        out["bb_position"] = (out["close"] - out["bb_lower"]) / (out["bb_upper"] - out["bb_lower"]).replace(0, np.nan)
-        out["near_bb_upper"] = (out["close"] > out["bb_upper"] * 0.95).astype(int)
-        out["near_bb_lower"] = (out["close"] < out["bb_lower"] * 1.05).astype(int)
-        out["rsi_oversold"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) < 30).astype(int)
-        out["rsi_overbought"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) > 70).astype(int)
-        out["ema12_above_ema26"] = (pd.to_numeric(out["ema_12"], errors="coerce").fillna(0.0) > pd.to_numeric(out["ema_26"], errors="coerce").fillna(0.0)).astype(int)
-        out["ob_imbalance"] = 0.0
-        out["ob_imbalance_5"] = 0.0
-        out["ob_imbalance_20"] = 0.0
 
+        # Additional Volatility (requested by model)
+        out["realized_volatility_10"] = out["price_change"].rolling(window=10).std()
+        out["realized_volatility_20"] = out["price_change"].rolling(window=20).std()
+
+        # Parkinson Volatility
+        def parkinson_vol(h, l, window=20):
+            return np.sqrt(1 / (4 * np.log(2)) * (np.log(h / l)**2).rolling(window=window).mean())
+
+        out["parkinson_vol"] = parkinson_vol(out["high"], out["low"])
+        out["parkinson_vol_pct"] = out["parkinson_vol"] * 100
+        out["volatility_ratio"] = out["realized_volatility_10"] / out["realized_volatility_20"].replace(0, np.nan)
+        out["spread_proxy"] = (out["high"] - out["low"]) / out["close"].replace(0, np.nan)
+
+        # Time features
         if isinstance(out.index, pd.DatetimeIndex):
             out["hour"] = out.index.hour
             out["day_of_week"] = out.index.dayofweek
@@ -255,15 +287,97 @@ class FeatureEngineer:
             out["hour_cos"] = np.cos(2 * np.pi * out["hour"] / 24.0)
             out["dow_sin"] = np.sin(2 * np.pi * out["day_of_week"] / 7.0)
             out["dow_cos"] = np.cos(2 * np.pi * out["day_of_week"] / 7.0)
+        else:
+            out["hour"] = 0
+            out["day_of_week"] = 0
+            out["hour_sin"] = 0
+            out["hour_cos"] = 0
+            out["dow_sin"] = 0
+            out["dow_cos"] = 0
 
-        for lag in [1, 2, 3]:
-            out[f"close_lag_{lag}"] = out["close"].shift(lag)
-            out[f"volume_lag_{lag}"] = out["volume"].shift(lag)
-            out[f"price_change_lag_{lag}"] = out["price_change"].shift(lag)
+        # Signals / Positions
+        out["rsi_oversold"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) < 30).astype(int)
+        out["rsi_overbought"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) > 70).astype(int)
+        out["ema12_above_ema26"] = (pd.to_numeric(out["ema_12"], errors="coerce").fillna(0.0) > pd.to_numeric(out["ema_26"], errors="coerce").fillna(0.0)).astype(int)
+        out["bb_position"] = (out["close"] - out["bb_lower"]) / (out["bb_upper"] - out["bb_lower"]).replace(0, np.nan)
+        out["near_bb_upper"] = (out["close"] > out["bb_upper"] * 0.95).astype(int)
+        out["near_bb_lower"] = (out["close"] < out["bb_lower"] * 1.05).astype(int)
 
+        # Volume Imbalance
+        # Note: Since we don't always have orderbook history in klines,
+        # we approximate imbalance from price action vs volume (Volume Delta)
+        # But the model specifically wants 'volume_imbalance_5/10'
+        # We'll use Buy/Sell Pressure approximation
+        range_total = (out["high"] - out["low"]).replace(0, np.nan)
+        buy_pressure = (out["close"] - out["low"]) / range_total
+        sell_pressure = (out["high"] - out["close"]) / range_total
+        vol_imbalance = (buy_pressure - sell_pressure).fillna(0.0)
+        out["volume_imbalance_5"] = vol_imbalance.rolling(window=5).mean()
+        out["volume_imbalance_10"] = vol_imbalance.rolling(window=10).mean()
+
+        # Momentum
+        out["momentum_3"] = out["close"].pct_change(periods=3)
+        out["momentum_5"] = out["close"].pct_change(periods=5)
+        out["momentum_10"] = out["close"].pct_change(periods=10)
+
+        out["adx_trend_up"] = (pd.to_numeric(out["di_plus"], errors="coerce").fillna(0.0) > pd.to_numeric(out["di_minus"], errors="coerce").fillna(0.0)).astype(int)
+
+        # Candlestick Patterns
+        out["body_size"] = (out["close"] - out["open"]).abs()
+        out["upper_wick"] = out["high"] - out[["open", "close"]].max(axis=1)
+        out["lower_wick"] = out[["open", "close"]].min(axis=1) - out["low"]
+        out["total_range"] = out["high"] - out["low"]
+        out["body_wick_ratio"] = out["body_size"] / (out["upper_wick"] + out["lower_wick"]).replace(0, np.nan)
+
+        # Pattern markers
+        out["is_doji"] = (out["body_size"] <= out["total_range"] * 0.1).astype(int)
+        out["is_hammer"] = ((out["lower_wick"] > out["body_size"] * 2) & (out["upper_wick"] < out["body_size"] * 0.5)).astype(int)
+        out["is_shooting_star"] = ((out["upper_wick"] > out["body_size"] * 2) & (out["lower_wick"] < out["body_size"] * 0.5)).astype(int)
+        out["is_bullish_engulfing"] = (
+            (out["close"] > out["open"]) &
+            (out["close"].shift(1) < out["open"].shift(1)) &
+            (out["close"] > out["open"].shift(1)) &
+            (out["open"] < out["close"].shift(1))
+        ).astype(int)
+        out["is_bearish_engulfing"] = (
+            (out["close"] < out["open"]) &
+            (out["close"].shift(1) > out["open"].shift(1)) &
+            (out["close"] < out["open"].shift(1)) &
+            (out["open"] > out["close"].shift(1))
+        ).astype(int)
+
+        # Support/Resistance Logic
+        window = 20
+        out["local_low"] = out["low"].rolling(window=window, center=True).min()
+        out["local_high"] = out["high"].rolling(window=window, center=True).max()
+
+        out["dist_to_support_pct"] = (out["close"] - out["local_low"]) / out["close"].replace(0, np.nan) * 100
+        out["dist_to_resistance_pct"] = (out["local_high"] - out["close"]) / out["close"].replace(0, np.nan) * 100
+        out["dist_to_support_atr"] = (out["close"] - out["local_low"]) / out["atr"].replace(0, np.nan)
+        out["dist_to_resistance_atr"] = (out["local_high"] - out["close"]) / out["atr"].replace(0, np.nan)
+
+        # Strengths (Approximated)
+        out["support_touches"] = (out["low"] <= out["local_low"] * 1.002).astype(int).rolling(window=100).sum()
+        out["resistance_touches"] = (out["high"] >= out["local_high"] * 0.998).astype(int).rolling(window=100).sum()
+
+        out["support_strength"] = out["support_touches"] * (1 / (out["dist_to_support_pct"] + 0.1))
+        out["resistance_strength"] = out["resistance_touches"] * (1 / (out["dist_to_resistance_pct"] + 0.1))
+
+        out["support_strength_ratio"] = out["support_strength"] / (out["support_strength"] + out["resistance_strength"]).replace(0, np.nan)
+        out["resistance_strength_ratio"] = out["resistance_strength"] / (out["support_strength"] + out["resistance_strength"]).replace(0, np.nan)
+
+        # Orderbook placeholders (will be filled in live or if available)
+        if "ob_imbalance" not in out.columns:
+            out["ob_imbalance"] = 0.0
+        if "ob_imbalance_5" not in out.columns:
+            out["ob_imbalance_5"] = 0.0
+        if "ob_imbalance_20" not in out.columns:
+            out["ob_imbalance_20"] = 0.0
+
+        # Final cleanup
         out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
 
-        base_cols = {"open", "high", "low", "close", "volume", "timestamp"}
+        base_cols = {"open", "high", "low", "close", "volume", "timestamp", "target", "meta_target"}
         self.feature_names = [c for c in out.columns if c not in base_cols]
         return out
 
@@ -287,6 +401,87 @@ class FeatureEngineer:
                         out[f"{col}_{tf_name}"] = vals[: len(out)]
         out = out.ffill().bfill().fillna(0.0)
         return out
+
+    def create_triple_barrier_labels(
+        self,
+        df: pd.DataFrame,
+        pt_sl_ratio: float = 2.0,
+        volatility_lookback: int = 20,
+        vertical_barrier_candles: int = 24,
+        min_vol_pct: float = 0.1
+    ) -> pd.DataFrame:
+        """
+        Implementation of the Triple Barrier Method (de Prado).
+        Labels: 1 (Long Opportunity), -1 (Short Opportunity), 0 (No clear trend/Horizontal hit).
+        """
+        if df is None or df.empty or "close" not in df.columns:
+            return pd.DataFrame()
+
+        out = df.copy()
+        close = pd.to_numeric(out["close"], errors="coerce").values
+
+        # 1. Dynamic volatility (Daily-scaled volatility or rolling window)
+        returns = out["close"].pct_change()
+        volatility = returns.rolling(window=volatility_lookback).std()
+        volatility = volatility.fillna(method='bfill').fillna(0.005).values
+
+        # Ensure minimum volatility
+        min_vol = min_vol_pct / 100.0
+        volatility = np.clip(volatility, min_vol, None)
+
+        # 2. Add Volatility regime feature
+        out["volatility_regime"] = volatility
+        out["volatility_ma"] = out["volatility_regime"].rolling(window=100).mean().fillna(method='bfill')
+        out["is_high_volatility"] = (out["volatility_regime"] > out["volatility_ma"] * 1.5).astype(int)
+
+        labels = np.zeros(len(out))
+
+        for i in range(len(out) - vertical_barrier_candles):
+            price_start = close[i]
+            vol = volatility[i]
+
+            # Barriers for Long
+            l_tp = price_start * (1 + vol * pt_sl_ratio)
+            l_sl = price_start * (1 - vol)
+
+            # Barriers for Short
+            s_tp = price_start * (1 - vol * pt_sl_ratio)
+            s_sl = price_start * (1 + vol)
+
+            hit = 0
+            for j in range(1, vertical_barrier_candles + 1):
+                p_curr = close[i + j]
+
+                if p_curr >= l_tp:
+                    hit = 1
+                    break
+                elif p_curr <= s_tp:
+                    hit = -1
+                    break
+
+                if p_curr <= l_sl or p_curr >= s_sl:
+                    hit = 0
+                    break
+
+            labels[i] = hit
+
+        out["target"] = labels.astype(int)
+        return out.iloc[:-vertical_barrier_candles]
+
+    def compute_meta_labels(self, df: pd.DataFrame, predictions: np.ndarray) -> pd.Series:
+        """
+        Computes meta-labels (0/1) for a secondary 'Signal Filter' model.
+        Meta-label is 1 if the primary model's signal was correct (hit TP), 0 otherwise.
+
+        predictions: Array of primary model predictions (-1, 0, 1)
+        """
+        if "target" not in df.columns or len(predictions) != len(df):
+            return pd.Series(0, index=df.index)
+
+        target = df["target"].values
+        # Meta label is 1 ONLY if prediction matches a non-zero target
+        meta_labels = np.where((predictions != 0) & (predictions == target), 1, 0)
+        return pd.Series(meta_labels, index=df.index, name="meta_target")
 
     def create_target_variable(
         self,

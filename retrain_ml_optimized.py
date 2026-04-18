@@ -116,6 +116,9 @@ def main():
     parser.add_argument("--report-json", type=str)
     parser.add_argument("--safe-mode", action="store_true")
     parser.add_argument("--hyperparams-json", type=str)
+    parser.add_argument("--use-triple-barrier", action="store_true", help="Использовать Triple Barrier Method для разметки")
+    parser.add_argument("--use-meta-labeling", action="store_true", help="Использовать Meta-Labeling для фильтрации сигналов")
+    parser.add_argument("--prune-features", action="store_true", help="Удалять малозначимые признаки")
     args = parser.parse_known_args()[0]
     hyperparams = _load_hyperparams(args.hyperparams_json)
 
@@ -182,24 +185,56 @@ def main():
         safe_print(f"✅ Создано {len(df_feat.columns)} признаков")
 
         safe_print(f"\n[3/5] 🎯 Создание целевой переменной для {symbol}...")
-        if base_interval == "60":
-            forward_periods = _clamp_int(hyperparams.get("forward_periods_1h"), 4, 20, 8)
-            threshold_pct = _clamp_float(hyperparams.get("threshold_pct_1h"), 0.2, 2.5, 0.8)
-            min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_1h"), 0.2, 2.0, 0.8)
+
+        # Check if we should use Triple Barrier Method
+        use_triple_barrier = args.use_triple_barrier or os.getenv("USE_TRIPLE_BARRIER", "0") in ("1", "true", "True", "yes")
+        use_meta_labeling = args.use_meta_labeling or hyperparams.get("use_meta_labeling", False) or os.getenv("USE_META_LABELING", "0") in ("1", "true", "True", "yes")
+
+        if use_triple_barrier:
+            safe_print("📌 Используется Triple Barrier Method (TBM)")
+            pt_sl_ratio = _clamp_float(hyperparams.get("tbm_pt_sl_ratio"), 1.0, 5.0, 2.0)
+            volatility_lookback = _clamp_int(hyperparams.get("tbm_volatility_lookback"), 10, 100, 20)
+            vertical_barrier = _clamp_int(hyperparams.get("tbm_vertical_barrier"), 12, 96, 24)
+
+            df_target = engineer.create_triple_barrier_labels(
+                df_feat,
+                pt_sl_ratio=pt_sl_ratio,
+                volatility_lookback=volatility_lookback,
+                vertical_barrier_candles=vertical_barrier
+            )
         else:
-            forward_periods = _clamp_int(hyperparams.get("forward_periods_15m"), 3, 16, 5)
-            threshold_pct = _clamp_float(hyperparams.get("threshold_pct_15m"), 0.15, 1.5, 0.3)
-            min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_15m"), 0.1, 1.2, 0.3)
-        df_target = engineer.create_target_variable(
-            df_feat,
-            forward_periods=forward_periods,
-            threshold_pct=threshold_pct,
-            min_profit_pct=min_profit_pct,
-        )
+            if base_interval == "60":
+                forward_periods = _clamp_int(hyperparams.get("forward_periods_1h"), 4, 20, 8)
+                threshold_pct = _clamp_float(hyperparams.get("threshold_pct_1h"), 0.2, 2.5, 0.8)
+                min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_1h"), 0.2, 2.0, 0.8)
+            else:
+                forward_periods = _clamp_int(hyperparams.get("forward_periods_15m"), 3, 16, 5)
+                threshold_pct = _clamp_float(hyperparams.get("threshold_pct_15m"), 0.15, 1.5, 0.3)
+                min_profit_pct = _clamp_float(hyperparams.get("min_profit_pct_15m"), 0.1, 1.2, 0.3)
+
+            df_target = engineer.create_target_variable(
+                df_feat,
+                forward_periods=forward_periods,
+                threshold_pct=threshold_pct,
+                min_profit_pct=min_profit_pct,
+            )
+
+        if df_target is None or df_target.empty:
+            safe_print(f"❌ Не удалось создать целевую переменную для {symbol}")
+            continue
+
         safe_print("✅ Целевая переменная создана")
 
         safe_print(f"\n[4/5] 📦 Подготовка данных для обучения...")
         X, y, feature_names = _prepare_training_matrix(trainer, df_target)
+
+        if args.prune_features:
+            kept_features = trainer.prune_features(X, y, feature_names)
+            feature_names = kept_features
+            # Обновляем X после удаления признаков
+            X = df_target[feature_names].values
+            trainer.feature_engineer.feature_names = feature_names
+
         safe_print(f"✅ Данные подготовлены:\n   Features: {X.shape[0]} samples × {X.shape[1]} features\n   Target: {len(y)} labels")
 
         safe_print(f"\n[5/5] 🤖 Обучение моделей с балансировкой классов...")
@@ -310,6 +345,33 @@ def main():
                 lstm_sequence_length=lstm_sequence_length,
                 lstm_epochs=lstm_epochs,
             )
+
+            # --- Добавляем оптимизацию порогов и мета-лейблинг ---
+            safe_print("\n   🔍 Оптимизация порогов уверенности...")
+            optimal_threshold = trainer.optimize_thresholds(quad_model, X, y, df_history=df_target)
+            quad_metrics["optimal_threshold"] = optimal_threshold
+
+            if use_meta_labeling:
+                safe_print("\n   🔍 Обучение Meta-Labeling Filter...")
+                y_pred_primary_raw = quad_model.predict_proba(X, df_history=df_target)
+                y_pred_primary = np.argmax(y_pred_primary_raw, axis=1) - 1 # (-1, 0, 1)
+
+                meta_labels = engineer.compute_meta_labels(df_target, y_pred_primary)
+                y_meta = meta_labels.values
+
+                if np.sum(y_meta == 1) > 10:
+                    meta_model, meta_metrics = trainer.train_meta_classifier(
+                        X,
+                        y_meta,
+                        n_estimators=100,
+                        max_depth=4,
+                    )
+                    quad_metrics["meta_metrics"] = meta_metrics
+                    quad_metrics["meta_model"] = meta_model
+                    safe_print(f"      ✅ Meta-Filter обучен. Accuracy: {meta_metrics['accuracy']:.3f}")
+                else:
+                    safe_print("      ⚠️ Недостаточно положительных примеров для Meta-Filter")
+
             quad_filename = f"quad_ensemble_{symbol}_{base_interval}_{mode_suffix}{model_suffix}.pkl"
             trainer.save_model(
                 quad_model,
@@ -320,8 +382,11 @@ def main():
                 symbol=symbol,
                 interval=base_interval,
                 model_type="quad_ensemble",
+                meta_model=quad_metrics.get("meta_model"),
+                optimal_threshold=quad_metrics.get("optimal_threshold")
             )
-            safe_print(f"      ✅ Сохранено как: {quad_filename}")
+            safe_print(f"      ✅ Сохранено как: {quad_filename} (с мета-данными)")
+
         else:
             quad_metrics = None
 

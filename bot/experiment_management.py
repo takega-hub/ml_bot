@@ -856,6 +856,7 @@ def build_regime_plan_context(
                 "xgb_n_estimators": 140,
                 "xgb_max_depth": 6,
                 "xgb_learning_rate": 0.08,
+                "use_meta_labeling": True,
             },
         },
     }
@@ -903,7 +904,29 @@ def build_hyperparameter_search_strategy(
         "xgb_n_estimators": int(prev.get("xgb_n_estimators") or 140),
         "xgb_max_depth": int(prev.get("xgb_max_depth") or 6),
         "xgb_learning_rate": float(prev.get("xgb_learning_rate") or 0.08),
+        # Triple Barrier Method (TBM) defaults
+        "use_triple_barrier": bool(prev.get("use_triple_barrier", False)),
+        "tbm_pt_sl_ratio": float(prev.get("tbm_pt_sl_ratio") or 2.0),
+        "tbm_vertical_barrier": int(prev.get("tbm_vertical_barrier") or 24),
+        "tbm_volatility_lookback": int(prev.get("tbm_volatility_lookback") or 20),
+        "use_meta_labeling": bool(prev.get("use_meta_labeling", True)),
     }
+
+    # Smarter evolutionary mutation logic
+    import random
+    def mutate(params: Dict[str, Any], strength: float = 0.1) -> Dict[str, Any]:
+        new_params = params.copy()
+        for k, v in new_params.items():
+            if isinstance(v, bool):
+                if random.random() < 0.2: # 20% chance to flip bool
+                    new_params[k] = not v
+            elif isinstance(v, int):
+                delta = int(v * strength * random.uniform(-1, 1))
+                new_params[k] = v + (delta if delta != 0 else random.choice([-1, 1]))
+            elif isinstance(v, float):
+                new_params[k] = v * (1 + strength * random.uniform(-1, 1))
+        return new_params
+
     if trend.startswith("trend_up") or trend.startswith("trend_down"):
         base["forward_periods_15m"] = max(base["forward_periods_15m"], 6)
         base["threshold_pct_15m"] = max(base["threshold_pct_15m"], 0.35)
@@ -968,6 +991,11 @@ def build_hyperparameter_search_strategy(
             "xgb_n_estimators": _clamp_int(hp.get("xgb_n_estimators", base["xgb_n_estimators"]), 80, 600),
             "xgb_max_depth": _clamp_int(hp.get("xgb_max_depth", base["xgb_max_depth"]), 3, 12),
             "xgb_learning_rate": _clamp_float(hp.get("xgb_learning_rate", base["xgb_learning_rate"]), 0.02, 0.3),
+            "use_triple_barrier": bool(hp.get("use_triple_barrier", base["use_triple_barrier"])),
+            "tbm_pt_sl_ratio": _clamp_float(hp.get("tbm_pt_sl_ratio", base["tbm_pt_sl_ratio"]), 1.0, 5.0),
+            "tbm_vertical_barrier": _clamp_int(hp.get("tbm_vertical_barrier", base["tbm_vertical_barrier"]), 12, 96),
+            "tbm_volatility_lookback": _clamp_int(hp.get("tbm_volatility_lookback", base["tbm_volatility_lookback"]), 10, 100),
+            "use_meta_labeling": bool(hp.get("use_meta_labeling", base["use_meta_labeling"])),
         }
 
     candidates.append(
@@ -978,6 +1006,17 @@ def build_hyperparameter_search_strategy(
             "rationale": "Локальный базовый набор под текущий режим.",
         }
     )
+
+    # Evolutionary mutations based on base (or previously successful)
+    candidates.append(
+        {
+            "candidate_id": "mutated_evolutionary_1",
+            "strategy": "evolutionary",
+            "hyperparams": _normalized(mutate(base, strength=0.15)),
+            "rationale": "Эволюционная мутация (15%) базовых параметров для поиска локальных оптимумов.",
+        }
+    )
+
     candidates.append(
         {
             "candidate_id": "stability_tuned",
@@ -994,34 +1033,30 @@ def build_hyperparameter_search_strategy(
             "rationale": "Усиление устойчивости: больше данных и более плавный бустинг.",
         }
     )
+
     candidates.append(
         {
-            "candidate_id": "trade_quality_tuned",
-            "strategy": "local_trade_quality",
-            "hyperparams": _normalized(
-                {
-                    **base,
-                    "threshold_pct_15m": float(base["threshold_pct_15m"]) + 0.05,
-                    "min_profit_pct_15m": float(base["min_profit_pct_15m"]) + 0.04,
-                    "forward_periods_15m": int(base["forward_periods_15m"]) + 1,
-                }
-            ),
-            "rationale": "Сдвиг в сторону качества сигналов и фильтрации шума.",
+            "candidate_id": "meta_labeling_test",
+            "strategy": "meta_labeling",
+            "hyperparams": _normalized({**base, "use_meta_labeling": True}),
+            "rationale": "Использование Meta-Labeling для фильтрации потенциально убыточных сигналов.",
         }
     )
+
     candidates.append(
         {
-            "candidate_id": "pnl_tuned",
-            "strategy": "local_pnl",
+            "candidate_id": "tbm_optimized",
+            "strategy": "triple_barrier",
             "hyperparams": _normalized(
                 {
                     **base,
-                    "threshold_pct_15m": float(base["threshold_pct_15m"]) - 0.04,
-                    "min_profit_pct_15m": float(base["min_profit_pct_15m"]) - 0.03,
-                    "xgb_learning_rate": float(base["xgb_learning_rate"]) + 0.01,
+                    "use_triple_barrier": True,
+                    "tbm_pt_sl_ratio": 2.0,
+                    "tbm_vertical_barrier": 24,
+                    "threshold_pct_15m": 0.25,
                 }
             ),
-            "rationale": "Сдвиг в сторону доходности за счёт более чувствительного входа.",
+            "rationale": "Использование Triple Barrier Method для качественной разметки волатильности.",
         }
     )
 
@@ -1092,6 +1127,8 @@ def build_hyperparameter_search_strategy(
             "rf_n_estimators": [80, 500],
             "xgb_n_estimators": [80, 600],
             "xgb_learning_rate": [0.02, 0.3],
+            "tbm_pt_sl_ratio": [1.0, 5.0],
+            "tbm_vertical_barrier": [12, 96],
         },
     }
 
@@ -1121,6 +1158,22 @@ class HypothesisGenerator:
         )
         best = completed_sorted[0] if completed_sorted else None
         hypotheses: List[Dict[str, Any]] = []
+
+        # New TBM Hypothesis
+        hypotheses.append(
+            {
+                "title": "Переход на Triple Barrier Method",
+                "changes": {
+                    "labeling": {
+                        "method": "triple_barrier",
+                        "pt_sl_ratio": 2.0,
+                        "vertical_barrier": 24
+                    }
+                },
+                "rationale": "Triple Barrier Method лучше учитывает волатильность и временные ограничения сделок, чем фиксированный forward window.",
+                "expected": "Повышение стабильности сигналов и снижение просадок за счет динамических стопов.",
+            }
+        )
 
         if best and self._success(best):
             hypotheses.append(

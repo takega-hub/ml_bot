@@ -126,7 +126,17 @@ class MLStrategy:
         self.scaler = self.model_data["scaler"]
         self.feature_names = self.model_data["feature_names"]
         self.is_ensemble = self.model_data.get("metadata", {}).get("model_type", "").startswith("ensemble")
-        
+
+        # Загружаем оптимальный порог и мета-фильтр
+        self.optimal_threshold = self.model_data.get("optimal_threshold")
+        if self.optimal_threshold:
+            logger.info(f"[ml_strategy] Using optimal_threshold from model: {self.optimal_threshold:.4f}")
+            self.confidence_threshold = self.optimal_threshold
+
+        self.meta_model = self.model_data.get("meta_model")
+        if self.meta_model:
+            logger.info(f"[ml_strategy] Meta-filter (Signal Filter) is ACTIVE")
+
         # Если это QuadEnsemble, восстанавливаем feature_names в lstm_trainer
         if hasattr(self.model, 'lstm_trainer') and self.model.lstm_trainer is not None:
             # Если feature_names не установлены в lstm_trainer, пытаемся восстановить
@@ -556,23 +566,44 @@ class MLStrategy:
         
         # Динамические веса ансамбля по режиму рынка (тренд/флэт по ADX)
         weights_override = None
-        if self.use_dynamic_ensemble_weights and self.is_ensemble and (self.trend_weights or self.flat_weights):
+        regime = None
+        if self.is_ensemble:
             try:
                 row = df_with_features.iloc[-1]
                 adx = row.get("adx", np.nan)
+                atr_pct = row.get("atr_pct", np.nan)
+
+                # Определение режима для QuadEnsemble (авто-веса)
                 if np.isfinite(adx):
-                    if adx > self.adx_trend_threshold and self.trend_weights:
+                    if adx > self.adx_trend_threshold:
+                        regime = "trend"
+                    elif adx < self.adx_flat_threshold:
+                        regime = "sideways"
+
+                # ATR-фильтр волатильности (дополнительный режим)
+                if np.isfinite(atr_pct) and atr_pct > 1.5:
+                    regime = "high_vol"
+
+                # Явное переопределение весов из конфига (имеет приоритет если включено)
+                if self.use_dynamic_ensemble_weights and (self.trend_weights or self.flat_weights):
+                    if regime == "trend" and self.trend_weights:
                         weights_override = self.trend_weights
-                    elif adx < self.adx_flat_threshold and self.flat_weights:
+                    elif regime == "sideways" and self.flat_weights:
                         weights_override = self.flat_weights
             except Exception as e:
-                logger.debug(f"[ml_strategy] dynamic_ensemble_weights: {e}")
+                logger.debug(f"[ml_strategy] regime detection error: {e}")
         
         # Предсказание
         if hasattr(self.model, "predict_proba"):
             try:
-                # weights_override только для ансамблей; одиночные модели (XGB, RF) его не принимают
-                kw = {"weights_override": weights_override} if (self.is_ensemble and weights_override is not None) else {}
+                # Настройка параметров для ансамблей
+                kw = {}
+                if self.is_ensemble:
+                    if weights_override is not None:
+                        kw["weights_override"] = weights_override
+                    if regime is not None and hasattr(self.model, 'lstm_trainer'):
+                        kw["regime"] = regime
+
                 # Для классификаторов с вероятностями (включая ансамбль)
                 # Проверяем, является ли это QuadEnsemble (требует историю для LSTM)
                 if hasattr(self.model, 'lstm_trainer') and hasattr(self.model, 'sequence_length'):
@@ -877,6 +908,40 @@ class MLStrategy:
                         "confidence": round(confidence, 4),
                         "threshold": round(effective_threshold, 4),
                         "rejected_reason": "dynamic_threshold"
+                    }
+                )
+
+            # === META-LABELING FILTER (Signal Filter) ===
+            if prediction != 0 and self.meta_model is not None:
+                try:
+                    # Извлекаем фичи для текущей строки
+                    X_meta = row[self.feature_names].values.reshape(1, -1)
+                    X_meta_scaled = self.scaler.transform(X_meta)
+
+                    # Предсказываем вероятность успеха (class 1)
+                    meta_prob = self.meta_model.predict_proba(X_meta_scaled)[0, 1]
+
+                    # Порог для мета-фильтра (обычно 0.5, но можно сделать настраиваемым)
+                    meta_threshold = 0.5
+
+                    if meta_prob < meta_threshold:
+                        return Signal(
+                            timestamp=row.name if hasattr(row, 'name') else pd.Timestamp.now(),
+                            action=Action.HOLD,
+                            reason=f"meta_filter_rejected_{int(meta_prob*100)}%",
+                            price=current_price,
+                            indicators_info={
+                                "strategy": "ML",
+                                "prediction": "HOLD",
+                                "confidence": round(confidence, 4),
+                                "meta_prob": round(meta_prob, 4),
+                                "rejected_reason": "meta_filter"
+                            }
+                        )
+                    else:
+                        logger.info(f"✅ Signal PASSED meta-filter (prob: {meta_prob:.2f})")
+                except Exception as e:
+                    logger.error(f"[ml_strategy] Error in meta-filter: {e}")
                     }
                 )
             

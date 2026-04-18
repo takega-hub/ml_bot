@@ -21,8 +21,8 @@
       "qty": 1.0,
       "pnl_usd": 1.0,
       "pnl_pct": 1.0,
-      "entry_time": "2026-03-18T13:46:56.156228",
-      "exit_time": "2026-03-18T13:46:56.159310",
+      "entry_time": "2026-04-16T19:48:56.983548",
+      "exit_time": "2026-04-16T19:48:56.987006",
       "status": "closed",
       "model_name": "",
       "horizon": "short_term",
@@ -37,11 +37,21 @@
       "commission": 0.01,
       "signal_strength": "",
       "signal_parameters": {
-        "engine_decision_id": "3bb33695-80c4-4e50-a349-0ecc5526b36e",
+        "engine_decision_id": "c17254ad-8b5a-44bb-8aef-a528aded8257",
         "decision_engine_eval": {
-          "decision_id": "3bb33695-80c4-4e50-a349-0ecc5526b36e",
+          "decision_id": "c17254ad-8b5a-44bb-8aef-a528aded8257",
           "decision": "allow",
-          "score": 1.0
+          "score": 1.0,
+          "engine": {
+            "ml_score": 0.1,
+            "mtf_alignment": 1.0,
+            "atr_score": 0.25,
+            "sr_score": 0.0,
+            "trend_score": 0.1,
+            "history_edge": 0.0,
+            "rr_score": 1.0,
+            "tp_barrier_score": 0.0
+          }
         }
       }
     }

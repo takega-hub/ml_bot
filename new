@@ -1,0 +1,19 @@
+# 1. Train Primary Model (e.g., QuadEnsemble)
+model, metrics = trainer.train_quad_ensemble(X_train, y_train, df_train, ...)
+
+# 2. Optimize Threshold
+opt_threshold = trainer.optimize_thresholds(model, X_val, y_val, df_history=df_val)
+
+# 3. Meta-Labeling (Optional but Recommended)
+preds = model.predict(X_val, df_history=df_val)
+y_meta = feature_engineer.compute_meta_labels(df_val, preds)
+meta_model, meta_metrics = trainer.train_meta_classifier(X_val, y_meta)
+
+# 4. Save with all artifacts
+trainer.save_model(
+    model, scaler, features, metrics, 
+    filename="quad_ensemble_ETH.pkl",
+    optimal_threshold=opt_threshold,
+    meta_model=meta_model,
+    meta_metrics=meta_metrics
+)

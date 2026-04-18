@@ -56,7 +56,7 @@ sys.stderr = WarningFilter(_original_stderr)
 import pickle
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -394,18 +394,42 @@ class QuadEnsemble:
         self.sequence_length = sequence_length
         self.classes_ = np.array([-1, 0, 1])  # SHORT, HOLD, LONG
     
-    def predict_proba(self, X, df_history: Optional[pd.DataFrame] = None, weights_override=None):
+    def predict_proba(self, X, df_history: Optional[pd.DataFrame] = None, weights_override=None, regime: Optional[str] = None):
         """
         Предсказывает вероятности для всех четырех моделей.
         
         Args:
             X: Матрица фичей (n_samples, n_features) для RF/XGB/LGB
             df_history: DataFrame с историей для LSTM (должен содержать все фичи и иметь минимум sequence_length строк)
-            weights_override: опционально dict rf_weight, xgb_weight, lgb_weight, lstm_weight (сумма=1) для режима тренд/флэт
+            weights_override: опционально dict rf_weight, xgb_weight, lgb_weight, lstm_weight (сумма=1)
+            regime: опционально строка режима (trend_up, trend_down, sideways, high_vol) для авто-настройки весов
         
         Returns:
             Массив вероятностей (n_samples, 3) в формате [SHORT, HOLD, LONG]
         """
+        # 1. Определяем веса
+        w_rf = self.rf_weight
+        w_xgb = self.xgb_weight
+        w_lgb = self.lgb_weight
+        w_lstm = self.lstm_weight
+
+        if weights_override and isinstance(weights_override, dict):
+            w_rf = weights_override.get("rf_weight", w_rf)
+            w_xgb = weights_override.get("xgb_weight", w_xgb)
+            w_lgb = weights_override.get("lgb_weight", w_lgb)
+            w_lstm = weights_override.get("lstm_weight", w_lstm)
+        elif regime:
+            regime = str(regime).lower()
+            if "trend" in regime:
+                # В тренде доверяем бустингам (XGB/LGB)
+                w_rf, w_xgb, w_lgb, w_lstm = 0.1, 0.4, 0.4, 0.1
+            elif "sideways" in regime or "low_vol" in regime:
+                # Во флэте доверяем RF и LSTM (лучше ловят паттерны разворота)
+                w_rf, w_xgb, w_lgb, w_lstm = 0.35, 0.15, 0.15, 0.35
+            elif "high_vol" in regime:
+                # При высокой волатильности снижаем веса LSTM (может галлюцинировать)
+                w_rf, w_xgb, w_lgb, w_lstm = 0.3, 0.3, 0.3, 0.1
+
         # Получаем вероятности от классических моделей
         rf_proba = self.rf_model.predict_proba(X)
         
@@ -765,11 +789,14 @@ class ModelTrainer:
         accuracy = accuracy_score(y, y_pred)
         
         # Метрики
+        report = classification_report(y, y_pred, output_dict=True)
         metrics = {
             "accuracy": accuracy,
+            "cv_accuracy": cv_scores.mean(),
             "cv_mean": cv_scores.mean(),
             "cv_std": cv_scores.std(),
-            "classification_report": classification_report(y, y_pred, output_dict=True),
+            "f1_macro": report.get("macro avg", {}).get("f1-score", 0),
+            "classification_report": report,
             "confusion_matrix": confusion_matrix(y, y_pred).tolist(),
             "feature_importance": dict(zip(
                 self.feature_engineer.get_feature_names(),
@@ -903,11 +930,14 @@ class ModelTrainer:
         accuracy = accuracy_score(y, y_pred)
         
         # Метрики
+        report = classification_report(y, y_pred, output_dict=True)
         metrics = {
             "accuracy": accuracy,
+            "cv_accuracy": cv_scores.mean(),
             "cv_mean": cv_scores.mean(),
             "cv_std": cv_scores.std(),
-            "classification_report": classification_report(y, y_pred, output_dict=True),
+            "f1_macro": report.get("macro avg", {}).get("f1-score", 0),
+            "classification_report": report,
             "confusion_matrix": confusion_matrix(y, y_pred).tolist(),
             "feature_importance": dict(zip(
                 self.feature_engineer.get_feature_names(),
@@ -1009,11 +1039,14 @@ class ModelTrainer:
         accuracy = accuracy_score(y, y_pred)
         
         # Метрики
+        report = classification_report(y, y_pred, output_dict=True)
         metrics = {
             "accuracy": accuracy,
+            "cv_accuracy": cv_scores.mean(),
             "cv_mean": cv_scores.mean(),
             "cv_std": cv_scores.std(),
-            "classification_report": classification_report(y, y_pred, output_dict=True),
+            "f1_macro": report.get("macro avg", {}).get("f1-score", 0),
+            "classification_report": report,
             "confusion_matrix": confusion_matrix(y, y_pred).tolist(),
             "feature_importance": dict(zip(
                 self.feature_engineer.get_feature_names(),
@@ -1040,6 +1073,9 @@ class ModelTrainer:
         class_weights: Optional[Dict[int, float]] = None,
         class_distribution: Optional[Dict[int, int]] = None,
         training_params: Optional[Dict[str, Any]] = None,
+        optimal_threshold: Optional[float] = None,
+        meta_model: Optional[Any] = None,
+        meta_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Сохраняет модель, scaler, метрики и метаданные в файл."""
         filepath = self.model_dir / filename
@@ -1155,6 +1191,9 @@ class ModelTrainer:
             "data_info": data_info,  # Информация о данных обучения
             "class_weights": class_weights,  # Веса классов, использованные при обучении
             "training_params": training_params,  # Параметры обучения
+            "optimal_threshold": optimal_threshold,  # Оптимальный порог уверенности
+            "meta_model": meta_model,  # Вторичный фильтр сигналов
+            "meta_metrics": meta_metrics,  # Метрики вторичного фильтра
             "metadata": {
                 "symbol": symbol,
                 "interval": interval,
@@ -1172,6 +1211,8 @@ class ModelTrainer:
                 "lgb_weight": metrics.get("lgb_weight", None),  # Для QuadEnsemble
                 "lstm_weight": metrics.get("lstm_weight", None),  # Для QuadEnsemble
                 "ensemble_method": metrics.get("ensemble_method", None),
+                "optimal_threshold": optimal_threshold,
+                "has_meta_filter": meta_model is not None
             }
         }
         
@@ -1472,6 +1513,149 @@ class ModelTrainer:
         
         return ensemble, metrics
     
+    def prune_features(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+        threshold: float = 0.005,
+        min_features: int = 15,
+    ) -> List[str]:
+        """
+        Удаляет малозначимые признаки на основе Feature Importance от Random Forest.
+        """
+        print(f"[model_trainer] Pruning features (threshold={threshold})...")
+
+        # Обучаем быстрый RF для оценки важности
+        rf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        rf.fit(X, y)
+
+        importances = rf.feature_importances_
+        feature_importance_map = dict(zip(feature_names, importances))
+
+        # Сортируем
+        sorted_features = sorted(feature_importance_map.items(), key=lambda x: x[1], reverse=True)
+
+        # Отбираем признаки выше порога
+        kept_features = [f for f, imp in sorted_features if imp >= threshold]
+
+        # Гарантируем минимальное количество признаков
+        if len(kept_features) < min_features:
+            kept_features = [f for f, imp in sorted_features[:min_features]]
+
+        removed_count = len(feature_names) - len(kept_features)
+        print(f"  Kept {len(kept_features)} features, removed {removed_count} low-impact features.")
+
+        return kept_features
+
+    def train_meta_classifier(
+        self,
+        X: np.ndarray,
+        y_meta: np.ndarray,
+        n_estimators: int = 100,
+        max_depth: int = 6,
+        learning_rate: float = 0.1,
+        random_state: int = 42,
+    ) -> Tuple[Any, Dict[str, Any]]:
+        """
+        Обучает бинарный классификатор для мета-разметки (Signal Filter).
+        Цель: предсказать вероятность успеха сигнала основной модели.
+        """
+        print(f"[model_trainer] Training Meta-Classifier (Signal Filter)...")
+        print(f"  Samples: {len(X)}, Positive labels: {np.sum(y_meta == 1)}")
+
+        if not XGBOOST_AVAILABLE:
+            # Fallback to Random Forest if XGBoost is not available
+            model = RandomForestClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                random_state=random_state,
+                class_weight="balanced"
+            )
+        else:
+            model = xgb.XGBClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                random_state=random_state,
+                objective="binary:logistic",
+                eval_metric="logloss",
+                scale_pos_weight=(len(y_meta) - np.sum(y_meta)) / max(1, np.sum(y_meta))
+            )
+
+        # TimeSeriesSplit for validation
+        tscv = TimeSeriesSplit(n_splits=5)
+        scores = cross_val_score(model, X, y_meta, cv=tscv, scoring='accuracy')
+
+        model.fit(X, y_meta)
+
+        y_pred = model.predict(X)
+        precision, recall, f1, _ = precision_recall_fscore_support(y_meta, y_pred, average='binary')
+
+        metrics = {
+            "cv_mean": float(np.mean(scores)),
+            "cv_std": float(np.std(scores)),
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1": float(f1),
+            "accuracy": float(accuracy_score(y_meta, y_pred)),
+            "model_type": "meta_filter"
+        }
+
+        return model, metrics
+
+    def optimize_thresholds(
+        self,
+        model: Any,
+        X: np.ndarray,
+        y_true: np.ndarray,
+        df_history: Optional[pd.DataFrame] = None,
+        min_threshold: float = 0.33,
+        max_threshold: float = 0.80,
+        steps: int = 47
+    ) -> float:
+        """
+        Находит оптимальный порог уверенности, максимизирующий F1-score.
+        """
+        print(f"[model_trainer] Optimizing confidence thresholds ({min_threshold:.2f} to {max_threshold:.2f})...")
+
+        # Получаем вероятности
+        if hasattr(model, "predict_proba"):
+            if "df_history" in model.predict_proba.__code__.co_varnames:
+                probas = model.predict_proba(X, df_history=df_history)
+            else:
+                probas = model.predict_proba(X)
+        else:
+            print("  ⚠️ Model does not support predict_proba, skipping optimization.")
+            return 0.35
+
+        thresholds = np.linspace(min_threshold, max_threshold, steps)
+        best_f1 = -1
+        optimal_t = 0.35
+
+        for t in thresholds:
+            # LONG: proba[2], SHORT: proba[0]
+            long_signals = probas[:, 2] > t
+            short_signals = probas[:, 0] > t
+            total_signals = np.sum(long_signals) + np.sum(short_signals)
+
+            if total_signals < 5: continue
+
+            correct = np.sum((long_signals) & (y_true == 1)) + np.sum((short_signals) & (y_true == -1))
+            precision = correct / total_signals
+
+            total_positives = np.sum(y_true != 0)
+            recall = correct / total_positives if total_positives > 0 else 0
+
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+            if f1 > best_f1:
+                best_f1 = f1
+                optimal_t = t
+
+        print(f"  Optimal threshold found: {optimal_t:.3f} (F1: {best_f1:.4f})")
+        return float(optimal_t)
+
     def train_quad_ensemble(
         self,
         X: np.ndarray,

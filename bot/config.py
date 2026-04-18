@@ -130,7 +130,16 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     decision_engine_w_history_edge: float = 1.0
     decision_engine_atr_prefer_min_pct: float = 0.35
     decision_engine_atr_prefer_max_pct: float = 1.60
-    
+
+    # Triple Barrier Method labeling parameters
+    use_triple_barrier_labeling: bool = False
+    triple_barrier_pt_sl_ratio: float = 2.0
+    triple_barrier_volatility_lookback: int = 20
+    triple_barrier_vertical_barrier_candles: int = 24  # candles for vertical barrier
+
+    # Session-based time features
+    use_market_sessions: bool = True
+
     def __post_init__(self):
         """Валидация значений"""
         # Убедимся, что confidence_threshold в пределах [0, 1]
@@ -218,7 +227,7 @@ class RiskParams:
     enable_dynamic_risk: bool = True  # Включить динамический расчет
     atr_period: int = 14  # Период ATR для расчета волатильности
     atr_multiplier_sl: float = 1.5  # Множитель ATR для SL (1.5-2.0)
-    atr_multiplier_tp: float = 2.5  # Множитель ATR для TP (RR > 1.5)
+    atr_multiplier_tp: float = 3.0  # Множитель ATR для TP (RR > 2.0)
     
     # Фильтры входа
     enable_entry_filters: bool = True  # Включить дополнительные фильтры входа

@@ -5253,6 +5253,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         metadata: Optional[Dict[str, Any]] = None
         allow_duplicate: bool = False
         safe_mode: bool = True
+        goal: Optional[str] = None
+        constraints: Optional[Dict[str, Any]] = None
+        budget: Optional[Dict[str, Any]] = None
+        auto_iterate: bool = True
+        max_steps: int = 3
+        campaign_parallel_limit: int = 2
 
     @app.post("/api/ai/research/start", dependencies=[Depends(verify_api_key)])
     async def post_start_research(body: ResearchBody):
@@ -5265,6 +5271,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 metadata=body.metadata,
                 allow_duplicate=body.allow_duplicate,
                 safe_mode=body.safe_mode,
+                goal=body.goal,
+                constraints=body.constraints,
+                budget=body.budget,
+                auto_iterate=body.auto_iterate,
+                max_steps=body.max_steps,
+                campaign_parallel_limit=body.campaign_parallel_limit,
             )
             if not res.get("ok"):
                  error_msg = res.get("error", "Unknown error")
