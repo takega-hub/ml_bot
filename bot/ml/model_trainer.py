@@ -658,8 +658,6 @@ class QuadEnsemble:
                         lstm_proba[i, 0] = proba[0, 0]
                         lstm_proba[i, 1] = proba[0, 1]
                         lstm_proba[i, 2] = proba[0, 2]
-                    lstm_proba[i, 1] = proba[0, 1]  # HOLD
-                    lstm_proba[i, 2] = proba[0, 2]  # LONG
             except Exception as e:
                 # Если LSTM не может сделать предсказание, используем равномерное распределение
                 print(f"[QuadEnsemble] Warning: LSTM prediction failed: {e}. Using uniform probabilities.")
