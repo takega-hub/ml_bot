@@ -13,6 +13,7 @@ import warnings
 import os
 import sys
 import json
+import gc
 from datetime import datetime, timedelta
 
 if sys.platform == 'win32':
@@ -157,6 +158,9 @@ def main():
     quad_metrics = None
 
     for symbol in symbols:
+        # Принудительная очистка памяти перед каждой парой
+        gc.collect()
+
         safe_print("\n" + "=" * 80)
         safe_print(f"📊 ОБУЧЕНИЕ МОДЕЛИ ДЛЯ {symbol}")
         safe_print("=" * 80)
@@ -324,6 +328,7 @@ def main():
             triple_ensemble_metrics = None
 
         if xgb_metrics is not None and LIGHTGBM_AVAILABLE and LSTM_AVAILABLE:
+            gc.collect() # Чистим перед самой тяжелой моделью
             safe_print("\n   🚀 Обучение QuadEnsemble (RF + XGBoost + LightGBM + LSTM)...")
             lgb_n_estimators = _clamp_int(hyperparams.get("lgb_n_estimators"), 80, 600, 100)
             lgb_max_depth = _clamp_int(hyperparams.get("lgb_max_depth"), 3, 12, 6)
