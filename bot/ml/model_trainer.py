@@ -620,34 +620,44 @@ class QuadEnsemble:
                 # Создаем последовательности для LSTM
                 lstm_proba = np.zeros((n_samples, 3))
                 
-                for i in range(n_samples):
-                    # Берем последние sequence_length строк для последовательности
-                    end_idx = len(df_features_scaled)
-                    start_idx = max(0, end_idx - self.sequence_length)
-                    sequence = df_features_scaled.iloc[start_idx:end_idx].values
+                # ОПТИМИЗАЦИЯ: Если нужно предсказать много образцов, используем эффективный DataLoader
+                if n_samples > 10:
+                    all_sequences = []
+                    for i in range(n_samples):
+                        # Находим индекс в df_features_scaled, соответствующий i-му образцу в X
+                        # Предполагаем, что X соответствует последним n_samples строкам df_features_scaled
+                        end_idx = len(df_features_scaled) - (n_samples - 1 - i)
+                        start_idx = max(0, end_idx - self.sequence_length)
+                        seq = df_features_scaled.iloc[start_idx:end_idx].values
+
+                        if len(seq) < self.sequence_length:
+                            padding = np.tile(seq[0:1], (self.sequence_length - len(seq), 1))
+                            seq = np.vstack([padding, seq])
+                        all_sequences.append(seq)
                     
-                    # Если последовательность короче нужного, дополняем первым значением
-                    if len(sequence) < self.sequence_length:
-                        padding = np.tile(sequence[0:1], (self.sequence_length - len(sequence), 1))
-                        sequence = np.vstack([padding, sequence])
+                    all_sequences = np.array(all_sequences)
+                    _, batch_proba = self.lstm_trainer.predict(all_sequences)
                     
-                    # Проверяем последовательность на NaN перед предсказанием
-                    if np.any(np.isnan(sequence)) or not np.all(np.isfinite(sequence)):
-                        # Заменяем NaN на 0 или среднее значение
-                        sequence = np.nan_to_num(sequence, nan=0.0, posinf=0.0, neginf=0.0)
-                    
-                    # Делаем предсказание LSTM
-                    sequence_reshaped = sequence.reshape(1, self.sequence_length, -1)
-                    _, proba = self.lstm_trainer.predict(sequence_reshaped)
-                    
-                    # Проверяем proba на NaN
-                    if np.any(np.isnan(proba)) or not np.all(np.isfinite(proba)):
-                        # Используем равномерное распределение для этого образца
-                        proba = np.array([[0.33, 0.34, 0.33]])
-                    
-                    # LSTM возвращает вероятности в формате [SHORT(0), HOLD(1), LONG(2)]
-                    # Преобразуем в [-1, 0, 1]
-                    lstm_proba[i, 0] = proba[0, 0]  # SHORT
+                    # LSTM [0,1,2] -> QuadEnsemble [SHORT, HOLD, LONG]
+                    lstm_proba[:, 0] = batch_proba[:, 0] # SHORT
+                    lstm_proba[:, 1] = batch_proba[:, 1] # HOLD
+                    lstm_proba[:, 2] = batch_proba[:, 2] # LONG
+                else:
+                    # Для одиночного предсказания (реал-тайм) оставляем быстрый путь
+                    for i in range(n_samples):
+                        end_idx = len(df_features_scaled) - (n_samples - 1 - i)
+                        start_idx = max(0, end_idx - self.sequence_length)
+                        sequence = df_features_scaled.iloc[start_idx:end_idx].values
+
+                        if len(sequence) < self.sequence_length:
+                            padding = np.tile(sequence[0:1], (self.sequence_length - len(sequence), 1))
+                            sequence = np.vstack([padding, sequence])
+
+                        sequence_reshaped = sequence.reshape(1, self.sequence_length, -1)
+                        _, proba = self.lstm_trainer.predict(sequence_reshaped)
+                        lstm_proba[i, 0] = proba[0, 0]
+                        lstm_proba[i, 1] = proba[0, 1]
+                        lstm_proba[i, 2] = proba[0, 2]
                     lstm_proba[i, 1] = proba[0, 1]  # HOLD
                     lstm_proba[i, 2] = proba[0, 2]  # LONG
             except Exception as e:
@@ -1673,8 +1683,10 @@ class ModelTrainer:
         lstm_hidden_size: int = 64,
         lstm_num_layers: int = 2,
         lstm_epochs: int = 50,
+        lstm_batch_size: int = 32,
         random_state: int = 42,
         class_weight: Optional[Dict[int, float]] = None,
+        force_cpu_lstm: bool = False,
     ) -> Tuple[Any, Dict[str, Any]]:
         """
         Обучает ансамбль из RandomForest, XGBoost, LightGBM и LSTM.
@@ -1695,9 +1707,11 @@ class ModelTrainer:
             lstm_hidden_size: Размер скрытого слоя LSTM
             lstm_num_layers: Количество слоев LSTM
             lstm_epochs: Количество эпох обучения LSTM
+            lstm_batch_size: Размер батча для LSTM
             random_state: Seed для воспроизводимости
             class_weight: Кастомные веса классов
-        
+            force_cpu_lstm: Принудительно использовать CPU для LSTM
+
         Returns:
             (ensemble_model, metrics) - обученный ансамбль и метрики
         """
@@ -1751,6 +1765,8 @@ class ModelTrainer:
             hidden_size=lstm_hidden_size,
             num_layers=lstm_num_layers,
             num_epochs=lstm_epochs,
+            batch_size=lstm_batch_size,
+            force_cpu=force_cpu_lstm,
         )
         
         # Подготавливаем данные для LSTM (добавляем target колонку)

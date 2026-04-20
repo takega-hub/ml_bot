@@ -120,6 +120,7 @@ def main():
     parser.add_argument("--use-triple-barrier", action="store_true", help="Использовать Triple Barrier Method для разметки")
     parser.add_argument("--use-meta-labeling", action="store_true", help="Использовать Meta-Labeling для фильтрации сигналов")
     parser.add_argument("--prune-features", action="store_true", help="Удалять малозначимые признаки")
+    parser.add_argument("--cpu-only", action="store_true", help="Принудительно использовать CPU для LSTM (избегает GPU ошибок)")
     args = parser.parse_known_args()[0]
     hyperparams = _load_hyperparams(args.hyperparams_json)
 
@@ -335,6 +336,8 @@ def main():
             lgb_learning_rate = _clamp_float(hyperparams.get("lgb_learning_rate"), 0.02, 0.3, 0.1)
             lstm_sequence_length = _clamp_int(hyperparams.get("lstm_sequence_length"), 30, 120, 60)
             lstm_epochs = _clamp_int(hyperparams.get("lstm_epochs"), 5, 80, 20 if args.safe_mode else 40)
+            lstm_batch_size = _clamp_int(hyperparams.get("lstm_batch_size"), 8, 128, 32)
+
             quad_model, quad_metrics = trainer.train_quad_ensemble(
                 X,
                 y,
@@ -349,6 +352,8 @@ def main():
                 lgb_learning_rate=lgb_learning_rate,
                 lstm_sequence_length=lstm_sequence_length,
                 lstm_epochs=lstm_epochs,
+                lstm_batch_size=lstm_batch_size,
+                force_cpu_lstm=args.cpu_only or hyperparams.get("force_cpu_lstm", True), # По умолчанию CPU для стабильности
             )
 
             # --- Добавляем оптимизацию порогов и мета-лейблинг ---

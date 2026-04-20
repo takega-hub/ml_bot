@@ -97,7 +97,6 @@ def analyze_sensitivity(symbol="BNBUSDT", interval="15", model_path=None):
 
         # Получаем вероятности
         logger.info("🔮 Получение предсказаний (predict_proba)...")
-        # Для QuadEnsemble нужен df_history
         if hasattr(model, "predict_proba"):
             try:
                 # Пытаемся вызвать с df_history если это QuadEnsemble
@@ -109,46 +108,68 @@ def analyze_sensitivity(symbol="BNBUSDT", interval="15", model_path=None):
             logger.error("❌ Модель не поддерживает predict_proba")
             return
 
+        # Проверка наличия Meta-Filter
+        meta_model = model_data.get("meta_model")
+        meta_probas = None
+        if meta_model:
+            logger.info("🛡 Обнаружен Meta-Filter. Анализируем совместную работу...")
+            if hasattr(meta_model, "predict_proba"):
+                # Мета-модель обучается предсказывать успех (1) или провал (0) основного сигнала
+                meta_probas = meta_model.predict_proba(X)[:, 1]
+
         logger.info(f"🧪 Анализ {len(np.linspace(0.33, 0.8, 47))} вариантов порогов...")
-        thresholds = np.linspace(0.33, 0.8, 47) # От 0.33 (случайно) до 0.8
+        thresholds = np.linspace(0.33, 0.8, 47)
         results = []
 
         for t in thresholds:
-            # LONG signals: proba[2] > t
-            long_signals = probas[:, 2] > t
-            # SHORT signals: proba[0] > t
-            short_signals = probas[:, 0] > t
+            # Базовые маски сигналов
+            long_mask = probas[:, 2] > t
+            short_mask = probas[:, 0] > t
+            base_signals = long_mask | short_mask
+            total_base = np.sum(base_signals)
 
-            total_signals = np.sum(long_signals) + np.sum(short_signals)
-
-            if total_signals == 0:
+            if total_base == 0:
                 results.append({
                     "threshold": t,
                     "precision": 0.0,
+                    "precision_meta": 0.0,
                     "recall": 0.0,
                     "f1": 0.0,
-                    "signals": 0
+                    "signals": 0,
+                    "signals_meta": 0
                 })
                 continue
 
-            # Accuracy of signals
-            correct_long = np.sum((long_signals) & (y_true == 1))
-            correct_short = np.sum((short_signals) & (y_true == -1))
+            # Точность базовой модели
+            correct_base = np.sum((long_mask & (y_true == 1)) | (short_mask & (y_true == -1)))
+            precision_base = correct_base / total_base
 
-            precision = (correct_long + correct_short) / total_signals
+            # Точность с учетом Meta-Filter (порог 0.5)
+            precision_meta = precision_base
+            total_meta = total_base
+            if meta_probas is not None:
+                meta_mask = meta_probas > 0.5
+                filtered_signals = base_signals & meta_mask
+                total_meta = np.sum(filtered_signals)
+                if total_meta > 0:
+                    correct_meta = np.sum(filtered_signals & ((long_mask & (y_true == 1)) | (short_mask & (y_true == -1))))
+                    precision_meta = correct_meta / total_meta
+                else:
+                    precision_meta = 0.0
 
-            # Recall (относительно всех возможных прибыльных движений в таргете)
+            # Recall и F1 (на основе базовой модели)
             total_positives = np.sum(y_true != 0)
-            recall = (correct_long + correct_short) / total_positives if total_positives > 0 else 0
-
-            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+            recall = correct_base / total_positives if total_positives > 0 else 0
+            f1 = 2 * (precision_base * recall) / (precision_base + recall) if (precision_base + recall) > 0 else 0
 
             results.append({
                 "threshold": t,
-                "precision": precision,
+                "precision": precision_base,
+                "precision_meta": precision_meta,
                 "recall": recall,
                 "f1": f1,
-                "signals": int(total_signals)
+                "signals": int(total_base),
+                "signals_meta": int(total_meta)
             })
 
         res_df = pd.DataFrame(results)
@@ -157,7 +178,7 @@ def analyze_sensitivity(symbol="BNBUSDT", interval="15", model_path=None):
         logger.info("\n" + "="*50)
         logger.info(f"📊 АНАЛИЗ ПОРОГОВ ДЛЯ {symbol}")
         logger.info("="*50)
-        top_results = res_df[res_df["signals"] > 5].sort_values("precision", ascending=False).head(10)
+        top_results = res_df[res_df["signals"] > 5].sort_values("precision_meta", ascending=False).head(10)
         logger.info(f"\n{top_results.to_string()}")
 
         # Сохраняем отчет
@@ -168,14 +189,19 @@ def analyze_sensitivity(symbol="BNBUSDT", interval="15", model_path=None):
 
         # Визуализация
         try:
-            plt.figure(figsize=(10, 6))
-            plt.plot(res_df["threshold"], res_df["precision"], label="Precision (Accuracy of Signals)")
-            plt.plot(res_df["threshold"], res_df["f1"], label="F1 Score")
+            plt.figure(figsize=(12, 7))
+            plt.plot(res_df["threshold"], res_df["precision"], 'b--', label="Base Precision")
+            plt.plot(res_df["threshold"], res_df["precision_meta"], 'g-', linewidth=2, label="Meta-Filter Precision")
+            plt.plot(res_df["threshold"], res_df["f1"], 'r:', label="F1 Score")
+
             plt.twinx()
-            plt.bar(res_df["threshold"], res_df["signals"], alpha=0.2, color='gray', label="Signal Count")
-            plt.title(f"Threshold Sensitivity Analysis - {symbol}")
+            plt.bar(res_df["threshold"], res_df["signals"], alpha=0.1, color='blue', label="Base Signals")
+            plt.bar(res_df["threshold"], res_df["signals_meta"], alpha=0.2, color='green', label="Meta Signals")
+
+            plt.title(f"Threshold & Meta-Filter Analysis - {symbol}")
             plt.xlabel("Confidence Threshold")
-            plt.legend()
+            plt.legend(loc='upper right')
+            plt.grid(True, alpha=0.3)
             plt.savefig(f"artifacts/threshold_plot_{symbol}.png")
             logger.info(f"📈 График сохранен: artifacts/threshold_plot_{symbol}.png")
         except Exception as e:

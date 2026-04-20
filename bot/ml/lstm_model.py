@@ -146,6 +146,7 @@ class LSTMTrainer:
         batch_size: int = 32,
         num_epochs: int = 50,
         device: Optional[str] = None,
+        force_cpu: bool = False,
     ):
         """
         Args:
@@ -157,6 +158,7 @@ class LSTMTrainer:
             batch_size: Размер батча
             num_epochs: Количество эпох обучения
             device: Устройство для обучения ('cuda' или 'cpu')
+            force_cpu: Принудительно использовать CPU (игнорировать CUDA)
         """
         self.sequence_length = sequence_length
         self.hidden_size = hidden_size
@@ -167,7 +169,9 @@ class LSTMTrainer:
         self.num_epochs = num_epochs
         
         # Определяем устройство
-        if device is None:
+        if force_cpu:
+            self.device = torch.device('cpu')
+        elif device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
@@ -328,12 +332,25 @@ class LSTMTrainer:
         
         # Создаем модель
         input_size = sequences.shape[2]
-        self.model = LSTMModel(
-            input_size=input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            dropout=self.dropout,
-        ).to(self.device)
+        try:
+            self.model = LSTMModel(
+                input_size=input_size,
+                hidden_size=self.hidden_size,
+                num_layers=self.num_layers,
+                dropout=self.dropout,
+            ).to(self.device)
+        except RuntimeError as e:
+            if "CUDA" in str(e) or "out of memory" in str(e).lower() or "CUDNN" in str(e):
+                print(f"[LSTM Trainer] ⚠️ GPU error encountered: {e}. Falling back to CPU.")
+                self.device = torch.device('cpu')
+                self.model = LSTMModel(
+                    input_size=input_size,
+                    hidden_size=self.hidden_size,
+                    num_layers=self.num_layers,
+                    dropout=self.dropout,
+                ).to(self.device)
+            else:
+                raise e
         
         # Вычисляем веса классов для балансировки (критично!)
         unique_classes, class_counts = np.unique(train_targets + 1, return_counts=True)  # +1 для 0,1,2
