@@ -1590,6 +1590,11 @@ REGIME_MEMORY:
                                 if cur in (None, "", [], {}):
                                     target[k] = v
                         continue
+                    else:
+                        # Add experiment if it exists in meta but not in experiments.json
+                        experiments.append(rec)
+                        known_ids.add(eid)
+                        exp_by_id[eid] = rec
                 except Exception:
                     continue
 

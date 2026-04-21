@@ -99,6 +99,12 @@ def update_experiment_status(experiment_id: str, status: str, details: dict = No
                     data[experiment_id][k] = v
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+            # Update meta file as well
+            meta_path = Path("experiment_meta") / f"{experiment_id}.json"
+            if meta_path.parent.exists():
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(data[experiment_id], f, indent=2, ensure_ascii=False, default=str)
         _try_with_file_lock(_write)
     except Exception as e:
         logger.error(f"Failed to update experiment status: {e}")
@@ -124,6 +130,18 @@ def patch_experiment(experiment_id: str, fields: Dict[str, Any]):
             data[experiment_id] = exp
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+            # Update meta file as well
+            meta_path = Path("experiment_meta") / f"{experiment_id}.json"
+            if meta_path.parent.exists():
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(exp, f, indent=2, ensure_ascii=False, default=str)
+
+            # Update meta file as well
+            meta_path = Path("experiment_meta") / f"{experiment_id}.json"
+            if meta_path.parent.exists():
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(data[experiment_id], f, indent=2, ensure_ascii=False, default=str)
         _try_with_file_lock(_write)
     except Exception as e:
         logger.error(f"Failed to patch experiment: {e}")
