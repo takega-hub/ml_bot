@@ -31,29 +31,27 @@ from bot.ml.feature_engineering import FeatureEngineer
 from bot.ml.model_trainer import ModelTrainer, LIGHTGBM_AVAILABLE, LSTM_AVAILABLE
 
 
+import logging
+
+# Настройка логирования для обучения
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+training_log = log_dir / "training.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    handlers=[
+        logging.FileHandler(training_log, mode='a', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("Trainer")
+
 def safe_print(*args, **kwargs):
-        try:
-            text = ' '.join(str(arg) for arg in args)
-            replacements = {
-                '🚀': '[START]', '📊': '[INFO]', '✅': '[OK]', '❌': '[ERROR]',
-                '⏳': '[WAIT]', '🔥': '[HOT]', '📥': '[DOWNLOAD]', '🔧': '[ENGINEERING]',
-                '🎯': '[TARGET]', '📦': '[DATA]', '🤖': '[MODEL]', '🌲': '[RF]',
-                '⚡': '[XGB]', '🎉': '[SUCCESS]', '💡': '[TIP]', '🔄': '[RETRAIN]',
-                '📋': '[LIST]', '🔍': '[SEARCH]', '📈': '[CHART]', '🧪': '[TEST]',
-                '⚙️': '[SETTINGS]', '⚠️': '[WARN]', 'ℹ️': '[INFO]', '💪': '[STRONG]',
-                '🔹': '[INFO]'
-            }
-            for emoji, replacement in replacements.items():
-                text = text.replace(emoji, replacement)
-            if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-                text = text.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding)
-            print(text, **kwargs)
-            sys.stdout.flush()
-        except Exception:
-            try:
-                print(*args, **kwargs)
-            except Exception:
-                pass
+    """Оставляем для совместимости, но перенаправляем в logger"""
+    text = ' '.join(str(arg) for arg in args)
+    logger.info(text)
 
 
 def _collect_by_days(collector: DataCollector, symbol: str, interval: str, days_back: int):
@@ -159,12 +157,13 @@ def main():
     quad_metrics = None
 
     for symbol in symbols:
-        # Принудительная очистка памяти перед каждой парой
-        gc.collect()
+        try:
+            # Принудительная очистка памяти перед каждой парой
+            gc.collect()
 
-        safe_print("\n" + "=" * 80)
-        safe_print(f"📊 ОБУЧЕНИЕ МОДЕЛИ ДЛЯ {symbol}")
-        safe_print("=" * 80)
+            logger.info("\n" + "=" * 80)
+            logger.info(f"📊 ОБУЧЕНИЕ МОДЕЛИ ДЛЯ {symbol}")
+            logger.info("=" * 80)
         collector = DataCollector(api_settings)
         if base_interval == "60":
             days = _clamp_int(hyperparams.get("training_days_1h"), 60, 365, 180)
@@ -397,8 +396,13 @@ def main():
             )
             safe_print(f"      ✅ Сохранено как: {quad_filename} (с мета-данными)")
 
-        else:
             quad_metrics = None
+
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Критическая ошибка при обработке {symbol}: {e}")
+            logger.error(traceback.format_exc())
+            continue
 
     report = {
         "symbols": symbols,

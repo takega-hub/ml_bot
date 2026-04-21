@@ -13,20 +13,20 @@ import traceback
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# Настройка логирования
+# Настройка логирования для исследований
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
-log_file = log_dir / f"threshold_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+log_file = log_dir / "research.log"
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.FileHandler(log_file, mode='a', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Research")
 
 # Добавляем путь к проекту
 sys.path.insert(0, str(Path(__file__).parent))
