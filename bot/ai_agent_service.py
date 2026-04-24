@@ -61,11 +61,17 @@ class AIAgentService:
         self.research_processes: Dict[str, subprocess.Popen] = {}
         self.risk_state_file = Path(__file__).resolve().parent.parent / "ai_risk_state.json"
         self.chat_history_file = Path(__file__).resolve().parent.parent / "ai_chat_history.json"
+        try:
+            self.chat_history_limit = max(5, min(200, int(os.getenv("AI_CHAT_HISTORY_LIMIT", "20"))))
+        except Exception:
+            self.chat_history_limit = 20
         self.pending_chat_action: Optional[Dict[str, Any]] = None
         self.supabase = None
+        use_supabase_for_chat = str(os.getenv("AI_CHAT_USE_SUPABASE", "0")).strip().lower() in {"1", "true", "yes", "on"}
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_KEY")
-        if HAS_SUPABASE and supabase_url and supabase_key:
+        # Local chat history is default; Supabase can be enabled explicitly.
+        if use_supabase_for_chat and HAS_SUPABASE and supabase_url and supabase_key:
             try:
                 self.supabase = create_client(supabase_url, supabase_key)
             except Exception:
@@ -95,7 +101,7 @@ class AIAgentService:
                     self.supabase.table("chat_messages")
                     .select("id,role,content,created_at")
                     .order("created_at", desc=True)
-                    .limit(500)
+                    .limit(self.chat_history_limit)
                     .execute()
                 )
                 data = getattr(response, "data", None)
@@ -113,7 +119,7 @@ class AIAgentService:
                                 "timestamp": row.get("created_at"),
                             }
                         )
-                    return out
+                    return out[-self.chat_history_limit:]
             except Exception:
                 pass
         try:
@@ -121,7 +127,19 @@ class AIAgentService:
                 with open(self.chat_history_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
-                    return [x for x in data if isinstance(x, dict)]
+                    normalized: List[Dict[str, Any]] = []
+                    for row in data:
+                        if not isinstance(row, dict):
+                            continue
+                        normalized.append(
+                            {
+                                "id": str(row.get("id") or uuid.uuid4()),
+                                "role": str(row.get("role") or "assistant"),
+                                "content": str(row.get("content") or ""),
+                                "timestamp": row.get("timestamp"),
+                            }
+                        )
+                    return normalized[-self.chat_history_limit:]
         except Exception:
             pass
         return []
@@ -130,8 +148,9 @@ class AIAgentService:
         if self.supabase is not None:
             return
         try:
+            self.chat_history_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.chat_history_file, "w", encoding="utf-8") as f:
-                json.dump(history[-500:], f, ensure_ascii=False, indent=2, default=str)
+                json.dump(history[-self.chat_history_limit:], f, ensure_ascii=False, indent=2, default=str)
         except Exception:
             logger.exception("Failed to save chat history")
 
@@ -140,7 +159,7 @@ class AIAgentService:
             n = int(limit)
         except Exception:
             n = 50
-        n = max(1, min(500, n))
+        n = max(1, min(self.chat_history_limit, n))
         history = self._load_chat_history()
         return history[-n:]
 
@@ -1306,7 +1325,7 @@ REGIME_MEMORY:
                 regime_memory=regime_memory,
                 market_regime=meta_market_regime,
             )
-            ai_plan = meta.get("ai_plan") if isinstance(ai_plan, dict) else None
+            ai_plan = meta.get("ai_plan") if isinstance(meta.get("ai_plan"), dict) else None
             allow_regime_memory_soft_block = bool(meta.get("allow_regime_memory_soft_block", False))
             if not ai_plan:
                 ai_plan = self._build_research_ai_plan(
