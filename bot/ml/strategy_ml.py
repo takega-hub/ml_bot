@@ -1143,9 +1143,6 @@ class MLStrategy:
                             current_price
                         )
             
-            # Дополнительные фильтры для волатильных рынков
-            is_volatile_symbol = symbol in ("ETHUSDT", "SOLUSDT")
-            
             # Фильтр по RSI для экстремальных зон (ОСЛАБЛЕН: блокируем только в крайних случаях)
             rsi = row.get("rsi", np.nan)
             if prediction != 0 and np.isfinite(rsi):
