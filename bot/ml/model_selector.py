@@ -24,6 +24,18 @@ def _is_legacy_single_mtf_name(name: str) -> bool:
     return "_mtf" in n
 
 
+def _is_valid_scalp_5m_name(name: str) -> bool:
+    """
+    Строгая проверка, что имя модели действительно 5m (а не 15m/1h/60).
+    """
+    n = str(name or "").lower()
+    if not n:
+        return False
+    has_5m_token = ("_5_" in n) or ("_5m" in n)
+    has_other_tf = ("_15_" in n) or ("_15m" in n) or ("_60_" in n) or ("_1h" in n)
+    return has_5m_token and not has_other_tf
+
+
 def load_manual_mtf_models(symbol: str) -> Optional[Dict[str, str]]:
     """
     Загружает вручную выбранные MTF модели для символа из ml_settings.json.
@@ -230,6 +242,7 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str], List[
     models_1h = [m for m in models_1h if not _is_legacy_single_mtf_name(m.name)]
     models_15m = [m for m in models_15m if not _is_legacy_single_mtf_name(m.name)]
     models_5m = [m for m in models_5m if not _is_legacy_single_mtf_name(m.name)]
+    models_5m = [m for m in models_5m if _is_valid_scalp_5m_name(m.name)]
 
     # Сортируем по имени (для стабильности)
     models_1h = sorted([str(m) for m in models_1h])
@@ -442,7 +455,9 @@ def select_best_scalp_model(
                 if 'mode_suffix' in symbol_data.columns:
                     symbol_data = symbol_data[symbol_data['mode_suffix'] == '5m']
                 else:
-                    symbol_data = symbol_data[symbol_data['model_filename'].str.contains('_5_|_5m', na=False)]
+                    symbol_data = symbol_data[
+                        symbol_data['model_filename'].apply(_is_valid_scalp_5m_name)
+                    ]
                 
                 if not symbol_data.empty:
                     # Сортируем по PnL
