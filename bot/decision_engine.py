@@ -213,6 +213,32 @@ class AIAuditStats:
         }
 
 
+def _get_market_regime(ohlcv: List[Dict[str, Any]], adx_period: int = 14) -> Dict[str, Any]:
+    """
+    Determines if market is in Trending or Flat state.
+    Returns: {'regime': 'trend'|'flat'|'volatile', 'adx': float, 'atr_ratio': float}
+    """
+    if len(ohlcv) < 30:
+        return {"regime": "unknown", "adx": 0, "atr_ratio": 1.0}
+
+    # Simple ADX approximation
+    atr_val = _atr(ohlcv, adx_period)
+    atr_short = _atr(ohlcv, 5)
+    atr_ratio = atr_short / atr_val if (atr_val and atr_val > 0) else 1.0
+
+    # Trend detection via price displacement
+    c_start = _safe_float(ohlcv[-20].get("close"), 0)
+    c_end = _safe_float(ohlcv[-1].get("close"), 0)
+    price_move = abs(c_end - c_start) / c_start * 100 if c_start > 0 else 0
+
+    regime = "flat"
+    if price_move > 1.5 or atr_ratio > 1.5:
+        regime = "volatile"
+    elif price_move > 0.7:
+        regime = "trend"
+
+    return {"regime": regime, "price_move": price_move, "atr_ratio": atr_ratio}
+
 class SignalDecisionEngine:
     def __init__(self, config: DecisionEngineConfig, project_root: Path):
         self.config = config
@@ -242,7 +268,16 @@ class SignalDecisionEngine:
         cfg = self.config
         now = datetime.now(timezone.utc).isoformat()
 
+        # 0. Detect Market Regime
+        regime_info = _get_market_regime(ohlcv)
+        regime = regime_info["regime"]
+
         action = str(signal_payload.get("action") or "").upper()
+        # Identify strategy type from payload
+        indicators = signal_payload.get("indicators_info", {})
+        strat_name = indicators.get("strategy", "UNKNOWN").upper()
+        is_scalper = "SCALP" in strat_name or "5M" in strat_name or "5" == str(indicators.get("interval"))
+
         price = _safe_float(signal_payload.get("price"))
         ml_conf = _safe_float(signal_payload.get("confidence"), 0.0) or 0.0
         strength = str(signal_payload.get("strength") or "")
@@ -355,17 +390,41 @@ class SignalDecisionEngine:
                         barrier_score -= _clamp((0.60 - frac) / 0.60, 0.0, 1.0)
 
         w = cfg.weights
+
+        # --- Regime-based weight adjustments ---
+        effective_w_ml = w.w_ml_confidence
+        effective_w_align = w.w_mtf_alignment
+        effective_w_sr = w.w_sr_proximity
+
+        if regime == "flat":
+            # In flat market, we trust S/R more and MTF-trend less
+            effective_w_align *= 0.5
+            effective_w_sr *= 1.4
+            if is_scalper:
+                effective_w_ml *= 1.2 # Scalper might be better in chop
+        elif regime == "volatile":
+            # In volatile market, reduce size or be more picky
+            effective_w_ml *= 0.8
+            effective_w_align *= 1.2 # MTF alignment is crucial when it's wild
+
         score = (
-            w.w_ml_confidence * ml_score
+            effective_w_ml * ml_score
             + w.w_atr_regime * atr_score
-            + w.w_mtf_alignment * align_score
-            + w.w_sr_proximity * sr_score
+            + effective_w_align * align_score
+            + effective_w_sr * sr_score
             + w.w_trend_slope * slope_score
             + w.w_history_edge * hist_edge
         )
 
         if align_w > 0 and align_score < -0.15:
             score -= 0.8
+
+        # Strategy-specific adjustments
+        if is_scalper:
+            if regime == "trend":
+                score -= 0.2 # Scalpers can struggle in strong one-way trends if they hunt reversals
+            elif regime == "flat":
+                score += 0.15 # Bonus for scalping in chop
 
         score += 0.35 * rr_score
         score += 0.25 * barrier_score

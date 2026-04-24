@@ -94,6 +94,7 @@ class BotState:
         self.known_symbols: List[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
         self.symbol_models: Dict[str, str] = {}  # symbol -> model_path
         self.symbol_strategies: Dict[str, Dict[str, Any]] = {}  # symbol -> strategy config (mode, models, etc)
+        self.multi_strategies: Dict[str, List[Dict[str, Any]]] = {}  # symbol -> list of strategy configs
         self.max_active_symbols: int = 5
         
         # History
@@ -135,7 +136,8 @@ class BotState:
                         self.known_symbols.append(s)
                 self.symbol_models = data.get("symbol_models", {})
                 self.symbol_strategies = data.get("symbol_strategies", {})
-                
+                self.multi_strategies = data.get("multi_strategies", {})
+
                 # Load trades (с поддержкой обратной совместимости для старых записей)
                 for t in data.get("trades", []):
                     # Устанавливаем значения по умолчанию для новых полей, если их нет
@@ -187,6 +189,7 @@ class BotState:
                         "known_symbols": list(self.known_symbols),  # Копируем список
                         "symbol_models": dict(self.symbol_models),  # Копируем словарь
                         "symbol_strategies": dict(self.symbol_strategies),
+                        "multi_strategies": {s: [dict(st) for st in sl] for s, sl in self.multi_strategies.items()},
                         "trades": [asdict(t) for t in self.trades[-500:]],  # Keep last 500
                         "signals": [asdict(s) for s in self.signals[-1000:]],  # Keep last 1000
                         "cooldowns": {symbol: asdict(cooldown) for symbol, cooldown in self.cooldowns.items()},
@@ -796,3 +799,49 @@ class BotState:
         symbol = symbol.upper()
         with self.lock:
             return self.symbol_strategies.get(symbol)
+
+    def get_all_strategies_for_symbol(self, symbol: str) -> List[Dict[str, Any]]:
+        """Returns all strategy configurations for a symbol (legacy + multi)"""
+        symbol = symbol.upper()
+        strategies = []
+        with self.lock:
+            # Check multi-strategies first
+            if symbol in self.multi_strategies:
+                strategies.extend(self.multi_strategies[symbol])
+
+            # Fallback to legacy single strategy if no multi-strategies defined
+            elif symbol in self.symbol_strategies:
+                strategies.append(self.symbol_strategies[symbol])
+
+            # If still empty, check if there's a model in symbol_models
+            elif symbol in self.symbol_models:
+                strategies.append({
+                    "mode": "single",
+                    "model_path": self.symbol_models[symbol],
+                    "name": Path(self.symbol_models[symbol]).stem
+                })
+
+        return strategies
+
+    def add_strategy_to_symbol(self, symbol: str, strategy_config: Dict[str, Any]):
+        """Adds a strategy configuration to a symbol"""
+        symbol = symbol.upper()
+        with self.lock:
+            if symbol not in self.multi_strategies:
+                # If we had a legacy strategy, migrate it to multi_strategies list
+                legacy = self.symbol_strategies.get(symbol)
+                if legacy:
+                    self.multi_strategies[symbol] = [legacy]
+                else:
+                    self.multi_strategies[symbol] = []
+
+            self.multi_strategies[symbol].append(strategy_config)
+        self.save()
+
+    def remove_strategy_from_symbol(self, symbol: str, strategy_index: int):
+        """Removes a strategy configuration from a symbol by index"""
+        symbol = symbol.upper()
+        with self.lock:
+            if symbol in self.multi_strategies and 0 <= strategy_index < len(self.multi_strategies[symbol]):
+                self.multi_strategies[symbol].pop(strategy_index)
+        self.save()

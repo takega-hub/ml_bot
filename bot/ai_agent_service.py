@@ -985,6 +985,17 @@ class AIAgentService:
             defaults.update({"interval": defaults.get("interval") or "15m", "use_mtf": False, "safe_mode": False, "backtest_days": min(int(defaults.get("backtest_days") or 7), 10)})
         elif experiment_type == "conservative":
             defaults.update({"interval": "1h" if market_regime.get("regime", "").startswith("sideways") else defaults.get("interval") or "1h", "use_mtf": True, "safe_mode": True, "backtest_days": max(int(defaults.get("backtest_days") or 14), 14)})
+        elif experiment_type == "scalp":
+            defaults.update({
+                "interval": "5m",
+                "use_mtf": False,
+                "safe_mode": True,
+                "backtest_days": 14,
+                "experiment_description": f"Scalping strategy optimization (5m) for {symbol}",
+                "hypothesis": "Выявить краткосрочные неэффективности на 5м таймфрейме.",
+                "expected_outcome": "Высокая частота сделок с положительным мат. ожиданием на 5м.",
+                "rationale": "Используется 5м таймфрейм для быстрого реагирования на микро-тренды.",
+            })
         else:
             defaults.update({"interval": defaults.get("interval") or "15m", "use_mtf": bool(defaults.get("use_mtf", True)), "safe_mode": bool(defaults.get("safe_mode", True)), "backtest_days": max(int(defaults.get("backtest_days") or 10), 10)})
 
@@ -1108,7 +1119,12 @@ REGIME_MEMORY:
         execution_realism = ai_plan.get("execution_realism") if isinstance(ai_plan.get("execution_realism"), dict) else {}
 
         interval = str(ai_plan.get("interval") or "15m").lower()
-        interval = "1h" if interval in {"1h", "60m"} else "15m"
+        if interval in {"1h", "60m", "60"}:
+            interval = "1h"
+        elif interval in {"5m", "5"}:
+            interval = "5m"
+        else:
+            interval = "15m"
         use_mtf = bool(ai_plan.get("use_mtf"))
         safe_mode_effective = bool(ai_plan.get("safe_mode", safe_mode_requested))
         requested_backtest_days = int(ai_plan.get("backtest_days") or 7)
@@ -1118,8 +1134,12 @@ REGIME_MEMORY:
         max_drawdown_pct = 18.0 if safe_mode_effective else 22.0
         stop_after_losses = 3 if safe_mode_effective else 4
         min_trades = 30 if safe_mode_effective else 20
-        slippage_bps = 8 if interval == "15m" else 5
-        spread_bps = 4 if interval == "15m" else 3
+        if interval == "5m":
+            slippage_bps = 12
+            spread_bps = 6
+        else:
+            slippage_bps = 8 if interval == "15m" else 5
+            spread_bps = 4 if interval == "15m" else 3
         funding_bps_daily = 3
         blocked_reasons: List[str] = []
         warnings: List[str] = []
@@ -1221,7 +1241,7 @@ REGIME_MEMORY:
             if not symbol:
                 return {"ok": False, "error": "symbol is required"}
             experiment_type = (experiment_type or "balanced").strip().lower()
-            if experiment_type not in {"balanced", "aggressive", "conservative"}:
+            if experiment_type not in {"balanced", "aggressive", "conservative", "scalp"}:
                 experiment_type = "balanced"
 
             meta = dict(metadata or {})
@@ -1286,7 +1306,7 @@ REGIME_MEMORY:
                 regime_memory=regime_memory,
                 market_regime=meta_market_regime,
             )
-            ai_plan = meta.get("ai_plan") if isinstance(meta.get("ai_plan"), dict) else None
+            ai_plan = meta.get("ai_plan") if isinstance(ai_plan, dict) else None
             allow_regime_memory_soft_block = bool(meta.get("allow_regime_memory_soft_block", False))
             if not ai_plan:
                 ai_plan = self._build_research_ai_plan(
@@ -1298,7 +1318,12 @@ REGIME_MEMORY:
                     regime_context=regime_context,
                 )
             interval = str(ai_plan.get("interval") or "15m").lower()
-            interval = "1h" if interval in {"1h", "60m"} else "15m"
+            if interval in {"1h", "60m", "60"}:
+                interval = "1h"
+            elif interval in {"5m", "5"}:
+                interval = "5m"
+            else:
+                interval = "15m"
             use_mtf = bool(ai_plan.get("use_mtf"))
             safe_mode_effective = bool(ai_plan.get("safe_mode", safe_mode))
             risk_guard = self._build_risk_guard(
@@ -1411,7 +1436,7 @@ REGIME_MEMORY:
 
             exp_params = {
                 "primary_interval": interval,
-                "train_intervals": ["15m", "1h"],
+                "train_intervals": ["5m", "15m", "1h"] if interval == "5m" else ["15m", "1h"],
                 "no_mtf": not use_mtf,
                 "safe_mode": safe_mode_effective,
                 "backtest_days": backtest_days,

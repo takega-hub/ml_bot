@@ -337,6 +337,11 @@ def _find_model_path(symbol: str, interval: str) -> Optional[Path]:
             f"*{symbol}*60*1h*.pkl",
             f"*{symbol}*1h*.pkl",
         ]
+    elif interval in ("5m", "5"):
+        patterns = [
+            f"*{symbol}*5*5m*.pkl",
+            f"*{symbol}*5*.pkl",
+        ]
     else:
         patterns = [
             f"*{symbol}*15*15m*.pkl",
@@ -391,6 +396,12 @@ def _select_model_for_experiment(
     ]
     ranked: List[Dict[str, Any]] = []
     report = training_report if isinstance(training_report, dict) else {}
+    if interval == "1h":
+        base_interval = "60"
+    elif interval in ("5m", "5"):
+        base_interval = "5"
+    else:
+        base_interval = "15"
     for prefix, metrics_key, tie_rank in candidates:
         metrics = report.get(metrics_key)
         if not isinstance(metrics, dict):
@@ -440,7 +451,12 @@ def _collect_experiment_models(
     model_dir = Path("ml_models")
     if not model_dir.exists():
         return []
-    base_interval = "60" if interval == "1h" else "15"
+    if interval == "1h":
+        base_interval = "60"
+    elif interval in ("5m", "5"):
+        base_interval = "5"
+    else:
+        base_interval = "15"
     candidates = [
         ("quad_ensemble", "quad_metrics", 5),
         ("triple_ensemble", "triple_ensemble_metrics", 4),
@@ -471,7 +487,7 @@ def _collect_experiment_models(
 def main():
     parser = argparse.ArgumentParser(description="Run AI research experiment")
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--type", required=True, choices=["balanced", "aggressive", "conservative"])
+    parser.add_argument("--type", required=True, choices=["balanced", "aggressive", "conservative", "scalp"])
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--interval", default="15m")
     parser.add_argument("--no-mtf", action="store_true")
@@ -559,7 +575,10 @@ def main():
         interval_candidate_models: Dict[str, List[Dict[str, Any]]] = {}
         hyperparams_payload = details.get("hyperparams") if isinstance(details.get("hyperparams"), dict) else None
 
-        intervals = ["15m"] if args.no_mtf else ["15m", "1h"]
+        if args.interval in ("5m", "5"):
+            intervals = ["5m"]
+        else:
+            intervals = ["15m"] if args.no_mtf else ["15m", "1h"]
         train_script = _resolve_existing_train_script()
         for interval in intervals:
             report_path = artifacts_dir / f"training_{interval}.json"

@@ -60,6 +60,8 @@
   "use_mtf_strategy": false,
   "mtf_confidence_threshold_1h": 0.5,
   "mtf_confidence_threshold_15m": 0.35,
+  "use_scalp_strategy": false,
+  "scalp_confidence_threshold": 0.35,
   "mtf_alignment_mode": "strict",
   "mtf_require_alignment": true,
   "pullback_enabled": true,

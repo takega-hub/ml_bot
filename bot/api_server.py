@@ -1067,6 +1067,9 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "decision_engine_atr_prefer_max_pct": getattr(m, "decision_engine_atr_prefer_max_pct", 1.60),
             "confidence_threshold": getattr(m, "confidence_threshold", 0.35),
             "min_confidence_for_trade": getattr(m, "min_confidence_for_trade", 0.5),
+            "use_scalp_strategy": getattr(m, "use_scalp_strategy", False),
+            "scalp_confidence_threshold": getattr(m, "scalp_confidence_threshold", 0.35),
+            "scalp_min_signal_strength": getattr(m, "scalp_min_signal_strength", "умеренное"),
         }
 
     @app.get("/api/ml", dependencies=[Depends(verify_api_key)])
@@ -1095,6 +1098,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "ai_entry_confirmation_enabled",
             "ai_fallback_force_enabled",
             "decision_engine_enabled",
+            "use_scalp_strategy",
         ):
             if key in body:
                 data[key] = bool(body[key])
@@ -1122,6 +1126,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "decision_engine_atr_prefer_max_pct",
             "pullback_limit_roll_min_requote_pct",
             "pullback_limit_roll_conf_drop_pct",
+            "scalp_confidence_threshold",
         ):
             if key in body:
                 v = float(body[key])
@@ -1135,11 +1140,12 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     "ai_fallback_spread_veto_pct",
                     "pullback_limit_roll_min_requote_pct",
                     "pullback_limit_roll_conf_drop_pct",
+                    "scalp_confidence_threshold",
                 ) and v >= 1:
                     v = v / 100.0
                 data[key] = v
                 setattr(m, key, v)
-        for key in ("mtf_alignment_mode", "auto_optimize_day", "decision_engine_mode", "ai_entry_confirmation_mode", "pullback_entry_mode"):
+        for key in ("mtf_alignment_mode", "auto_optimize_day", "decision_engine_mode", "ai_entry_confirmation_mode", "pullback_entry_mode", "scalp_min_signal_strength"):
             if key in body:
                 data[key] = body[key]
                 setattr(m, key, body[key])
@@ -2066,10 +2072,16 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
     @app.post("/api/logs/clear", dependencies=[Depends(verify_api_key)])
     def post_clear_logs(body: LogsClearBody):
         log_type = (body.log_type or "").strip().lower()
-        if log_type not in ("bot", "errors"):
-            raise HTTPException(status_code=400, detail="Only bot and errors logs can be cleared")
+        path_map = {
+            "bot": "logs/bot.log",
+            "errors": "logs/errors.log",
+            "trades": "logs/trades.log",
+            "signals": "logs/signals.log",
+            "ai": "logs/ai_entry_audit.jsonl"
+        }
+        if log_type not in path_map:
+            raise HTTPException(status_code=400, detail=f"Invalid log type. Available: {list(path_map.keys())}")
 
-        path_map = {"bot": "logs/bot.log", "errors": "logs/errors.log"}
         base = PROJECT_ROOT / path_map[log_type]
         result = _clear_log_group(base)
         return {

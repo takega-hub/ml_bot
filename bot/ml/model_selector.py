@@ -179,16 +179,16 @@ def find_best_models_from_comparison(symbol: str) -> Tuple[Optional[str], Option
     return None, None
 
 
-def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
+def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str], List[str]]:
     """
-    Находит ВСЕ модели 1h и 15m для символа.
+    Находит ВСЕ модели 1h, 15m и 5m для символа.
     
     Returns:
-        (list_1h_models, list_15m_models)
+        (list_1h_models, list_15m_models, list_5m_models)
     """
     models_dir = Path("ml_models")
     if not models_dir.exists():
-        return [], []
+        return [], [], []
     
     # Ищем 1h модели
     models_1h = list(models_dir.glob(f"*_{symbol}_60_*.pkl"))
@@ -199,12 +199,18 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str]]:
     models_15m = list(models_dir.glob(f"*_{symbol}_15_*.pkl"))
     if not models_15m:
         models_15m = list(models_dir.glob(f"*_{symbol}_*15m*.pkl"))
-    
+
+    # Ищем 5m модели (скальпинг)
+    models_5m = list(models_dir.glob(f"*_{symbol}_5_*.pkl"))
+    if not models_5m:
+        models_5m = list(models_dir.glob(f"*_{symbol}_*5m*.pkl"))
+
     # Сортируем по имени (для стабильности)
     models_1h = sorted([str(m) for m in models_1h])
     models_15m = sorted([str(m) for m in models_15m])
-    
-    return models_1h, models_15m
+    models_5m = sorted([str(m) for m in models_5m])
+
+    return models_1h, models_15m, models_5m
 
 
 def select_best_models(
@@ -338,7 +344,7 @@ def select_best_models(
             return best_1h, best_15m, info
     
     # 4. Если не нашли лучшие, ищем любые доступные
-    models_1h_list, models_15m_list = find_all_models_for_symbol(symbol)
+    models_1h_list, models_15m_list, models_5m_list = find_all_models_for_symbol(symbol)
     
     if not model_1h and models_1h_list:
         model_1h = models_1h_list[0]
@@ -366,12 +372,12 @@ def select_best_models(
     return model_1h, model_15m, info
 
 
-def select_best_single_model(
+def select_best_scalp_model(
     symbol: str,
     use_best_from_comparison: bool = True
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """
-    Выбирает лучшую SINGLE модель для символа.
+    Выбирает лучшую SCALP (5m) модель для символа.
     
     Args:
         symbol: Торговая пара
@@ -384,7 +390,7 @@ def select_best_single_model(
     info = {
         "source": "unknown",
         "model_name": None,
-        "strategy_type": "single",
+        "strategy_type": "scalp",
         "pnl_pct": None,
         "win_rate": None
     }
@@ -404,47 +410,46 @@ def select_best_single_model(
     if use_best_from_comparison and comparison_files:
         try:
             df = pd.read_csv(comparison_files[0])
-            # Фильтруем по символу
+            # Фильтруем по символу и интервалу 5m
             symbol_data = df[df['symbol'] == symbol_upper]
-            
             if not symbol_data.empty:
-                # Исключаем MTF модели (если они там есть)
                 if 'mode_suffix' in symbol_data.columns:
-                    symbol_data = symbol_data[symbol_data['mode_suffix'] != 'mtf']
+                    symbol_data = symbol_data[symbol_data['mode_suffix'] == '5m']
+                else:
+                    symbol_data = symbol_data[symbol_data['model_filename'].str.contains('_5_|_5m', na=False)]
                 
-                # Сортируем по PnL
-                best_model = symbol_data.sort_values('total_pnl_pct', ascending=False).iloc[0]
-                
-                model_name = best_model.get('model_name', '') or best_model.get('model_filename', '').replace('.pkl', '')
-                model_path = models_dir / f"{model_name}.pkl"
-                
-                if model_path.exists():
-                    info.update({
-                        "source": "comparison_csv",
-                        "model_name": model_name,
-                        "pnl_pct": best_model.get('total_pnl_pct'),
-                        "win_rate": best_model.get('win_rate_pct'),
-                        "filename": comparison_files[0].name
-                    })
-                    logger.info(f"[{symbol}] ✅ Выбрана лучшая Single модель: {model_name} (PnL: {best_model.get('total_pnl_pct'):.2f}%)")
-                    return str(model_path), info
-        except Exception as e:
-            logger.error(f"Ошибка выбора single модели из сравнения: {e}")
+                if not symbol_data.empty:
+                    # Сортируем по PnL
+                    best_model = symbol_data.sort_values('total_pnl_pct', ascending=False).iloc[0]
 
-    # 2. Fallback: берем первую попавшуюся 15m модель
-    models_15m = list(models_dir.glob(f"*_{symbol}_15_*.pkl"))
-    if not models_15m:
-        models_15m = list(models_dir.glob(f"*_{symbol}_*15m*.pkl"))
+                    model_name = best_model.get('model_name', '') or best_model.get('model_filename', '').replace('.pkl', '')
+                    model_path = models_dir / f"{model_name}.pkl"
+
+                    if model_path.exists():
+                        info.update({
+                            "source": "comparison_csv",
+                            "model_name": model_name,
+                            "pnl_pct": best_model.get('total_pnl_pct'),
+                            "win_rate": best_model.get('win_rate_pct'),
+                            "filename": comparison_files[0].name
+                        })
+                        logger.info(f"[{symbol}] ✅ Выбрана лучшая Scalp модель: {model_name} (PnL: {best_model.get('total_pnl_pct'):.2f}%)")
+                        return str(model_path), info
+        except Exception as e:
+            logger.error(f"Ошибка выбора scalp модели из сравнения: {e}")
+
+    # 2. Fallback: берем первую попавшуюся 5m модель
+    _, _, models_5m = find_all_models_for_symbol(symbol)
         
-    if models_15m:
+    if models_5m:
         # Сортируем чтобы брать последнюю (обычно лучшую или последнюю обученную)
-        models_15m.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        model_path = models_15m[0]
+        models_5m.sort(key=lambda p: Path(p).stat().st_mtime, reverse=True)
+        model_path = Path(models_5m[0])
         info.update({
-            "source": "fallback_latest_15m",
+            "source": "fallback_latest_5m",
             "model_name": model_path.stem
         })
-        logger.info(f"[{symbol}] 📦 Fallback Single модель: {model_path.stem}")
+        logger.info(f"[{symbol}] 📦 Fallback Scalp модель: {model_path.stem}")
         return str(model_path), info
 
     return None, info

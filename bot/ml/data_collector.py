@@ -21,6 +21,72 @@ class DataCollector:
         self.client = BybitClient(api_settings)
         self.data_dir = Path(__file__).parent.parent.parent / "ml_data"
         self.data_dir.mkdir(exist_ok=True)
+        self.cleanup_old_files()
+
+    def cleanup_old_files(self, max_size_mb: float = 1000.0, max_age_days: int = 60) -> None:
+        """
+        Удаляет старые или лишние файлы в директории данных, чтобы предотвратить переполнение диска.
+        Приоритет сохранения у файлов *_cache.csv.
+        """
+        try:
+            if not self.data_dir.exists():
+                return
+
+            now = time.time()
+            max_age_seconds = max_age_days * 24 * 60 * 60
+
+            # 1. Удаляем файлы старше max_age_days
+            for file_path in self.data_dir.glob("*.csv"):
+                try:
+                    if now - file_path.stat().st_mtime > max_age_seconds:
+                        print(f"[data_collector] Removing old file: {file_path.name} (modified > {max_age_days} days ago)")
+                        file_path.unlink()
+                except Exception as e:
+                    print(f"[data_collector] Error deleting {file_path.name}: {e}")
+
+            # 2. Проверяем общий размер директории и удаляем старейшие, если превышен лимит
+            all_files = list(self.data_dir.glob("*.csv"))
+            if not all_files:
+                return
+
+            total_size = sum(f.stat().st_size for f in all_files)
+            max_size_bytes = max_size_mb * 1024 * 1024
+
+            if total_size <= max_size_bytes:
+                return
+
+            print(f"[data_collector] Directory size ({total_size / (1024*1024):.1f} MB) exceeds limit ({max_size_mb} MB). Cleaning up...")
+
+            # Разделяем на кеш-файлы и исторические файлы (dated)
+            hist_files = sorted([f for f in all_files if "_cache.csv" not in f.name], key=lambda x: x.stat().st_mtime)
+            cache_files = sorted([f for f in all_files if "_cache.csv" in f.name], key=lambda x: x.stat().st_mtime)
+
+            # Сначала удаляем исторические файлы
+            while total_size > max_size_bytes and hist_files:
+                f = hist_files.pop(0)
+                sz = f.stat().st_size
+                try:
+                    f.unlink()
+                    total_size -= sz
+                    print(f"[data_collector] Deleted historical file: {f.name}")
+                except Exception as e:
+                    print(f"[data_collector] Error deleting {f.name}: {e}")
+
+            # Если все еще больше лимита, удаляем старейшие кеши
+            while total_size > max_size_bytes and cache_files:
+                f = cache_files.pop(0)
+                sz = f.stat().st_size
+                try:
+                    f.unlink()
+                    total_size -= sz
+                    print(f"[data_collector] Deleted old cache file: {f.name}")
+                except Exception as e:
+                    print(f"[data_collector] Error deleting {f.name}: {e}")
+
+            print(f"[data_collector] Cleanup finished. New size: {total_size / (1024*1024):.1f} MB")
+
+        except Exception as e:
+            print(f"[data_collector] Error during cache cleanup: {e}")
 
     def _interval_to_timedelta(self, interval: str) -> timedelta:
         """Возвращает timedelta для интервала свечей."""
@@ -75,6 +141,7 @@ class DataCollector:
         try:
             df.to_csv(cache_path, index=False)
             print(f"[data_collector] Cache saved to {cache_path}")
+            self.cleanup_old_files()
         except Exception as e:
             print(f"[data_collector] Failed to save cache {cache_path}: {e}")
 

@@ -59,12 +59,24 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
     use_mtf_strategy: bool = False  # Использовать комбинированную стратегию (1h фильтр + 15m вход)
     mtf_confidence_threshold_1h: float = 0.50  # Порог уверенности для 1h модели (фильтр)
     mtf_confidence_threshold_15m: float = 0.35  # Порог уверенности для 15m модели (вход)
-    
+
+    # Параметры скальпинг стратегии (5m)
+    use_scalp_strategy: bool = False # Использовать скальпинг стратегию (5m)
+    scalp_confidence_threshold: float = 0.35 # Порог уверенности для скальпинга (5m)
+    scalp_min_signal_strength: str = "умеренное"
+
     # Минимальная уверенность для открытия сделки
     min_confidence_for_trade: float = 0.50  # Минимальная уверенность для открытия сделки (50% по умолчанию)
     mtf_alignment_mode: str = "strict"  # Режим выравнивания: "strict" или "weighted"
     mtf_require_alignment: bool = True  # Требовать совпадение направлений обеих моделей
-    
+
+    # Aggregation / Judge Logic
+    signal_aggregation_mode: str = "highest_confidence"  # "highest_confidence", "consensus", "weighted_voting"
+    consensus_min_count: int = 2  # Minimum number of signals for consensus
+
+    # Safety Guard
+    data_sync_max_diff_seconds: int = 7200  # 2 hours max difference between 15m and 1h streams
+
     # Параметры для ретрейна
     retrain_days: int = 7  # Количество дней данных для ретрейна
     retrain_interval_hours: int = 24  # Интервал переобучения в часах
@@ -164,12 +176,20 @@ class StrategyParams:  # БЫЛО: MLStrategyParams
             self.mtf_confidence_threshold_1h = 0.50
         if not 0 <= self.mtf_confidence_threshold_15m <= 1:
             self.mtf_confidence_threshold_15m = 0.35
+        if not 0 <= self.scalp_confidence_threshold <= 1:
+            self.scalp_confidence_threshold = 0.35
         if self.mtf_alignment_mode not in ["strict", "weighted"]:
             self.mtf_alignment_mode = "strict"
         
         # Валидация min_confidence_for_trade
         if not 0 <= self.min_confidence_for_trade <= 1:
             self.min_confidence_for_trade = 0.50
+
+        if self.signal_aggregation_mode not in ["highest_confidence", "consensus", "weighted_voting"]:
+            self.signal_aggregation_mode = "highest_confidence"
+
+        if self.consensus_min_count < 1:
+            self.consensus_min_count = 1
 
         if not 0 <= self.follow_btc_override_confidence <= 1:
             self.follow_btc_override_confidence = 0.80
@@ -601,6 +621,12 @@ def load_settings() -> AppSettings:
                     settings.ml_strategy.mtf_confidence_threshold_1h = float(ml_dict["mtf_confidence_threshold_1h"])
                 if "mtf_confidence_threshold_15m" in ml_dict:
                     settings.ml_strategy.mtf_confidence_threshold_15m = float(ml_dict["mtf_confidence_threshold_15m"])
+                if "use_scalp_strategy" in ml_dict:
+                    settings.ml_strategy.use_scalp_strategy = bool(ml_dict["use_scalp_strategy"])
+                if "scalp_confidence_threshold" in ml_dict:
+                    settings.ml_strategy.scalp_confidence_threshold = float(ml_dict["scalp_confidence_threshold"])
+                if "scalp_min_signal_strength" in ml_dict:
+                    settings.ml_strategy.scalp_min_signal_strength = str(ml_dict["scalp_min_signal_strength"])
                 if "mtf_alignment_mode" in ml_dict:
                     settings.ml_strategy.mtf_alignment_mode = str(ml_dict["mtf_alignment_mode"])
                 if "mtf_require_alignment" in ml_dict:
@@ -722,9 +748,7 @@ def load_settings() -> AppSettings:
     if ml_model_type and ml_model_type in ["rf", "gb", "ensemble", "triple_ensemble", "quad_ensemble"]:
         settings.ml_strategy.model_type = ml_model_type
     
-    ml_mtf_enabled = os.getenv("ML_MTF_ENABLED", "").strip()
-    if ml_mtf_enabled:
-        settings.ml_strategy.mtf_enabled = ml_mtf_enabled.lower() not in ("0", "false", "no", "off")
+    # ML_MTF_ENABLED is deprecated and replaced by multi-strategy approach
     
     # Поддержка переменной окружения для MTF стратегии
     ml_mtf_strategy = os.getenv("ML_MTF_STRATEGY_ENABLED", "").strip()
@@ -948,6 +972,8 @@ def log_server_config(settings: "AppSettings", log: Optional[logging.Logger] = N
         _p("max_loss_pct_margin", ms.max_loss_pct_margin),
         _p("stability_filter", ms.stability_filter),
         _p("use_mtf_strategy", ms.use_mtf_strategy),
+        _p("use_scalp_strategy", ms.use_scalp_strategy),
+        _p("scalp_confidence_threshold", ms.scalp_confidence_threshold),
         _p("pullback_enabled", ms.pullback_enabled),
         _p("pullback_entry_mode", getattr(ms, "pullback_entry_mode", "pending")),
         _p("pullback_limit_roll_min_requote_pct", getattr(ms, "pullback_limit_roll_min_requote_pct", 0.001)),

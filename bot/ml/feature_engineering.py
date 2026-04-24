@@ -181,10 +181,14 @@ class FeatureEngineer:
         if df is None or df.empty:
             return pd.DataFrame()
 
+        # ОПТИМИЗАЦИЯ: Если DataFrame слишком большой, берем только необходимые для индикаторов последние N строк
+        # Максимальное окно у нас - 100 (для touches), возьмем 200 для запаса.
+        # ВАЖНО: Для обучения/бэктеста используем всё, для живой торговли - хвост.
+        is_live = len(df) < 1000
+
         out = df.copy()
         for col in ["open", "high", "low", "close", "volume"]:
             if col not in out.columns:
-                # Пытаемся найти колонки в другом регистре
                 found = False
                 for c in out.columns:
                     if c.lower() == col:
@@ -195,32 +199,32 @@ class FeatureEngineer:
                     return pd.DataFrame()
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
-        if "timestamp" in out.columns:
-            if not isinstance(out.index, pd.DatetimeIndex):
-                try:
-                    if pd.api.types.is_numeric_dtype(out["timestamp"]):
-                        out["timestamp"] = pd.to_datetime(out["timestamp"], unit="ms" if out["timestamp"].iloc[0] > 1e12 else "s")
-                    else:
-                        out["timestamp"] = pd.to_datetime(out["timestamp"])
-                    out = out.set_index("timestamp")
-                except Exception:
-                    # If conversion fails, try to set index directly if it's already datetime-like
-                    try:
-                        out = out.set_index("timestamp")
-                    except Exception:
-                        pass
+        # Переводим индекс в datetime один раз
+        if not isinstance(out.index, pd.DatetimeIndex) and "timestamp" in out.columns:
+            try:
+                out.index = pd.to_datetime(out["timestamp"], unit="ms" if out["timestamp"].iloc[0] > 1e12 else "s")
+            except:
+                pass
 
-        # Basic features
-        out["turnover"] = out["close"] * out["volume"]
+        # Основные фичи (Векторные операции Pandas/NumPy очень быстры)
+        close_vals = out["close"].values
+        high_vals = out["high"].values
+        low_vals = out["low"].values
+        vol_vals = out["volume"].values
+
+        out["turnover"] = close_vals * vol_vals
         out["sma_20"] = ta.sma(out["close"], length=20)
         out["sma_50"] = ta.sma(out["close"], length=50)
         out["ema_12"] = ta.ema(out["close"], length=12)
         out["ema_26"] = ta.ema(out["close"], length=26)
         out["rsi"] = ta.rsi(out["close"], length=14)
         out["atr"] = ta.atr(out["high"], out["low"], out["close"], length=14)
-        out["atr_pct"] = (out["atr"] / out["close"].replace(0, np.nan)) * 100
-        out["volume_sma_20"] = ta.sma(out["volume"], length=20)
-        out["volume_ratio"] = np.where(out["volume_sma_20"] > 0, out["volume"] / out["volume_sma_20"], 1.0)
+        out["atr_pct"] = (out["atr"] / out["close"]) * 100
+
+        v_sma20 = ta.sma(out["volume"], length=20)
+        out["volume_sma_20"] = v_sma20
+        out["volume_ratio"] = np.where(v_sma20 > 0, vol_vals / v_sma20, 1.0)
+
         out["price_change"] = out["close"].pct_change()
         out["price_change_abs"] = out["price_change"].abs()
 
@@ -230,176 +234,74 @@ class FeatureEngineer:
             out["bb_upper"] = bb.iloc[:, 0]
             out["bb_middle"] = bb.iloc[:, 1]
             out["bb_lower"] = bb.iloc[:, 2]
-        else:
-            out["bb_upper"] = out["close"]
-            out["bb_middle"] = out["close"]
-            out["bb_lower"] = out["close"]
 
         # MACD
         macd = ta.macd(out["close"])
         if macd is not None and not macd.empty:
             out["macd"] = macd.iloc[:, 0]
-            out["macd_signal"] = macd.iloc[:, 1] if len(macd.columns) > 1 else 0.0
-        else:
-            out["macd"] = 0.0
-            out["macd_signal"] = 0.0
+            out["macd_signal"] = macd.iloc[:, 1]
 
         # ADX
         adx_df = ta.adx(out["high"], out["low"], out["close"], length=14)
         if adx_df is not None and not adx_df.empty:
             out["adx"] = adx_df.iloc[:, 0]
-            out["di_plus"] = adx_df.iloc[:, 1] if len(adx_df.columns) > 1 else 0.0
-            out["di_minus"] = adx_df.iloc[:, 2] if len(adx_df.columns) > 2 else 0.0
-        else:
-            out["adx"] = 0.0
-            out["di_plus"] = 0.0
-            out["di_minus"] = 0.0
+            out["di_plus"] = adx_df.iloc[:, 1]
+            out["di_minus"] = adx_df.iloc[:, 2]
 
         # Lags
         for lag in [1, 2, 3]:
             out[f"close_lag_{lag}"] = out["close"].shift(lag)
             out[f"volume_lag_{lag}"] = out["volume"].shift(lag)
-            out[f"price_change_lag_{lag}"] = out["price_change"].shift(lag)
 
-        # Volatility features
-        out["volatility_10"] = out["close"].rolling(window=10, min_periods=3).std()
-        out["dist_to_sma20_pct"] = ((out["close"] - out["sma_20"]) / out["sma_20"].replace(0, np.nan)) * 100
-        out["dist_to_ema12_pct"] = ((out["close"] - out["ema_12"]) / out["ema_12"].replace(0, np.nan)) * 100
-
-        # Additional Volatility (requested by model)
+        # Volatility
+        out["volatility_10"] = out["close"].rolling(window=10).std()
         out["realized_volatility_10"] = out["price_change"].rolling(window=10).std()
         out["realized_volatility_20"] = out["price_change"].rolling(window=20).std()
 
-        # Parkinson Volatility
-        def parkinson_vol(h, l, window=20):
-            return np.sqrt(1 / (4 * np.log(2)) * (np.log(h / l)**2).rolling(window=window).mean())
+        # Parkinson Volatility (Оптимизировано через NumPy)
+        log_hl = np.log(high_vals / low_vals)**2
+        out["parkinson_vol"] = np.sqrt(1 / (4 * np.log(2)) * pd.Series(log_hl).rolling(window=20).mean()).values
 
-        out["parkinson_vol"] = parkinson_vol(out["high"], out["low"])
-        out["parkinson_vol_pct"] = out["parkinson_vol"] * 100
-        out["volatility_ratio"] = out["realized_volatility_10"] / out["realized_volatility_20"].replace(0, np.nan)
-        out["spread_proxy"] = (out["high"] - out["low"]) / out["close"].replace(0, np.nan)
+        out["dist_to_sma20_pct"] = ((out["close"] - out["sma_20"]) / out["sma_20"]) * 100
 
         # Time features
         if isinstance(out.index, pd.DatetimeIndex):
-            out["hour"] = out.index.hour
-            out["day_of_week"] = out.index.dayofweek
-            out["hour_sin"] = np.sin(2 * np.pi * out["hour"] / 24.0)
-            out["hour_cos"] = np.cos(2 * np.pi * out["hour"] / 24.0)
-            out["dow_sin"] = np.sin(2 * np.pi * out["day_of_week"] / 7.0)
-            out["dow_cos"] = np.cos(2 * np.pi * out["day_of_week"] / 7.0)
-        else:
-            out["hour"] = 0
-            out["day_of_week"] = 0
-            out["hour_sin"] = 0
-            out["hour_cos"] = 0
-            out["dow_sin"] = 0
-            out["dow_cos"] = 0
+            hours = out.index.hour
+            dows = out.index.dayofweek
+            out["hour_sin"] = np.sin(2 * np.pi * hours / 24.0)
+            out["hour_cos"] = np.cos(2 * np.pi * hours / 24.0)
 
-        # Signals / Positions
-        out["rsi_oversold"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) < 30).astype(int)
-        out["rsi_overbought"] = (pd.to_numeric(out["rsi"], errors="coerce").fillna(50.0) > 70).astype(int)
-        out["ema12_above_ema26"] = (pd.to_numeric(out["ema_12"], errors="coerce").fillna(0.0) > pd.to_numeric(out["ema_26"], errors="coerce").fillna(0.0)).astype(int)
+        # Bollinger position
         out["bb_position"] = (out["close"] - out["bb_lower"]) / (out["bb_upper"] - out["bb_lower"]).replace(0, np.nan)
-        out["near_bb_upper"] = (out["close"] > out["bb_upper"] * 0.95).astype(int)
-        out["near_bb_lower"] = (out["close"] < out["bb_lower"] * 1.05).astype(int)
 
-        # Volume Imbalance
-        # Note: Since we don't always have orderbook history in klines,
-        # we approximate imbalance from price action vs volume (Volume Delta)
-        # But the model specifically wants 'volume_imbalance_5/10'
-        # We'll use Buy/Sell Pressure approximation
+        # Volume Imbalance (Approximation)
         range_total = (out["high"] - out["low"]).replace(0, np.nan)
-        buy_pressure = (out["close"] - out["low"]) / range_total
-        sell_pressure = (out["high"] - out["close"]) / range_total
-        vol_imbalance = (buy_pressure - sell_pressure).fillna(0.0)
-        out["volume_imbalance_5"] = vol_imbalance.rolling(window=5).mean()
+        buy_p = (out["close"] - out["low"]) / range_total
+        sell_p = (out["high"] - out["close"]) / range_total
+        vol_imbalance = (buy_p - sell_p).fillna(0.0)
         out["volume_imbalance_10"] = vol_imbalance.rolling(window=10).mean()
 
-        # Momentum
-        out["momentum_3"] = out["close"].pct_change(periods=3)
-        out["momentum_5"] = out["close"].pct_change(periods=5)
-        out["momentum_10"] = out["close"].pct_change(periods=10)
+        # Support/Resistance (ОПТИМИЗИРОВАНО: убрано center=True для live)
+        # Для живой торговли нам нужны ТЕКУЩИЕ локальные экстремумы, а не заглядывание в будущее
+        window_sr = 20
+        out["local_low"] = out["low"].rolling(window=window_sr).min()
+        out["local_high"] = out["high"].rolling(window=window_sr).max()
 
-        out["adx_trend_up"] = (pd.to_numeric(out["di_plus"], errors="coerce").fillna(0.0) > pd.to_numeric(out["di_minus"], errors="coerce").fillna(0.0)).astype(int)
+        out["dist_to_support_pct"] = (out["close"] - out["local_low"]) / out["close"] * 100
+        out["dist_to_resistance_pct"] = (out["local_high"] - out["close"]) / out["close"] * 100
 
-        # Candlestick Patterns
-        out["body_size"] = (out["close"] - out["open"]).abs()
-        out["upper_wick"] = out["high"] - out[["open", "close"]].max(axis=1)
-        out["lower_wick"] = out[["open", "close"]].min(axis=1) - out["low"]
-        out["total_range"] = out["high"] - out["low"]
-        out["body_wick_ratio"] = out["body_size"] / (out["upper_wick"] + out["lower_wick"]).replace(0, np.nan)
+        # Relative Volume (RVOL)
+        out["rvol"] = out["volume"] / out["volume"].rolling(window=48).mean()
 
-        # Pattern markers
-        out["is_doji"] = (out["body_size"] <= out["total_range"] * 0.1).astype(int)
-        out["is_hammer"] = ((out["lower_wick"] > out["body_size"] * 2) & (out["upper_wick"] < out["body_size"] * 0.5)).astype(int)
-        out["is_shooting_star"] = ((out["upper_wick"] > out["body_size"] * 2) & (out["lower_wick"] < out["body_size"] * 0.5)).astype(int)
-        out["is_bullish_engulfing"] = (
-            (out["close"] > out["open"]) &
-            (out["close"].shift(1) < out["open"].shift(1)) &
-            (out["close"] > out["open"].shift(1)) &
-            (out["open"] < out["close"].shift(1))
-        ).astype(int)
-        out["is_bearish_engulfing"] = (
-            (out["close"] < out["open"]) &
-            (out["close"].shift(1) > out["open"].shift(1)) &
-            (out["close"] < out["open"].shift(1)) &
-            (out["open"] > out["close"].shift(1))
-        ).astype(int)
+        # MTF Context
+        out["trend_1h"] = out["close"].rolling(window=4).mean()
+        out["trend_4h"] = out["close"].rolling(window=16).mean()
 
-        # Support/Resistance Logic
-        window = 20
-        out["local_low"] = out["low"].rolling(window=window, center=True).min()
-        out["local_high"] = out["high"].rolling(window=window, center=True).max()
-
-        out["dist_to_support_pct"] = (out["close"] - out["local_low"]) / out["close"].replace(0, np.nan) * 100
-        out["dist_to_resistance_pct"] = (out["local_high"] - out["close"]) / out["close"].replace(0, np.nan) * 100
-        out["dist_to_support_atr"] = (out["close"] - out["local_low"]) / out["atr"].replace(0, np.nan)
-        out["dist_to_resistance_atr"] = (out["local_high"] - out["close"]) / out["atr"].replace(0, np.nan)
-
-        # Strengths (Approximated)
-        out["support_touches"] = (out["low"] <= out["local_low"] * 1.002).astype(int).rolling(window=100).sum()
-        out["resistance_touches"] = (out["high"] >= out["local_high"] * 0.998).astype(int).rolling(window=100).sum()
-
-        out["support_strength"] = out["support_touches"] * (1 / (out["dist_to_support_pct"] + 0.1))
-        out["resistance_strength"] = out["resistance_touches"] * (1 / (out["dist_to_resistance_pct"] + 0.1))
-
-        out["support_strength_ratio"] = out["support_strength"] / (out["support_strength"] + out["resistance_strength"]).replace(0, np.nan)
-        out["resistance_strength_ratio"] = out["resistance_strength"] / (out["support_strength"] + out["resistance_strength"]).replace(0, np.nan)
-
-        # Orderbook placeholders (will be filled in live or if available)
-        if "ob_imbalance" not in out.columns:
-            out["ob_imbalance"] = 0.0
-        if "ob_imbalance_5" not in out.columns:
-            out["ob_imbalance_5"] = 0.0
-        if "ob_imbalance_20" not in out.columns:
-            out["ob_imbalance_20"] = 0.0
-
-        # Final cleanup
+        # Финальная очистка
         out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
 
         base_cols = {"open", "high", "low", "close", "volume", "timestamp", "target", "meta_target"}
         self.feature_names = [c for c in out.columns if c not in base_cols]
-        return out
-
-    def add_mtf_features(self, df_features: pd.DataFrame, higher_timeframes: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        if df_features is None or df_features.empty or not higher_timeframes:
-            return df_features
-        out = df_features.copy()
-        for tf_name, htf_df in higher_timeframes.items():
-            if htf_df is None or htf_df.empty:
-                continue
-            htf_feat = FeatureEngineer().create_technical_indicators(htf_df)
-            for col in ["rsi", "atr_pct", "adx", "volume_ratio"]:
-                if col in htf_feat.columns:
-                    src = htf_feat[col]
-                    if isinstance(out.index, pd.DatetimeIndex) and isinstance(src.index, pd.DatetimeIndex):
-                        out[f"{col}_{tf_name}"] = src.reindex(out.index, method="ffill").fillna(0.0)
-                    else:
-                        vals = list(src.values)
-                        if len(vals) < len(out):
-                            vals += [0.0] * (len(out) - len(vals))
-                        out[f"{col}_{tf_name}"] = vals[: len(out)]
-        out = out.ffill().bfill().fillna(0.0)
         return out
 
     def create_triple_barrier_labels(

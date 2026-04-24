@@ -424,42 +424,10 @@ class MLStrategy:
                 df_with_features = self.feature_engineer.create_technical_indicators(df_work)
                 if not skip_feature_creation:
                     logger.debug(f"[ml_strategy] After create_technical_indicators: {len(df_with_features)} rows, {len(df_with_features.columns)} columns")
-            except TypeError as e:
-                if "'>' not supported" in str(e) or "NoneType" in str(e):
-                    logger.error(f"[ml_strategy] ❌ ERROR: Comparison with None detected in create_technical_indicators")
-                    logger.error(f"[ml_strategy]   Error: {e}")
-                    raise
+            except Exception as e:
+                logger.error(f"[ml_strategy] ❌ ERROR in create_technical_indicators: {e}")
                 raise
 
-            # Добавляем MTF фичи, если включено
-            import os
-            ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
-            ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
-            if ml_mtf_enabled and isinstance(df_work.index, pd.DatetimeIndex):
-                try:
-                    ohlcv_agg = {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                    }
-                    df_1h = df_work.resample("60min").agg(ohlcv_agg).dropna()
-                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
-                    higher_timeframes = {}
-                    if not df_1h.empty:
-                        higher_timeframes["60"] = df_1h
-                    if not df_4h.empty:
-                        higher_timeframes["240"] = df_4h
-                    if higher_timeframes:
-                        df_with_features = self.feature_engineer.add_mtf_features(
-                            df_with_features,
-                            higher_timeframes,
-                        )
-                        logger.debug(f"[ml_strategy] MTF features enabled in prepare_features_with_df. Columns: {len(df_with_features.columns)}")
-                except Exception as mtf_err:
-                    logger.warning(f"[ml_strategy] Warning: failed to add MTF features in prepare_features_with_df: {mtf_err}")
-        
         # Проверяем, что есть хотя бы основные данные (OHLCV)
         key_columns = ["open", "high", "low", "close", "volume"]
         if all(col in df_with_features.columns for col in key_columns):
@@ -796,63 +764,28 @@ class MLStrategy:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
         skip_feature_creation: bool = False,
+        precalculated_pred: Optional[int] = None,
+        precalculated_conf: Optional[float] = None,
     ) -> Signal:
         """
         Генерирует торговый сигнал на основе ML-предсказания.
         
         Args:
-            row: Текущий бар (pd.Series)
-            df: DataFrame со всеми данными
-            has_position: Текущая позиция (None, Bias.LONG, Bias.SHORT)
-            current_price: Текущая цена
-            leverage: Плечо (default: 10)
-            target_profit_pct_margin: Целевая прибыль от маржи в % (25%) - используется если tp_pct не задан
-            max_loss_pct_margin: Максимальный убыток от маржи в % (10%) - используется если sl_pct не задан
-            stop_loss_pct: Фиксированный % SL (например 0.03 для 3%)
-            take_profit_pct: Фиксированный % TP (например 0.015 для 1.5%)
-            skip_feature_creation: Если True, пропускает создание фичей
-        
-        Returns:
-            Signal объект
+            ...
+            precalculated_pred: Уже вычисленное предсказание (для ускорения batch-обработки)
+            precalculated_conf: Уже вычисленная уверенность
         """
         try:
             # Логируем начало generate_signal для отладки (только первые несколько раз)
             if not hasattr(self, '_generate_signal_call_count'):
                 self._generate_signal_call_count = 0
             self._generate_signal_call_count += 1
-            
-            if self._generate_signal_call_count <= 3:
-                logger.debug(f"[ml_strategy] generate_signal() вызван (раз {self._generate_signal_call_count}), df.shape={df.shape}")
-            
-            # Определяем символ
-            symbol = getattr(self, '_symbol', None)
-            if symbol is None:
-                model_filename = Path(self.model_path).name
-                if "_" in model_filename:
-                    parts = model_filename.replace(".pkl", "").split("_")
-                    if len(parts) >= 3 and parts[0] in ("triple", "quad") and parts[1] == "ensemble":
-                        symbol = parts[2].upper()
-                        self._symbol = symbol
-                    elif len(parts) >= 2:
-                        symbol = parts[1].upper()
-                        self._symbol = symbol
-                    else:
-                        symbol = "UNKNOWN"
-                else:
-                    symbol = "UNKNOWN"
-            
-            if self._generate_signal_call_count <= 3:
-                logger.debug(f"[ml_strategy] Символ определен: {symbol}, вызов predict()...")
-            
-            # Делаем предсказание
-            # ОПТИМИЗАЦИЯ: Если фичи уже созданы (например, в бэктесте), используем skip_feature_creation=True
-            # В реальном боте фичи создаются заново для каждого окна (skip_feature_creation=False)
-            import time
-            if self._generate_signal_call_count <= 3:
-                predict_start = time.time()
-                logger.debug(f"[ml_strategy] skip_feature_creation={skip_feature_creation}")
-            
-            prediction, confidence = self.predict(df, skip_feature_creation=skip_feature_creation)
+
+            # Если предсказания не переданы, вычисляем их
+            if precalculated_pred is not None and precalculated_conf is not None:
+                prediction, confidence = precalculated_pred, precalculated_conf
+            else:
+                prediction, confidence = self.predict(df, skip_feature_creation=skip_feature_creation)
             
             if self._generate_signal_call_count <= 3:
                 predict_elapsed = time.time() - predict_start
@@ -914,8 +847,16 @@ class MLStrategy:
             # === META-LABELING FILTER (Signal Filter) ===
             if prediction != 0 and self.meta_model is not None:
                 try:
-                    # Извлекаем фичи для текущей строки
-                    X_meta = row[self.feature_names].values.reshape(1, -1)
+                    # Извлекаем фичи для текущей строки безопасно
+                    # КРИТИЧНО: Фикс KeyError если модель требует фичи, которых нет в текущем ряду (например, старые модели или ob_imbalance)
+                    X_meta_list = []
+                    for f in self.feature_names:
+                        if f in row.index:
+                            X_meta_list.append(row[f])
+                        else:
+                            X_meta_list.append(0.0)
+
+                    X_meta = np.array(X_meta_list).reshape(1, -1)
                     X_meta_scaled = self.scaler.transform(X_meta)
 
                     # Предсказываем вероятность успеха (class 1)
@@ -1504,7 +1445,7 @@ class MLStrategy:
 def build_ml_signals(
     df: pd.DataFrame,
     model_path: str,
-    confidence_threshold: float = 0.35,  # Снижено для естественного получения ~5 сделок в день
+    confidence_threshold: float = 0.35,
     min_signal_strength: str = "слабое",
     stability_filter: bool = True,
     leverage: int = 10,
@@ -1514,20 +1455,7 @@ def build_ml_signals(
     max_signals_per_day: int = 20,
 ) -> list[Signal]:
     """
-    Строит сигналы на основе ML-модели для всего DataFrame.
-    
-    Args:
-        df: DataFrame с данными (должен содержать OHLCV и индикаторы)
-        model_path: Путь к обученной модели
-        confidence_threshold: Минимальная уверенность для открытия позиции
-        min_signal_strength: Минимальная сила сигнала
-        stability_filter: Фильтр стабильности
-        leverage: Плечо (default: 10)
-        target_profit_pct_margin: Целевая прибыль от маржи в % (25%)
-        max_loss_pct_margin: Максимальный убыток от маржи в % (10%)
-    
-    Returns:
-        Список Signal объектов
+    Оптимизированная пакетная генерация сигналов.
     """
     strategy = MLStrategy(
         model_path, 
@@ -1537,142 +1465,67 @@ def build_ml_signals(
         min_signals_per_day=min_signals_per_day,
         max_signals_per_day=max_signals_per_day
     )
+
+    # 1. Подготовка данных и фичей (пакетно)
+    df_work = df.copy()
+    if "timestamp" in df_work.columns:
+        df_work = df_work.set_index("timestamp")
+
+    try:
+        X_scaled, df_with_features = strategy.prepare_features_with_df(df_work)
+    except Exception as e:
+        logger.error(f"[build_ml_signals] Feature error: {e}")
+        return []
+
+    # 2. Пакетное предсказание (Batch Prediction)
+    logger.info(f"[build_ml_signals] Batch predicting {len(X_scaled)} rows...")
+    
+    # Обработка разных типов моделей для пакетного режима
+    if hasattr(strategy.model, "predict_proba") and not strategy.is_ensemble:
+        # Для одиночных моделей (XGBoost, и т.д.)
+        all_probas = strategy.model.predict_proba(X_scaled)
+    else:
+        # Для ансамблей или QuadEnsemble пока используем цикл, но БЕЗ пересчета фичей
+        # (QuadEnsemble требует историю, пакетный режим там сложнее)
+        all_probas = None
+
     signals: list[Signal] = []
     position_bias: Optional[Bias] = None
     
-    # Убеждаемся, что DataFrame имеет правильную структуру
-    df_work = df.copy()
-    
-    # Если timestamp в колонках, используем его как индекс
-    if "timestamp" in df_work.columns:
-        df_work = df_work.set_index("timestamp")
-    elif not isinstance(df_work.index, pd.DatetimeIndex):
-        # Пытаемся преобразовать индекс в DatetimeIndex
-        try:
-            df_work.index = pd.to_datetime(df_work.index)
-        except:
-            pass
-    
-    # Убеждаемся, что есть необходимые колонки OHLCV
-    required_cols = ["open", "high", "low", "close", "volume"]
-    if not all(col in df_work.columns for col in required_cols):
-        logger.warning(f"[ml_strategy] Warning: Missing required columns. Available: {df_work.columns.tolist()}")
-        return [Signal(df_work.index[i] if len(df_work) > 0 else pd.Timestamp.now(), 
-                       Action.HOLD, "ml_missing_data", 0.0) 
-                for i in range(len(df_work))]
-    
-    # Определяем интервал модели из имени файла (ДО try блока, чтобы была доступна везде)
-    from pathlib import Path
-    model_filename = Path(model_path).stem
-    model_parts = model_filename.split("_")
-    
-    # Извлекаем интервал из имени модели
-    base_interval = "15"  # По умолчанию 15 минут
-    for part in model_parts:
-        if part in ["15", "60", "240", "D"]:
-            base_interval = part
-            break
-    
-    # Логируем определенный интервал для диагностики
-    logger.info(f"[build_ml_signals] Model interval detected: {base_interval}min from {model_filename}")
-    
-    # ОПТИМИЗАЦИЯ: Вычисляем фичи один раз для всего DataFrame
-    try:
-        # Определяем, включен ли MTF-режим
-        import os
-        ml_mtf_enabled_env = os.getenv("ML_MTF_ENABLED", "0")
-        ml_mtf_enabled = ml_mtf_enabled_env not in ("0", "false", "False", "no")
+    # 3. Цикл генерации объектов Signal (теперь он быстрый)
+    for i, (idx, row) in enumerate(df_with_features.iterrows()):
+        # Пропускаем начало, пока не набралось достаточно данных для индикаторов
+        if i < 50:
+            signals.append(Signal(idx, Action.HOLD, "ml_warmup", row["close"]))
+            continue
 
-        # Базовые технические индикаторы на базовом интервале
-        # Для 1h моделей данные уже в правильном формате (1h), не нужно агрегировать
-        logger.debug(f"[build_ml_signals] Creating technical indicators for {base_interval}min model, data shape: {df_work.shape}")
-        df_with_features = strategy.feature_engineer.create_technical_indicators(df_work)
-        logger.debug(f"[build_ml_signals] Features created, shape: {df_with_features.shape}, columns: {len(df_with_features.columns)}")
+        pred, conf = None, None
 
-        # Если включен MTF-режим, добавляем фичи высших таймфреймов
-        if ml_mtf_enabled:
-            try:
-                higher_timeframes = {}
-                
-                if base_interval == "15":
-                    # Для 15m моделей: агрегируем 1h и 4h из 15m данных
-                    ohlcv_agg = {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                    }
-                    df_1h = df_work.resample("60min").agg(ohlcv_agg).dropna()
-                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
-                    
-                    if df_1h is not None and not df_1h.empty:
-                        higher_timeframes["60"] = df_1h
-                    if df_4h is not None and not df_4h.empty:
-                        higher_timeframes["240"] = df_4h
-                        
-                elif base_interval == "60":
-                    # Для 1h моделей: агрегируем 4h и 1d из 1h данных
-                    ohlcv_agg = {
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum",
-                    }
-                    df_4h = df_work.resample("240min").agg(ohlcv_agg).dropna()
-                    df_1d = df_work.resample("1D").agg(ohlcv_agg).dropna()
-                    
-                    if df_4h is not None and not df_4h.empty:
-                        higher_timeframes["240"] = df_4h
-                    if df_1d is not None and not df_1d.empty:
-                        higher_timeframes["D"] = df_1d
+        # Если есть пакетные вероятности, извлекаем их
+        if all_probas is not None:
+            proba = all_probas[i]
+            pred_idx = np.argmax(proba)
+            pred = int(pred_idx - 1) if len(proba) == 3 else int(pred_idx)
+            conf = float(proba[pred_idx])
 
-                if higher_timeframes:
-                    df_with_features = strategy.feature_engineer.add_mtf_features(
-                        df_with_features,
-                        higher_timeframes,
-                    )
-                    tf_names = "/".join([f"{k}min" if k != "D" else "1d" for k in higher_timeframes.keys()])
-                    logger.debug(f"[ml_strategy] MTF features enabled for ML signals (base: {base_interval}min, higher: {tf_names}). Columns: {len(df_with_features.columns)}")
-                else:
-                    logger.warning(f"[ml_strategy] MTF enabled but failed to build higher timeframe data for {base_interval}min model – using base-only features")
-            except Exception as mtf_err:
-                logger.warning(f"[ml_strategy] Warning: failed to add MTF features in build_ml_signals: {mtf_err}")
-    except Exception as e:
-        logger.error(f"[ml_strategy] Error preparing features: {e}")
-        return [Signal(df_work.index[i] if len(df_work) > 0 else pd.Timestamp.now(), 
-                       Action.HOLD, f"ml_error_{str(e)[:20]}", 0.0) 
-                for i in range(len(df_work))]
-    
-    # Определяем минимальное количество баров в зависимости от интервала
-    # Для 15m: 200 баров = ~2 дня, для 1h: 200 баров = ~8 дней (слишком много)
-    # Используем адаптивный порог: 200 для 15m, 100 для 1h
-    min_bars_required = 200 if base_interval == "15" else 100
-    
-    for idx, row in df_with_features.iterrows():
-        try:
-            # Получаем данные до текущего момента
-            df_until_now = df_with_features.loc[:idx]
-            
-            # Нужно минимум N баров для расчета всех индикаторов
-            if len(df_until_now) < min_bars_required:
-                signals.append(Signal(idx, Action.HOLD, "ml_insufficient_data", row["close"]))
-                continue
-            
-            # Используем уже вычисленные фичи
-            signal = strategy.generate_signal(
-                row=row,
-                df=df_until_now,
-                has_position=position_bias,
-                current_price=row["close"],
-                leverage=leverage,
-                target_profit_pct_margin=target_profit_pct_margin,
-                max_loss_pct_margin=max_loss_pct_margin,
-            )
-            signals.append(signal)
-        except Exception as e:
-            logger.error(f"[ml_strategy] Error processing row {idx}: {e}")
-            signals.append(Signal(idx, Action.HOLD, f"ml_error_{str(e)[:20]}", row.get("close", 0.0)))
+        # Генерируем сигнал (передаем уже готовые pred/conf если есть)
+        signal = strategy.generate_signal(
+            row=row,
+            df=df_with_features.iloc[max(0, i-200):i+1], # Ограниченное окно истории
+            has_position=position_bias,
+            current_price=row["close"],
+            leverage=leverage,
+            target_profit_pct_margin=target_profit_pct_margin,
+            max_loss_pct_margin=max_loss_pct_margin,
+            skip_feature_creation=True,
+            precalculated_pred=pred,
+            precalculated_conf=conf
+        )
+
+        # Обновляем состояние позиции для следующей итерации (упрощенно для бэктеста)
+        if signal.action == Action.LONG: position_bias = Bias.LONG
+        elif signal.action == Action.SHORT: position_bias = Bias.SHORT
+
+        signals.append(signal)
     
     return signals

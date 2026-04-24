@@ -97,13 +97,14 @@ def _load_hyperparams(path: str) -> dict:
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Обучение ML моделей с опциональными MTF фичами",
+        description="Обучение ML моделей",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--symbol", type=str, help="Торговая пара для переобучения")
-    parser.add_argument("--mtf", action="store_true", help="Использовать MTF фичей (1h, 4h)")
-    parser.add_argument("--no-mtf", action="store_true", help="НЕ использовать MTF фичи (только 15m)")
-    parser.add_argument("--interval", type=str, default="15m", choices=["15m", "60m", "1h"])
+    parser.add_argument("--interval", type=str, default="15m", choices=["5", "5m", "15", "15m", "60", "60m", "1h", "240", "4h"])
+    parser.add_argument("--days", type=int, default=30, help="Количество дней данных")
+    parser.add_argument("--pt-sl", type=float, default=2.0, help="Ratio for TBM (TP/SL)")
+    parser.add_argument("--vertical-barrier", type=int, default=24, help="Vertical barrier for TBM (candles)")
     parser.add_argument("--model-suffix", type=str, default="")
     parser.add_argument("--report-json", type=str)
     parser.add_argument("--safe-mode", action="store_true")
@@ -129,25 +130,20 @@ def main():
         symbols = ["BNBUSDT", "ADAUSDT"]
 
     interval_arg = (args.interval or "15m").strip().lower()
-    if interval_arg in ("1h", "60m"):
+    if interval_arg in ("1h", "60", "60m"):
         base_interval = "60"
         interval_display = "1h"
+    elif interval_arg in ("5", "5m"):
+        base_interval = "5"
+        interval_display = "5m"
     else:
         base_interval = "15"
         interval_display = "15m"
 
     logger.info(f"📌 Базовый таймфрейм: {interval_display}")
 
+    # MTF feature selection logic removed (deprecated)
     ml_mtf_enabled = False
-    if args.no_mtf:
-        ml_mtf_enabled = False
-        logger.info("📌 Режим: БЕЗ MTF фичей (только 15m)")
-    elif args.mtf:
-        ml_mtf_enabled = True
-        logger.info("📌 Режим: С MTF фичами (15m + 1h + 4h)")
-    else:
-        ml_mtf_enabled = os.getenv("ML_MTF_ENABLED", "0") in ("1", "true", "True")
-        logger.info(f"📌 Режим MTF: {ml_mtf_enabled} (из окружения)")
 
     trainer = ModelTrainer()
     rf_metrics = None
@@ -164,14 +160,19 @@ def main():
             logger.info("=" * 80)
 
             collector = DataCollector(api_settings)
-            if base_interval == "60":
+
+            # Приоритет: 1. Аргумент --days, 2. Гиперпараметры, 3. Дефолт по интервалу
+            if hasattr(args, 'days') and args.days:
+                days = args.days
+            elif base_interval in ("60", "1h"):
                 days = _clamp_int(hyperparams.get("training_days_1h"), 60, 365, 180)
-                logger.info(f"[1/5] 📥 Сбор исторических данных ({interval_display}) для {symbol}...")
-                df = _collect_by_days(collector, symbol, interval="60", days_back=days)
+            elif base_interval in ("5", "5m"):
+                days = _clamp_int(hyperparams.get("training_days_5m"), 7, 60, 14)
             else:
                 days = _clamp_int(hyperparams.get("training_days_15m"), 20, 180, 30)
-                logger.info(f"[1/5] 📥 Сбор исторических данных ({interval_display}) для {symbol}...")
-                df = _collect_by_days(collector, symbol, interval="15", days_back=days)
+
+            logger.info(f"[1/5] 📥 Сбор исторических данных ({interval_display}) для {symbol} за {days} дн...")
+            df = _collect_by_days(collector, symbol, base_interval if base_interval not in ("1h", "4h") else ("60" if base_interval=="1h" else "240"), days_back=days)
 
             if df is None or df.empty:
                 logger.error(f"❌ Не удалось собрать данные для {symbol}")
@@ -189,8 +190,14 @@ def main():
             use_meta_labeling = args.use_meta_labeling or hyperparams.get("use_meta_labeling", False)
 
             if use_triple_barrier:
-                logger.info("📌 Используется Triple Barrier Method (TBM)")
-                df_target = engineer.create_triple_barrier_labels(df_feat)
+                pt_sl = getattr(args, 'pt_sl', 2.0)
+                vertical_barrier = getattr(args, 'vertical_barrier', 24)
+                logger.info(f"📌 Используется Triple Barrier Method (TBM) [pt_sl={pt_sl}, vertical={vertical_barrier}]")
+                df_target = engineer.create_triple_barrier_labels(
+                    df_feat,
+                    pt_sl_ratio=pt_sl,
+                    vertical_barrier_candles=vertical_barrier
+                )
             else:
                 df_target = engineer.create_target_variable(df_feat)
 
@@ -211,7 +218,7 @@ def main():
 
             # RF
             rf_model, rf_metrics = trainer.train_random_forest_classifier(X, y)
-            mode_suffix = "1h" if base_interval == "60" else "15m"
+            mode_suffix = interval_display
             rf_filename = f"rf_{symbol}_{base_interval}_{mode_suffix}{args.model_suffix}.pkl"
             trainer.save_model(rf_model, trainer.scaler, feature_names, rf_metrics, rf_filename)
 

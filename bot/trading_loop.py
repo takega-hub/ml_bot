@@ -54,8 +54,9 @@ class TradingLoop:
         self.tg_bot = tg_bot
         self.notifier = NotificationManager(tg_bot, settings)
         self.strategies: Dict[str, Union[MLStrategy, 'MultiTimeframeMLStrategy']] = {}
-        # Отслеживаем последнюю обработанную свечу для каждого символа
-        self.last_processed_candle: Dict[str, Optional[pd.Timestamp]] = {}
+        # Отслеживаем последнюю обработанную свечу для каждого символа и стратегии
+        # Структура: {symbol: {strat_id: last_timestamp}}
+        self.last_processed_candle: Dict[str, Dict[str, pd.Timestamp]] = {}
         # Кэш сигнала BTCUSDT для проверки направления других пар (обновляется каждые 5 минут)
         self._btc_signal_cache: Optional[Dict] = None
         self._btc_signal_cache_time: Optional[float] = None
@@ -110,7 +111,7 @@ class TradingLoop:
         self._decision_engine: Optional[SignalDecisionEngine] = None
         
         # Валидация моделей при старте
-        if self.settings.ml_strategy.use_mtf_strategy:
+        if self.settings.ml_strategy.use_mtf_strategy or self.settings.ml_strategy.use_scalp_strategy:
             self._validate_mtf_models()
 
     def _get_ai_agent(self) -> Optional[AIAgentService]:
@@ -469,26 +470,36 @@ class TradingLoop:
         return result
     
     def _validate_mtf_models(self):
-        """Проверяет наличие MTF моделей для активных символов при старте"""
-        from bot.ml.model_selector import select_best_models
+        """Проверяет наличие MTF и Scalp моделей для активных символов при старте"""
+        from bot.ml.model_selector import select_best_models, select_best_scalp_model
         
-        logger.info("🔍 Валидация MTF моделей для активных символов...")
-        missing_models = []
+        logger.info("🔍 Валидация ML моделей для активных символов...")
+        missing_mtf = []
+        missing_scalp = []
         
         for symbol in self.state.active_symbols:
-            model_1h, model_15m, model_info = select_best_models(symbol=symbol)
-            
-            if not model_1h or not model_15m:
-                missing_models.append(symbol)
-                logger.warning(f"[{symbol}] ⚠️ MTF модели не найдены (1h: {model_1h is not None}, 15m: {model_15m is not None})")
-            else:
-                logger.info(f"[{symbol}] ✅ MTF модели найдены (source: {model_info.get('source', 'unknown')})")
+            # Валидация MTF
+            if self.settings.ml_strategy.use_mtf_strategy:
+                model_1h, model_15m, model_info = select_best_models(symbol=symbol)
+                if not model_1h or not model_15m:
+                    missing_mtf.append(symbol)
+                    logger.warning(f"[{symbol}] ⚠️ MTF модели не найдены")
+                else:
+                    logger.info(f"[{symbol}] ✅ MTF модели найдены")
+
+            # Валидация Scalp
+            if self.settings.ml_strategy.use_scalp_strategy:
+                m5m_path, m5m_info = select_best_scalp_model(symbol=symbol)
+                if not m5m_path:
+                    missing_scalp.append(symbol)
+                    logger.warning(f"[{symbol}] ⚠️ Scalp (5m) модель не найдена")
+                else:
+                    logger.info(f"[{symbol}] ✅ Scalp (5m) модель найдена")
         
-        if missing_models:
-            logger.warning(f"⚠️ MTF стратегия включена, но модели не найдены для: {', '.join(missing_models)}")
-            logger.warning("Бот будет использовать обычную стратегию для этих символов")
-        else:
-            logger.info("✅ Все активные символы имеют MTF модели")
+        if missing_mtf:
+            logger.warning(f"⚠️ MTF стратегия включена, но модели не найдены для: {', '.join(missing_mtf)}")
+        if missing_scalp:
+            logger.warning(f"⚠️ Scalp стратегия включена, но модели не найдены для: {', '.join(missing_scalp)}")
 
     async def run(self):
         logger.info("Starting Trading Loop...")
@@ -508,6 +519,7 @@ class TradingLoop:
             results = await asyncio.gather(
                 self._signal_processing_loop(),
                 self._position_monitoring_loop(),
+                self._maintenance_loop(),
                 return_exceptions=True  # Не останавливаемся при ошибке в одном из циклов
             )
             logger.info(f"Trading Loop: asyncio.gather completed with results: {results}")
@@ -634,6 +646,21 @@ class TradingLoop:
                     continue
 
                 logger.info(f"🔄 Signal Processing Loop: Processing {len(self.state.active_symbols)} symbols...")
+
+                # Определяем минимальный таймфрейм среди активных стратегий для умной паузы
+                min_timeframe = self.settings.timeframe
+                for symbol in self.state.active_symbols:
+                    configs = self.state.get_all_strategies_for_symbol(symbol)
+                    if not configs and self.settings.ml_strategy.use_scalp_strategy:
+                        # Если конфигов нет, но скальпинг включен глобально, предполагаем 5m
+                        min_timeframe = "5m"
+                        break
+                    for cfg in configs:
+                        if cfg.get("mode") == "scalp":
+                            min_timeframe = "5m"
+                            break
+                    if min_timeframe == "5m": break
+
                 for symbol in self.state.active_symbols:
                     logger.info(f"🎯 Signal Processing Loop: Starting to process {symbol}")
                     await self.process_symbol(symbol)
@@ -642,20 +669,19 @@ class TradingLoop:
                     if len(self.state.active_symbols) > 1:
                         await asyncio.sleep(2)
                 
-                # УМНАЯ ПАУЗА: проверяем, когда закроется следующая свеча
-                # Если свеча только что закрылась (в пределах последних 30 секунд), проверяем снова через короткое время
-                seconds_since_close = self._get_seconds_since_last_candle_close(self.settings.timeframe)
+                # УМНАЯ ПАУЗА: проверяем, когда закроется следующая свеча (используем минимальный ТФ)
+                seconds_since_close = self._get_seconds_since_last_candle_close(min_timeframe)
                 
                 if seconds_since_close <= 30:
                     # Свеча только что закрылась, проверяем снова через 10 секунд для надежности
                     sleep_time = 10
-                    logger.info(f"✅ Signal Processing Loop: Candle closed {seconds_since_close:.1f}s ago, checking again in {sleep_time}s...")
+                    logger.info(f"✅ Signal Processing Loop: Candle ({min_timeframe}) closed {seconds_since_close:.1f}s ago, checking again in {sleep_time}s...")
                 else:
                     # Обычная пауза, но не больше времени до следующего закрытия
-                    seconds_until_close = self._get_seconds_until_next_candle_close(self.settings.timeframe)
+                    seconds_until_close = self._get_seconds_until_next_candle_close(min_timeframe)
                     # Используем минимум из обычной паузы и времени до закрытия (но не меньше 10 секунд)
                     sleep_time = min(self.settings.live_poll_seconds, max(10, seconds_until_close - 5))
-                    logger.info(f"✅ Signal Processing Loop: Completed iteration {iteration}, sleeping for {sleep_time}s (next candle closes in {seconds_until_close:.1f}s)...")
+                    logger.info(f"✅ Signal Processing Loop: Completed iteration {iteration}, sleeping for {sleep_time}s (next {min_timeframe} candle closes in {seconds_until_close:.1f}s)...")
                 
                 await asyncio.sleep(sleep_time)
                 logger.debug(f"Signal Processing Loop: Woke up from sleep, starting next iteration...")
@@ -780,14 +806,7 @@ class TradingLoop:
             logger.info(f"[{symbol}] 🚀 START process_symbol()")
             
             # 0. Проверяем cooldown
-            # КРИТИЧНО: is_symbol_in_cooldown() может вызывать save() (запись в файл)
-            # Оборачиваем в to_thread() чтобы не блокировать event loop
-            # Добавляем таймаут, чтобы избежать зависания
-            
-            # Проверяем, включен ли глобальный флаг enable_loss_cooldown
             if not self.settings.risk.enable_loss_cooldown:
-                # Если защита отключена, но символ в списке - удаляем его принудительно
-                # (делаем это один раз, чтобы очистить состояние)
                 if self.state.cooldowns.get(symbol):
                     logger.info(f"[{symbol}] Cooldown found but disabled in settings. Removing.")
                     self.state.remove_cooldown(symbol)
@@ -797,7 +816,7 @@ class TradingLoop:
                 try:
                     in_cooldown = await asyncio.wait_for(
                         asyncio.to_thread(self.state.is_symbol_in_cooldown, symbol),
-                        timeout=5.0  # Таймаут 5 секунд
+                        timeout=5.0
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"[{symbol}] Cooldown check timed out, assuming no cooldown")
@@ -806,298 +825,385 @@ class TradingLoop:
             if in_cooldown:
                 logger.info(f"[{symbol}] In cooldown, returning")
                 return
-            logger.info(f"[{symbol}] No cooldown, continuing...")
+
+            # 0.5 Определение активных стратегий
+            configs = self.state.get_all_strategies_for_symbol(symbol)
+            if not configs:
+                # Fallback to auto-select if no config found
+                from bot.ml.model_selector import select_best_models, select_best_scalp_model
+                m1h, m15m, info = select_best_models(symbol=symbol, use_best_from_comparison=True)
+                if m1h and m15m:
+                    configs = [{
+                        "mode": "mtf",
+                        "model_1h_path": m1h,
+                        "model_15m_path": m15m,
+                        "name": "auto_mtf",
+                        "confidence_threshold_1h": info.get('confidence_threshold_1h', 0.50),
+                        "confidence_threshold_15m": info.get('confidence_threshold_15m', 0.35),
+                    }]
+
+                # Поиск и добавление скальпинг-модели (5m)
+                if self.settings.ml_strategy.use_scalp_strategy:
+                    m5m_path, m5m_info = select_best_scalp_model(symbol=symbol)
+                    if m5m_path:
+                        scalp_config = {
+                            "mode": "scalp",
+                            "model_path": m5m_path,
+                            "name": f"scalp_{Path(m5m_path).stem}",
+                            "confidence_threshold": self.settings.ml_strategy.scalp_confidence_threshold,
+                        }
+                        if not configs:
+                            configs = [scalp_config]
+                        else:
+                            configs.append(scalp_config)
+
+                if not configs:
+                    # Fallback to searching single model
+                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
+                    if models:
+                        configs = [{"mode": "single", "model_path": str(models[0]), "name": models[0].stem}]
+
+            if not configs:
+                logger.warning(f"[{symbol}] No strategy configs found, skipping")
+                return
+
+            # 1. Получаем данные
+            required_limit = 500
             
-            # 1. Получаем данные (асинхронно, чтобы не блокировать event loop)
-            # Используем кэширование для 15m данных, чтобы не загружать все 500 свечей каждый раз
-            use_mtf = self.settings.ml_strategy.use_mtf_strategy
-            required_limit = 500 if use_mtf else 200  # Для MTF запрашиваем больше данных
-            
-            # Загружаем кэшированные 15m данные
-            logger.debug(f"[{symbol}] Loading cached 15m data...")
+            # 5m data (scalping)
+            df_5m = None
+            has_scalp = any(c.get("mode") == "scalp" for c in configs)
+            if has_scalp:
+                try:
+                    df_5m = await asyncio.wait_for(asyncio.to_thread(self._load_cached_5m_data, symbol), timeout=5.0)
+                    needs_update_5m = df_5m is None or df_5m.empty
+                    if not needs_update_5m:
+                        last_5m = df_5m.index[-1]
+                        if (pd.Timestamp.now() - last_5m).total_seconds() / 60 > 5:
+                            needs_update_5m = True
+                    if needs_update_5m:
+                        df_5m = await asyncio.wait_for(asyncio.to_thread(self._fetch_and_cache_5m_data, symbol, df_5m), timeout=20.0)
+                except Exception as e:
+                    logger.warning(f"[{symbol}] Failed to fetch 5m data: {e}")
+
+            # 15m data
             try:
                 df = await asyncio.wait_for(
                     asyncio.to_thread(self._load_cached_15m_data, symbol),
                     timeout=5.0
                 )
-            except asyncio.TimeoutError:
-                logger.warning(f"[{symbol}] ⚠️ Timeout loading 15m cache, skipping cache")
-                df = None
-            except Exception as e:
-                logger.error(f"[{symbol}] ❌ Error loading 15m cache: {e}")
+            except Exception:
                 df = None
             
-            # Проверяем актуальность данных
-            needs_update = False
-            if df is None or df.empty:
-                logger.info(f"[{symbol}] ⚠️ No cached 15m data found, fetching from exchange...")
-                needs_update = True
-            else:
-                # Проверяем, актуальны ли данные
-                if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
-                    last_candle_time = df.index[-1]
-                    current_time = pd.Timestamp.now()
-                    
-                    # Для 15m свечей вычисляем, когда должна была закрыться следующая свеча после последней в кэше
-                    # 15-минутные свечи закрываются в :00, :15, :30, :45
-                    last_minute = last_candle_time.minute
-                    next_close_minute = ((last_minute // 15) + 1) * 15
-                    if next_close_minute >= 60:
-                        next_close_time = last_candle_time.replace(minute=0, second=0, microsecond=0) + pd.Timedelta(hours=1)
-                    else:
-                        next_close_time = last_candle_time.replace(minute=next_close_minute, second=0, microsecond=0)
-                    
-                    # Если время закрытия следующей свечи уже прошло, значит должна быть новая свеча
-                    should_have_new_candle = current_time >= next_close_time
-                    minutes_since_last = (current_time - last_candle_time).total_seconds() / 60
-                    
-                    if should_have_new_candle or minutes_since_last > 20 or len(df) < required_limit:
-                        if should_have_new_candle:
-                            logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated: next candle should have closed at {next_close_time}, but it's {current_time} (last candle: {last_candle_time}), updating...")
-                        else:
-                            logger.info(f"[{symbol}] ⚠️ Cached 15m data is outdated or insufficient (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, have {len(df)} candles, need {required_limit}), updating...")
-                        needs_update = True
-                    else:
-                        logger.debug(f"[{symbol}] ✅ Cached 15m data is fresh (last candle: {last_candle_time}, {minutes_since_last:.1f}min ago, next close: {next_close_time}, {len(df)} candles)")
+            needs_update = df is None or df.empty
+            if not needs_update and isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
+                last_candle_time = df.index[-1]
+                current_time = pd.Timestamp.now()
+                last_minute = last_candle_time.minute
+                next_close_minute = ((last_minute // 15) + 1) * 15
+                if next_close_minute >= 60:
+                    next_close_time = last_candle_time.replace(minute=0, second=0, microsecond=0) + pd.Timedelta(hours=1)
                 else:
-                    logger.warning(f"[{symbol}] ⚠️ Could not check cache freshness, updating...")
+                    next_close_time = last_candle_time.replace(minute=next_close_minute, second=0, microsecond=0)
+
+                if current_time >= next_close_time or (current_time - last_candle_time).total_seconds() / 60 > 20 or len(df) < required_limit:
                     needs_update = True
             
-            # Обновляем кэш если нужно
             if needs_update:
-                # Подгружаем только новые данные
                 try:
                     df = await asyncio.wait_for(
                         asyncio.to_thread(self._fetch_and_cache_15m_data, symbol, df, required_limit),
-                        timeout=30.0  # Таймаут 30 секунд на запрос к API
+                        timeout=30.0
                     )
-                except asyncio.TimeoutError:
-                    logger.warning(f"[{symbol}] ⚠️ Timeout fetching 15m data from exchange")
-                    return
-                except Exception as e:
-                    logger.error(f"[{symbol}] ❌ Error fetching 15m data: {e}")
+                except Exception:
                     return
 
-                if df is not None and not df.empty:
-                    logger.info(f"[{symbol}] ✅ Updated cache with {len(df)} 15m candles from exchange")
-                else:
-                    logger.warning(f"[{symbol}] ⚠️ Failed to fetch 15m data from exchange")
-                    return
-            else:
-                logger.info(f"[{symbol}] ✅ Using cached 15m data ({len(df)} candles)")
-            
-            if df.empty:
-                logger.warning(f"[{symbol}] ⚠️ No data available")
+            if df is None or df.empty:
                 return
-            
-            # Для MTF стратегии загружаем кэшированные 1h данные из ml_data
-            # Проверяем актуальность и обновляем при необходимости
-            df_1h_cached = None
-            if use_mtf:
-                df_1h_cached = await asyncio.to_thread(self._load_cached_1h_data, symbol)
-                
-                # Проверяем актуальность данных
-                needs_update = False
-                if df_1h_cached is None or df_1h_cached.empty:
-                    logger.info(f"[{symbol}] ⚠️ No cached 1h data found, fetching from exchange...")
-                    needs_update = True
-                else:
-                    # Проверяем, актуальны ли данные (последняя свеча не старше 2 часов для 1h данных)
-                    if isinstance(df_1h_cached.index, pd.DatetimeIndex) and len(df_1h_cached) > 0:
-                        last_candle_time = df_1h_cached.index[-1]
-                        current_time = pd.Timestamp.now()
-                        hours_since_last = (current_time - last_candle_time).total_seconds() / 3600
-                        
-                        # Если последняя свеча старше 2 часов, обновляем кэш
-                        if hours_since_last > 2:
-                            logger.info(f"[{symbol}] ⚠️ Cached 1h data is outdated (last candle: {last_candle_time}, {hours_since_last:.1f}h ago), updating...")
-                            needs_update = True
-                        else:
-                            logger.debug(f"[{symbol}] ✅ Cached 1h data is fresh (last candle: {last_candle_time}, {hours_since_last:.1f}h ago)")
-                    else:
-                        logger.warning(f"[{symbol}] ⚠️ Could not check cache freshness, updating...")
-                        needs_update = True
-                
-                # Обновляем кэш если нужно
-                if needs_update:
-                    # Передаем существующий кэш для подгрузки только новых данных
-                    df_1h_cached = await asyncio.to_thread(self._fetch_and_cache_1h_data, symbol, df_1h_cached)
-                    if df_1h_cached is not None and not df_1h_cached.empty:
-                        logger.info(f"[{symbol}] ✅ Updated cache with {len(df_1h_cached)} 1h candles from exchange")
-                    else:
-                        logger.warning(f"[{symbol}] Failed to fetch 1h data, will aggregate from 15m")
-                else:
-                    logger.info(f"[{symbol}] ✅ Using cached 1h data ({len(df_1h_cached)} candles)")
 
-            # 2. Инициализируем стратегию если нужно
-            from pathlib import Path
+            # 1h data
+            df_1h_cached = await asyncio.to_thread(self._load_cached_1h_data, symbol)
+            needs_update_1h = df_1h_cached is None or df_1h_cached.empty
+            if not needs_update_1h:
+                last_1h = df_1h_cached.index[-1]
+                if (pd.Timestamp.now() - last_1h).total_seconds() / 3600 > 2:
+                    needs_update_1h = True
             
-            # Получаем конфигурацию для символа
-            strat_config = self.state.get_strategy_config(symbol)
-            
-            # Определяем режим и модели
-            use_mtf = self.settings.ml_strategy.use_mtf_strategy # Default from global
-            target_model_single = self.state.symbol_models.get(symbol)
-            target_model_1h = None
-            target_model_15m = None
-            
-            if strat_config:
-                mode = strat_config.get("mode")
-                if mode == "mtf":
-                    use_mtf = True
-                    target_model_1h = strat_config.get("model_1h_path")
-                    target_model_15m = strat_config.get("model_15m_path")
-                elif mode == "single":
-                    use_mtf = False
-                    target_model_single = strat_config.get("model_path")
-            
-            # Проверяем текущую загруженную стратегию
-            current_strategy = self.strategies.get(symbol)
-            need_reinit = False
-            
-            if current_strategy:
-                is_mtf_instance = hasattr(current_strategy, 'predict_combined')
-                if is_mtf_instance != use_mtf:
-                    logger.info(f"[{symbol}] Strategy type mismatch: current={'MTF' if is_mtf_instance else 'Single'}, required={'MTF' if use_mtf else 'Single'}")
-                    need_reinit = True
-                elif use_mtf:
-                    # Проверяем пути моделей для MTF
-                    curr_1h = str(getattr(current_strategy, 'model_1h_path', ''))
-                    curr_15m = str(getattr(current_strategy, 'model_15m_path', ''))
-                    if target_model_1h and str(Path(target_model_1h)) != str(Path(curr_1h)):
-                        logger.info(f"[{symbol}] 1h model changed: {curr_1h} -> {target_model_1h}")
-                        need_reinit = True
-                    if target_model_15m and str(Path(target_model_15m)) != str(Path(curr_15m)):
-                        logger.info(f"[{symbol}] 15m model changed: {curr_15m} -> {target_model_15m}")
-                        need_reinit = True
-                else:
-                    # Проверяем путь модели для Single
-                    curr_path = str(getattr(current_strategy, 'model_path', ''))
-                    if target_model_single and str(Path(target_model_single)) != str(Path(curr_path)):
-                        logger.info(f"[{symbol}] Model changed: {curr_path} -> {target_model_single}")
-                        need_reinit = True
+            if needs_update_1h:
+                df_1h_cached = await asyncio.to_thread(self._fetch_and_cache_1h_data, symbol, df_1h_cached)
 
-            if need_reinit:
-                logger.info(f"[{symbol}] Reinitializing strategy...")
-                del self.strategies[symbol]
-            
-            if symbol not in self.strategies:
-                logger.info(f"[{symbol}] Initializing strategy: use_mtf={use_mtf}")
+            # 1.5 Safety Guard: Check data sync
+            if df is not None and not df.empty and df_1h_cached is not None and not df_1h_cached.empty:
+                last_15m = df.index[-1]
+                last_1h = df_1h_cached.index[-1]
+                diff_seconds = abs((last_15m - last_1h).total_seconds())
+                max_diff = getattr(self.settings.ml_strategy, "data_sync_max_diff_seconds", 7200)
+
+                if diff_seconds > max_diff:
+                    logger.warning(f"[{symbol}] 🛡️ SAFETY GUARD: Data streams out of sync! 15m: {last_15m}, 1h: {last_1h}, Diff: {diff_seconds/60:.1f}m. Skipping.")
+                    return
+
+            # 2. Инициализируем стратегии (Multi-strategy support)
+            # Create strategy instances
+            active_strats = []
+            for cfg in configs:
+                strat_id = f"{symbol}_{cfg.get('name', 'unnamed')}"
+                instance = self.strategies.get(strat_id)
                 
-                if use_mtf:
-                    # Используем комбинированную MTF стратегию
+                # Check if needs reinit
+                needs_init = instance is None
+                if instance:
+                    if cfg.get("mode") == "mtf" and not hasattr(instance, 'predict_combined'):
+                        needs_init = True
+                    elif cfg.get("mode") == "single" and hasattr(instance, 'predict_combined'):
+                        needs_init = True
+                    elif cfg.get("mode") == "scalp" and hasattr(instance, 'predict_combined'):
+                        needs_init = True
+
+                if needs_init:
                     from bot.ml.mtf_strategy import MultiTimeframeMLStrategy
-                    from bot.ml.model_selector import select_best_models
-                    
-                    model_1h = target_model_1h
-                    model_15m = target_model_15m
-                    model_info = {}
-                    
-                    # Если модели не заданы явно в конфиге, пытаемся выбрать лучшие
-                    if not model_1h or not model_15m:
-                        logger.info(f"[{symbol}] Attempting to auto-select MTF models...")
-                        model_1h, model_15m, model_info = select_best_models(
-                            symbol=symbol,
-                            use_best_from_comparison=True,
-                        )
-                    
-                    if model_1h and model_15m:
-                        # Используем параметры из best_strategies.json, если доступны
-                        # Если параметр None, используем значение из настроек, если и оно None - используем значения по умолчанию
-                        confidence_threshold_1h = model_info.get('confidence_threshold_1h')
-                        if confidence_threshold_1h is None:
-                            confidence_threshold_1h = self.settings.ml_strategy.mtf_confidence_threshold_1h
-                        if confidence_threshold_1h is None:
-                            confidence_threshold_1h = 0.50  # Значение по умолчанию
-                        
-                        confidence_threshold_15m = model_info.get('confidence_threshold_15m')
-                        if confidence_threshold_15m is None:
-                            confidence_threshold_15m = self.settings.ml_strategy.mtf_confidence_threshold_15m
-                        if confidence_threshold_15m is None:
-                            confidence_threshold_15m = 0.35  # Значение по умолчанию
-                        
-                        alignment_mode = model_info.get('alignment_mode')
-                        if alignment_mode is None:
-                            alignment_mode = self.settings.ml_strategy.mtf_alignment_mode
-                        if alignment_mode is None:
-                            alignment_mode = "strict"  # Значение по умолчанию
-                        
-                        require_alignment = model_info.get('require_alignment')
-                        if require_alignment is None:
-                            require_alignment = self.settings.ml_strategy.mtf_require_alignment
-                        if require_alignment is None:
-                            require_alignment = True  # Значение по умолчанию
-                        
-                        logger.info(f"[{symbol}] 🔄 Loading MTF strategy:")
-                        logger.info(f"  Source: {model_info.get('source', 'unknown')}")
-                        logger.info(f"  1h model: {Path(model_1h).name}")
-                        logger.info(f"  15m model: {Path(model_15m).name}")
-                        logger.info(f"  Parameters: 1h_threshold={confidence_threshold_1h}, 15m_threshold={confidence_threshold_15m}, alignment_mode={alignment_mode}, require_alignment={require_alignment}")
-                        
-                        ms = self.settings.ml_strategy
-                        self.strategies[symbol] = MultiTimeframeMLStrategy(
-                            model_1h_path=model_1h,
-                            model_15m_path=model_15m,
-                            confidence_threshold_1h=confidence_threshold_1h,
-                            confidence_threshold_15m=confidence_threshold_15m,
-                            require_alignment=require_alignment,
-                            alignment_mode=alignment_mode,
+                    ms = self.settings.ml_strategy
+                    if cfg.get("mode") == "mtf":
+                        instance = MultiTimeframeMLStrategy(
+                            model_1h_path=cfg["model_1h_path"],
+                            model_15m_path=cfg["model_15m_path"],
+                            confidence_threshold_1h=cfg.get("confidence_threshold_1h", 0.50),
+                            confidence_threshold_15m=cfg.get("confidence_threshold_15m", 0.35),
+                            require_alignment=cfg.get("require_alignment", True),
+                            alignment_mode=cfg.get("alignment_mode", "strict"),
                             use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
-                            adx_trend_threshold=getattr(ms, "adx_trend_threshold", 25.0),
-                            adx_flat_threshold=getattr(ms, "adx_flat_threshold", 20.0),
-                            trend_weights=getattr(ms, "trend_weights", None),
-                            flat_weights=getattr(ms, "flat_weights", None),
                             use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
-                        logger.info(f"[{symbol}] ✅ MTF strategy loaded successfully")
+                    elif cfg.get("mode") == "scalp":
+                        instance = MLStrategy(
+                            model_path=cfg["model_path"],
+                            confidence_threshold=cfg.get("confidence_threshold", 0.35),
+                            min_signal_strength=getattr(ms, "scalp_min_signal_strength", "умеренное"),
+                            use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
+                            use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
+                        )
                     else:
-                        # Нет обеих моделей - используем обычную стратегию
-                        logger.warning(f"[{symbol}] MTF strategy enabled but models not found/selected")
-                        logger.warning(f"[{symbol}] Falling back to single timeframe strategy")
-                        use_mtf = False
-                
-                if not use_mtf:
-                    # Используем обычную стратегию (15m или 1h)
-                    model_path = target_model_single
-                    
-                    # Если путь не задан, используем автопоиск
-                    if not model_path:
-                        # Пытаемся найти модель в папке ml_models
-                        models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                        if models:
-                            # Для BTCUSDT предпочитаем модель с фичей orderbook (_ob)
-                            if symbol == "BTCUSDT":
-                                ob_models = [p for p in models if "_ob" in p.stem]
-                                if ob_models:
-                                    models = ob_models + [p for p in models if p not in ob_models]
-                            model_path = str(models[0])
-                            self.state.symbol_models[symbol] = model_path
-                    
-                    if model_path:
-                        logger.info(f"[{symbol}] 🔄 Loading model: {model_path}")
-                        ms = self.settings.ml_strategy
-                        self.strategies[symbol] = MLStrategy(
-                            model_path=model_path,
+                        instance = MLStrategy(
+                            model_path=cfg["model_path"],
                             confidence_threshold=ms.confidence_threshold,
                             min_signal_strength=ms.min_signal_strength,
-                            stability_filter=ms.stability_filter,
-                            min_signals_per_day=ms.min_signals_per_day,
-                            max_signals_per_day=ms.max_signals_per_day,
                             use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
-                            adx_trend_threshold=getattr(ms, "adx_trend_threshold", 25.0),
-                            adx_flat_threshold=getattr(ms, "adx_flat_threshold", 20.0),
-                            trend_weights=getattr(ms, "trend_weights", None),
-                            flat_weights=getattr(ms, "flat_weights", None),
                             use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
-                        logger.info(f"[{symbol}] ✅ Model loaded successfully (threshold: {ms.confidence_threshold}, min_strength: {ms.min_signal_strength})")
-                        dyn = getattr(ms, "use_dynamic_ensemble_weights", False)
-                        logger.info(f"[DEPLOY] {symbol}: single TF, dynamic_ensemble_weights={dyn}")
+                    self.strategies[strat_id] = instance
+                active_strats.append((cfg, instance))
+
+            # 2.5 ОПТИМИЗАЦИЯ: Рассчитываем индикаторы один раз для всех стратегий
+            from bot.ml.feature_engineering import FeatureEngineer
+            fe = FeatureEngineer()
+
+            if df is not None and not df.empty:
+                try:
+                    df = fe.create_technical_indicators(df)
+                except Exception as fe_err:
+                    logger.error(f"[{symbol}] Error calculating 15m features: {fe_err}")
+
+            if df_5m is not None and not df_5m.empty:
+                try:
+                    df_5m = fe.create_technical_indicators(df_5m)
+                except Exception as fe_err:
+                    logger.error(f"[{symbol}] Error calculating 5m features: {fe_err}")
+
+            if df_1h_cached is not None and not df_1h_cached.empty:
+                try:
+                    # Проверяем, нужно ли считать фичи (если их мало, значит это "сырые" данные)
+                    if len(df_1h_cached.columns) < 15:
+                        df_1h_cached = fe.create_technical_indicators(df_1h_cached)
+                except Exception as fe_err:
+                    logger.error(f"[{symbol}] Error calculating 1h features: {fe_err}")
+
+            # 3. Генерируем сигналы от всех стратегий
+            all_signals = []
+
+            if symbol not in self.last_processed_candle:
+                self.last_processed_candle[symbol] = {}
+
+            for cfg, strat in active_strats:
+                strat_id = f"{symbol}_{cfg.get('name', 'unnamed')}"
+                try:
+                    # Определяем текущий таймстемп и данные для данной стратегии
+                    if cfg.get("mode") == "scalp" and df_5m is not None and not df_5m.empty:
+                        strat_row = df_5m.iloc[-1]
+                        ts = strat_row.get('timestamp') if 'timestamp' in strat_row else df_5m.index[-1]
+                        strat_df = df_5m
                     else:
-                        logger.warning(f"No model found for {symbol}, skipping...")
+                        strat_row = df.iloc[-1]
+                        ts = strat_row.get('timestamp') if 'timestamp' in strat_row else df.index[-1]
+                        strat_df = df
+
+                    # Проверяем, обрабатывали ли уже эту свечу для этой стратегии
+                    if ts is not None and self.last_processed_candle[symbol].get(strat_id) == ts:
+                        continue
+
+                    if cfg.get("mode") == "scalp" and df_5m is not None and not df_5m.empty:
+                        # Scalp strategy uses 5m data
+                        sig = await asyncio.to_thread(
+                            strat.generate_signal,
+                            row=strat_row, df=strat_df,
+                            has_position=has_pos, current_price=strat_row['close'],
+                            leverage=self.settings.get_leverage_for_symbol(symbol),
+                            skip_feature_creation=True,
+                        )
+                        if sig:
+                            sig.indicators_info = sig.indicators_info or {}
+                            sig.indicators_info["interval"] = 5
+                            sig.indicators_info["strategy"] = "SCALP"
+                    elif hasattr(strat, 'predict_combined'):
+                        # MTF strategy
+                        sig = await asyncio.to_thread(
+                            strat.generate_signal,
+                            row=strat_row, df_15m=df, df_1h=df_1h_cached,
+                            has_position=has_pos, current_price=strat_row['close'],
+                            leverage=self.settings.get_leverage_for_symbol(symbol),
+                            skip_feature_creation=True,
+                        )
+                    else:
+                        # Single timeframe strategy (15m)
+                        sig = await asyncio.to_thread(
+                            strat.generate_signal,
+                            row=strat_row, df=df,
+                            has_position=has_pos, current_price=strat_row['close'],
+                            leverage=self.settings.get_leverage_for_symbol(symbol),
+                            skip_feature_creation=True,
+                        )
+
+                    if sig and sig.action != Action.HOLD:
+                        sig.model_name = strat_id
+                        all_signals.append(sig)
+
+                    # Обновляем отметку времени для стратегии
+                    if ts is not None:
+                        self.last_processed_candle[symbol][strat_id] = ts
+
+                except Exception as e:
+                    logger.error(f"Error in strategy {strat_id}: {e}")
+
+            if not all_signals:
+                return
+
+            # 4. Aggregation / Judge Logic
+            mode = getattr(self.settings.ml_strategy, "signal_aggregation_mode", "highest_confidence")
+            winning_signal = None
+
+            if mode == "highest_confidence":
+                all_signals.sort(key=lambda x: (x.indicators_info or {}).get("confidence", 0), reverse=True)
+                winning_signal = all_signals[0]
+            elif mode == "consensus":
+                # Only take action if N strategies agree on direction
+                longs = [s for s in all_signals if s.action == Action.LONG]
+                shorts = [s for s in all_signals if s.action == Action.SHORT]
+                min_count = getattr(self.settings.ml_strategy, "consensus_min_count", 2)
+
+                if len(longs) >= min_count:
+                    longs.sort(key=lambda x: (x.indicators_info or {}).get("confidence", 0), reverse=True)
+                    winning_signal = longs[0]
+                    winning_signal.reason = f"consensus_long_{len(longs)}_of_{len(all_signals)}"
+                elif len(shorts) >= min_count:
+                    shorts.sort(key=lambda x: (x.indicators_info or {}).get("confidence", 0), reverse=True)
+                    winning_signal = shorts[0]
+                    winning_signal.reason = f"consensus_short_{len(shorts)}_of_{len(all_signals)}"
+                else:
+                    logger.info(f"[{symbol}] No consensus: Longs={len(longs)}, Shorts={len(shorts)}, Min={min_count}")
+                    return
+            elif mode == "weighted_voting":
+                # Simple weight: 1.0 for MTF, 0.8 for Scalp, 0.6 for Single (heuristic)
+                long_score = 0.0
+                short_score = 0.0
+                for s in all_signals:
+                    model_name_lower = s.model_name.lower()
+                    if "mtf" in model_name_lower:
+                        weight = 1.0
+                    elif "scalp" in model_name_lower:
+                        weight = 0.8
+                    else:
+                        weight = 0.6
+
+                    conf = (s.indicators_info or {}).get("confidence", 0)
+                    if s.action == Action.LONG:
+                        long_score += conf * weight
+                    else:
+                        short_score += conf * weight
+
+                if long_score > short_score and long_score > 0.5:
+                    longs = [s for s in all_signals if s.action == Action.LONG]
+                    longs.sort(key=lambda x: (x.indicators_info or {}).get("confidence", 0), reverse=True)
+                    winning_signal = longs[0]
+                    winning_signal.reason = f"weighted_vote_long_score_{long_score:.2f}"
+                elif short_score > long_score and short_score > 0.5:
+                    shorts = [s for s in all_signals if s.action == Action.SHORT]
+                    shorts.sort(key=lambda x: (x.indicators_info or {}).get("confidence", 0), reverse=True)
+                    winning_signal = shorts[0]
+                    winning_signal.reason = f"weighted_vote_short_score_{short_score:.2f}"
+                else:
+                    logger.info(f"[{symbol}] Weighted vote inconclusive: Long={long_score:.2f}, Short={short_score:.2f}")
+                    return
+
+            if not winning_signal:
+                return
+
+            logger.info(f"[{symbol}] WINNING SIGNAL ({mode}): {winning_signal.action.value} from {winning_signal.model_name} (Conf: {(winning_signal.indicators_info or {}).get('confidence', 0):.2%})")
+
+            # 5. Decision Engine & AI Agent Confirmation
+            indicators_info = winning_signal.indicators_info or {}
+            confidence = indicators_info.get("confidence", 0)
+
+            engine = self._get_decision_engine()
+            ohlcv = [{"time": int(r.get("timestamp", 0)), "open": float(r.get("open", 0.0)), "high": float(r.get("high", 0.0)), "low": float(r.get("low", 0.0)), "close": float(r.get("close", 0.0)), "volume": float(r.get("volume", 0.0))} for r in df.tail(60).to_dict(orient="records")]
+
+            eval_payload = {
+                "action": winning_signal.action.value,
+                "price": float(current_price),
+                "confidence": float(confidence),
+                "strength": str(indicators_info.get("strength", "")),
+                "model_name": winning_signal.model_name
+            }
+
+            engine_eval = engine.evaluate(
+                symbol=symbol,
+                side="Buy" if winning_signal.action == Action.LONG else "Sell",
+                signal_payload=eval_payload,
+                ohlcv=ohlcv,
+            )
+
+            if isinstance(engine_eval, dict):
+                engine_eval["decision_id"] = str(uuid.uuid4())
+                indicators_info["decision_engine_eval"] = engine_eval
+                indicators_info["engine_decision_id"] = engine_eval["decision_id"]
+                winning_signal.indicators_info = indicators_info
+
+            # AI Confirmation if needed
+            ai_agent = self._get_ai_agent()
+            if ai_agent and self.settings.ml_strategy.ai_agent_enabled:
+                ai_resp = await ai_agent.confirm_entry(
+                    symbol=symbol,
+                    side="Buy" if winning_signal.action == Action.LONG else "Sell",
+                    price=current_price,
+                    confidence=confidence,
+                    reason=winning_signal.reason,
+                    indicators=indicators_info,
+                    ohlcv=ohlcv
+                )
+                if ai_resp:
+                    ai_decision = self._normalize_ai_confirm_entry_result(ai_resp, str(uuid.uuid4()))
+                    indicators_info["ai_entry_confirmation"] = ai_decision
+                    winning_signal.indicators_info = indicators_info
+
+                    if ai_decision.get("decision") == "veto":
+                        logger.info(f"[{symbol}] AI VETOED signal from {winning_signal.model_name}")
                         return
 
-            # 3. Генерируем сигнал
+            # 6. Execution
+            if has_pos is None:
+                side_to_exec = "Buy" if winning_signal.action == Action.LONG else "Sell"
+                await self.execute_trade(symbol, side_to_exec, winning_signal)
+
+        except Exception as e:
+            logger.error(f"Error in process_symbol for {symbol}: {e}", exc_info=True)
             strategy = self.strategies[symbol]
             # Определяем, какая свеча закрыта и может быть использована для предсказания
             # ВАЖНО: Используем последнюю закрытую свечу (как в тесте), а не предпоследнюю
@@ -3556,6 +3662,83 @@ class TradingLoop:
             logger.error(f"[{symbol}] Failed to fetch and cache 1h data: {e}", exc_info=True)
             return existing_cache
     
+    def _load_cached_5m_data(self, symbol: str) -> Optional[pd.DataFrame]:
+        """
+        Загружает кэшированные 5m данные из ml_data/{symbol}_5_cache.csv
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            cache_file = ml_data_dir / f"{symbol}_5_cache.csv"
+
+            if not cache_file.exists():
+                return None
+
+            df = pd.read_csv(cache_file)
+
+            if "timestamp" in df.columns:
+                if pd.api.types.is_numeric_dtype(df["timestamp"]):
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms', errors='coerce')
+                else:
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], errors='coerce')
+                df = df.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"])
+                df = df.set_index("timestamp")
+
+            if len(df) > 500:
+                df = df.tail(500)
+
+            logger.debug(f"[{symbol}] Loaded {len(df)} cached 5m candles")
+            return df
+        except Exception as e:
+            logger.warning(f"[{symbol}] Failed to load cached 5m data: {e}")
+            return None
+
+    def _fetch_and_cache_5m_data(self, symbol: str, existing_cache: Optional[pd.DataFrame] = None, required_limit: int = 500) -> Optional[pd.DataFrame]:
+        """
+        Запрашивает 5m данные с биржи и сохраняет в кэш.
+        """
+        try:
+            from pathlib import Path
+            ml_data_dir = Path("ml_data")
+            ml_data_dir.mkdir(exist_ok=True)
+            cache_file = ml_data_dir / f"{symbol}_5_cache.csv"
+
+            limit = 100 if existing_cache is not None and not existing_cache.empty else required_limit
+
+            logger.info(f"[{symbol}] Fetching 5m data from exchange (limit={limit})...")
+            df_new = self.bybit.get_kline_df(symbol, "5", limit)
+
+            if df_new.empty:
+                return existing_cache
+
+            if "timestamp" in df_new.columns:
+                if pd.api.types.is_numeric_dtype(df_new["timestamp"]):
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], unit='ms', errors='coerce')
+                else:
+                    df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors='coerce')
+                df_new = df_new.dropna(subset=["timestamp"]).sort_values("timestamp").drop_duplicates(subset=["timestamp"])
+                df_new = df_new.set_index("timestamp")
+
+            if existing_cache is not None and not existing_cache.empty:
+                df_combined = pd.concat([existing_cache, df_new])
+                df_final = df_combined[~df_combined.index.duplicated(keep='last')].sort_index().tail(required_limit)
+            else:
+                df_final = df_new
+
+            try:
+                df_to_save = df_final.reset_index()
+                if "timestamp" in df_to_save.columns:
+                    df_to_save["timestamp"] = df_to_save["timestamp"].dt.strftime('%Y-%m-%d %H:%M:%S')
+                df_to_save.to_csv(cache_file, index=False)
+                logger.info(f"[{symbol}] ✅ Saved {len(df_final)} 5m candles to cache")
+            except Exception as e:
+                logger.warning(f"[{symbol}] Failed to save 5m cache: {e}")
+
+            return df_final
+        except Exception as e:
+            logger.error(f"[{symbol}] Failed to fetch and cache 5m data: {e}", exc_info=True)
+            return existing_cache
+
     def _load_cached_15m_data(self, symbol: str) -> Optional[pd.DataFrame]:
         """
         Загружает кэшированные 15m данные из ml_data/{symbol}_15_cache.csv
@@ -4541,3 +4724,57 @@ class TradingLoop:
         
         except Exception as e:
             logger.error(f"Error during position sync: {e}")
+
+    async def _maintenance_loop(self):
+        """Цикл периодического обслуживания: очистка логов, архивация и т.д."""
+        logger.info("Starting Maintenance Loop...")
+        # Первая очистка через 1 час после старта, затем раз в неделю
+        await asyncio.sleep(3600)
+
+        while True:
+            try:
+                now = datetime.now()
+                # Очищаем логи раз в неделю (в воскресенье ночью)
+                if now.weekday() == 6 and now.hour == 3:
+                    logger.info("📅 Weekly maintenance: clearing logs...")
+                    self._auto_clear_logs()
+                    # Ждем час, чтобы не зациклилось в 3 часа ночи
+                    await asyncio.sleep(3600)
+
+                # Проверяем раз в час
+                await asyncio.sleep(3600)
+            except Exception as e:
+                logger.error(f"Error in maintenance loop: {e}")
+                await asyncio.sleep(3600)
+
+    def _auto_clear_logs(self):
+        """Автоматическая очистка основных логов (удаление старых и очистка текущих)."""
+        log_dir = Path("logs")
+        if not log_dir.exists():
+            return
+
+        logs_to_clear = ["bot.log", "errors.log", "signals.log", "trades.log", "ai_entry_audit.jsonl"]
+
+        for log_name in logs_to_clear:
+            base_file = log_dir / log_name
+            if not base_file.exists():
+                continue
+
+            try:
+                # 1. Удаляем все ротированные файлы (log.1, log.2 и т.д.)
+                for p in sorted(log_dir.glob(f"{log_name}.*")):
+                    if p.is_file():
+                        try:
+                            p.unlink(missing_ok=True)
+                            logger.info(f"Deleted rotated log file: {p.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete {p.name}: {e}")
+
+                # 2. Очищаем основной файл (truncate), сохраняя дескриптор открытым
+                # Это самый безопасный способ для работающего процесса
+                with open(base_file, "w", encoding="utf-8") as f:
+                    f.write(f"--- Log auto-cleared and restarted at {datetime.now().isoformat()} ---\n")
+
+                logger.info(f"Main log file cleared: {log_name}")
+            except Exception as e:
+                logger.error(f"Failed to perform auto-cleanup for {log_name}: {e}")
