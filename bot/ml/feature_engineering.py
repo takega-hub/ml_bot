@@ -297,6 +297,50 @@ class FeatureEngineer:
         out["trend_1h"] = out["close"].rolling(window=4).mean()
         out["trend_4h"] = out["close"].rolling(window=16).mean()
 
+        # SMC-style features (lightweight, fully vectorized proxies)
+        # Structure pivots
+        swing_window = 20
+        prev_swing_high = out["high"].rolling(window=swing_window, min_periods=5).max().shift(1)
+        prev_swing_low = out["low"].rolling(window=swing_window, min_periods=5).min().shift(1)
+        out["smc_prev_swing_high"] = prev_swing_high
+        out["smc_prev_swing_low"] = prev_swing_low
+
+        # BOS (Break Of Structure): close breaks previous swing levels
+        out["smc_bos_up"] = (out["close"] > prev_swing_high).astype(float)
+        out["smc_bos_down"] = (out["close"] < prev_swing_low).astype(float)
+
+        # Structure bias state used for CHOCH proxy
+        bias_state = pd.Series(0.0, index=out.index)
+        bias_state = np.where(out["smc_bos_up"] > 0, 1.0, bias_state)
+        bias_state = np.where(out["smc_bos_down"] > 0, -1.0, bias_state)
+        bias_state = pd.Series(bias_state, index=out.index).replace(0.0, np.nan).ffill().fillna(0.0)
+        out["smc_structure_bias"] = bias_state
+        out["smc_choch_up"] = ((bias_state > 0) & (bias_state.shift(1) < 0)).astype(float)
+        out["smc_choch_down"] = ((bias_state < 0) & (bias_state.shift(1) > 0)).astype(float)
+
+        # FVG (Fair Value Gap) proxy using 3-candle displacement
+        high_2 = out["high"].shift(2)
+        low_2 = out["low"].shift(2)
+        out["smc_fvg_bull"] = (out["low"] > high_2).astype(float)
+        out["smc_fvg_bear"] = (out["high"] < low_2).astype(float)
+        out["smc_fvg_bull_size_pct"] = ((out["low"] - high_2).clip(lower=0.0) / out["close"]).fillna(0.0)
+        out["smc_fvg_bear_size_pct"] = ((low_2 - out["high"]).clip(lower=0.0) / out["close"]).fillna(0.0)
+
+        # Liquidity sweep proxy: wick takes previous liquidity but closes back in range
+        liq_window = 30
+        prev_liq_high = out["high"].rolling(window=liq_window, min_periods=8).max().shift(1)
+        prev_liq_low = out["low"].rolling(window=liq_window, min_periods=8).min().shift(1)
+        out["smc_liquidity_sweep_high"] = ((out["high"] > prev_liq_high) & (out["close"] < prev_liq_high)).astype(float)
+        out["smc_liquidity_sweep_low"] = ((out["low"] < prev_liq_low) & (out["close"] > prev_liq_low)).astype(float)
+
+        # Order-block proximity proxy: distance to last opposite candle body edge
+        prev_open = out["open"].shift(1)
+        prev_close = out["close"].shift(1)
+        last_bear_body_high = pd.Series(np.where(prev_close < prev_open, np.maximum(prev_open, prev_close), np.nan), index=out.index).ffill()
+        last_bull_body_low = pd.Series(np.where(prev_close > prev_open, np.minimum(prev_open, prev_close), np.nan), index=out.index).ffill()
+        out["smc_ob_bull_dist_pct"] = ((out["close"] - last_bear_body_high).abs() / out["close"]).fillna(0.0)
+        out["smc_ob_bear_dist_pct"] = ((out["close"] - last_bull_body_low).abs() / out["close"]).fillna(0.0)
+
         # Финальная очистка
         out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
 

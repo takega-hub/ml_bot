@@ -1247,17 +1247,18 @@ class TradingLoop:
                 or getattr(self.settings.ml_strategy, "ai_agent_enabled", False)  # legacy compatibility
             )
             if ai_agent and ai_confirmation_enabled:
-                ai_resp = await ai_agent.confirm_entry(
+                ai_resp = await self._confirm_entry_with_ai(
                     symbol=symbol,
                     side="Buy" if winning_signal.action == Action.LONG else "Sell",
-                    price=current_price,
-                    confidence=confidence,
-                    reason=winning_signal.reason,
-                    indicators=indicators_info,
-                    ohlcv=ohlcv
+                    signal=winning_signal,
+                    position_horizon=self._classify_position_horizon(winning_signal),
                 )
                 if ai_resp:
-                    ai_decision = self._normalize_ai_confirm_entry_result(ai_resp, str(uuid.uuid4()))
+                    ai_decision = (
+                        ai_resp
+                        if isinstance(ai_resp, dict) and "decision" in ai_resp
+                        else self._normalize_ai_confirm_entry_result(ai_resp, str(uuid.uuid4()))
+                    )
                     indicators_info["ai_entry_confirmation"] = ai_decision
                     winning_signal.indicators_info = indicators_info
 
