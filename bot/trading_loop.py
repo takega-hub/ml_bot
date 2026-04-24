@@ -1242,7 +1242,11 @@ class TradingLoop:
 
             # AI Confirmation if needed
             ai_agent = self._get_ai_agent()
-            if ai_agent and self.settings.ml_strategy.ai_agent_enabled:
+            ai_confirmation_enabled = bool(
+                getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False)
+                or getattr(self.settings.ml_strategy, "ai_agent_enabled", False)  # legacy compatibility
+            )
+            if ai_agent and ai_confirmation_enabled:
                 ai_resp = await ai_agent.confirm_entry(
                     symbol=symbol,
                     side="Buy" if winning_signal.action == Action.LONG else "Sell",
