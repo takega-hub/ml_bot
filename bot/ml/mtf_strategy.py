@@ -65,8 +65,22 @@ class MultiTimeframeMLStrategy:
         """
         self.model_1h_path = Path(model_1h_path)
         self.model_15m_path = Path(model_15m_path)
-        self.confidence_threshold_1h = confidence_threshold_1h
-        self.confidence_threshold_15m = confidence_threshold_15m
+
+        def _safe_threshold(value: Any, default: float) -> float:
+            try:
+                v = float(value)
+            except Exception:
+                return default
+            if not np.isfinite(v):
+                return default
+            if v < 0:
+                return 0.0
+            if v > 1:
+                return 1.0
+            return v
+
+        self.confidence_threshold_1h = _safe_threshold(confidence_threshold_1h, 0.50)
+        self.confidence_threshold_15m = _safe_threshold(confidence_threshold_15m, 0.35)
         self.min_confidence_difference = min_confidence_difference
         self.require_alignment = require_alignment
         self.alignment_mode = alignment_mode
@@ -103,7 +117,7 @@ class MultiTimeframeMLStrategy:
         logger.info(f"[MTF Strategy] Загрузка 1h модели: {model_1h_path}")
         self.strategy_1h = MLStrategy(
             model_path=str(model_1h_path),
-            confidence_threshold=confidence_threshold_1h,
+            confidence_threshold=self.confidence_threshold_1h,
             min_signal_strength=min_signal_strength_1h,
             stability_filter=True,
             **kw_ensemble,
@@ -112,7 +126,7 @@ class MultiTimeframeMLStrategy:
         logger.info(f"[MTF Strategy] Загрузка 15m модели: {model_15m_path}")
         self.strategy_15m = MLStrategy(
             model_path=str(model_15m_path),
-            confidence_threshold=confidence_threshold_15m,
+            confidence_threshold=self.confidence_threshold_15m,
             min_signal_strength=min_signal_strength_15m,
             stability_filter=True,
             **kw_ensemble,

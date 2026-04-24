@@ -855,8 +855,8 @@ class TradingLoop:
                         "model_1h_path": m1h,
                         "model_15m_path": m15m,
                         "name": "auto_mtf",
-                        "confidence_threshold_1h": info.get('confidence_threshold_1h', 0.50),
-                        "confidence_threshold_15m": info.get('confidence_threshold_15m', 0.35),
+                        "confidence_threshold_1h": info.get('confidence_threshold_1h') or 0.50,
+                        "confidence_threshold_15m": info.get('confidence_threshold_15m') or 0.35,
                     }]
 
             # Добавляем scalp-параллель всегда, если включен глобально и еще не добавлен.
