@@ -828,6 +828,7 @@ class TradingLoop:
 
             # 0.5 Определение активных стратегий
             configs = self.state.get_all_strategies_for_symbol(symbol)
+            from bot.ml.model_selector import select_best_models, select_best_scalp_model
             if configs:
                 supported_modes = {"mtf", "scalp"}
                 original_len = len(configs)
@@ -840,9 +841,13 @@ class TradingLoop:
                         f"[{symbol}] Removed {original_len - len(configs)} legacy strategy configs "
                         f"(supported modes: mtf, scalp)"
                     )
+                    try:
+                        self.state.set_strategies_for_symbol(symbol, configs)
+                        logger.info(f"[{symbol}] Persisted cleaned strategy config (legacy entries removed)")
+                    except Exception as state_err:
+                        logger.warning(f"[{symbol}] Failed to persist cleaned strategy config: {state_err}")
             if not configs:
                 # Fallback to auto-select if no config found
-                from bot.ml.model_selector import select_best_models, select_best_scalp_model
                 m1h, m15m, info = select_best_models(symbol=symbol, use_best_from_comparison=True)
                 if m1h and m15m:
                     configs = [{
@@ -854,20 +859,27 @@ class TradingLoop:
                         "confidence_threshold_15m": info.get('confidence_threshold_15m', 0.35),
                     }]
 
-                # Поиск и добавление скальпинг-модели (5m)
-                if self.settings.ml_strategy.use_scalp_strategy:
-                    m5m_path, m5m_info = select_best_scalp_model(symbol=symbol)
-                    if m5m_path:
-                        scalp_config = {
-                            "mode": "scalp",
-                            "model_path": m5m_path,
-                            "name": f"scalp_{Path(m5m_path).stem}",
-                            "confidence_threshold": self.settings.ml_strategy.scalp_confidence_threshold,
-                        }
-                        if not configs:
-                            configs = [scalp_config]
-                        else:
-                            configs.append(scalp_config)
+            # Добавляем scalp-параллель всегда, если включен глобально и еще не добавлен.
+            has_scalp_cfg = any(
+                isinstance(c, dict) and str(c.get("mode", "")).strip().lower() == "scalp"
+                for c in (configs or [])
+            )
+            if self.settings.ml_strategy.use_scalp_strategy and not has_scalp_cfg:
+                m5m_path, m5m_info = select_best_scalp_model(symbol=symbol)
+                if m5m_path:
+                    scalp_config = {
+                        "mode": "scalp",
+                        "model_path": m5m_path,
+                        "name": f"scalp_{Path(m5m_path).stem}",
+                        "confidence_threshold": self.settings.ml_strategy.scalp_confidence_threshold,
+                    }
+                    if not configs:
+                        configs = [scalp_config]
+                    else:
+                        configs.append(scalp_config)
+                    logger.info(f"[{symbol}] ✅ Scalp strategy attached: {Path(m5m_path).name}")
+                else:
+                    logger.warning(f"[{symbol}] ⚠️ Scalp enabled but no 5m model found")
 
             if not configs:
                 logger.warning(f"[{symbol}] No strategy configs found, skipping")

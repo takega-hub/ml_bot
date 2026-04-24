@@ -838,6 +838,19 @@ class BotState:
             self.multi_strategies[symbol].append(strategy_config)
         self.save()
 
+    def set_strategies_for_symbol(self, symbol: str, strategies: List[Dict[str, Any]]):
+        """Replaces all strategies for a symbol and clears legacy single-strategy config."""
+        symbol = symbol.upper()
+        normalized: List[Dict[str, Any]] = []
+        for item in strategies or []:
+            if isinstance(item, dict):
+                normalized.append(dict(item))
+        with self.lock:
+            self.multi_strategies[symbol] = normalized
+            if symbol in self.symbol_strategies:
+                del self.symbol_strategies[symbol]
+        self.save()
+
     def remove_strategy_from_symbol(self, symbol: str, strategy_index: int):
         """Removes a strategy configuration from a symbol by index"""
         symbol = symbol.upper()
