@@ -6709,7 +6709,7 @@ async def run_api_server(state, bybit_client, settings, trading_loop=None, model
         logger.info("[Mobile API] Создание FastAPI приложения...")
         app = create_app(state, bybit_client, settings, trading_loop, model_manager, tg_bot)
         logger.info("[Mobile API] Config и Server...")
-        config = Config(app=app, host=host, port=port, log_level="info")
+        config = Config(app=app, host=host, port=port, log_level="info", access_log=False)
         server = Server(config)
         logger.info(f"[Mobile API] Запуск Uvicorn на http://{host}:{port} (снаружи: http://5.101.179.47:{port}/api/health)")
         await server.serve()

@@ -28,18 +28,13 @@ class BybitClient:
         # Диагностика: проверяем наличие ключей
         if not api_key or not api_secret:
             print(f"[bybit] ⚠️ WARNING: API keys are missing or empty!")
-            print(f"[bybit]   API Key: {'SET' if api_key else 'NOT SET'} (length: {len(api_key) if api_key else 0})")
-            print(f"[bybit]   API Secret: {'SET' if api_secret else 'NOT SET'} (length: {len(api_secret) if api_secret else 0})")
+            print(f"[bybit]   API credentials status: key={'SET' if api_key else 'NOT SET'}, secret={'SET' if api_secret else 'NOT SET'}")
             print(f"[bybit]   Base URL: {api.base_url}")
             print(f"[bybit]   Testnet mode: {testnet}")
             print(f"[bybit]   Please check your .env file and ensure BYBIT_API_KEY and BYBIT_API_SECRET are set correctly.")
         else:
-            # Показываем частично скрытый ключ для диагностики
-            api_key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
-            api_secret_display = f"{api_secret[:8]}...{api_secret[-4:]}" if len(api_secret) > 12 else "***"
             print(f"[bybit] Initializing client: testnet={testnet}, base_url={api.base_url}")
-            print(f"[bybit]   API Key: {api_key_display} (length: {len(api_key)})")
-            print(f"[bybit]   API Secret: {api_secret_display} (length: {len(api_secret)})")
+            print(f"[bybit]   API credentials: configured")
             if testnet:
                 print(f"[bybit]   ⚠️ IMPORTANT: Make sure these are TESTNET API keys, not production keys!")
                 print(f"[bybit]   Testnet keys can be created at: https://testnet.bybit.com/app/user/api-management")
