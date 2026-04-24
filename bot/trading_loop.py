@@ -828,6 +828,18 @@ class TradingLoop:
 
             # 0.5 Определение активных стратегий
             configs = self.state.get_all_strategies_for_symbol(symbol)
+            if configs:
+                supported_modes = {"mtf", "scalp"}
+                original_len = len(configs)
+                configs = [
+                    c for c in configs
+                    if isinstance(c, dict) and str(c.get("mode", "")).strip().lower() in supported_modes
+                ]
+                if len(configs) < original_len:
+                    logger.warning(
+                        f"[{symbol}] Removed {original_len - len(configs)} legacy strategy configs "
+                        f"(supported modes: mtf, scalp)"
+                    )
             if not configs:
                 # Fallback to auto-select if no config found
                 from bot.ml.model_selector import select_best_models, select_best_scalp_model
@@ -856,12 +868,6 @@ class TradingLoop:
                             configs = [scalp_config]
                         else:
                             configs.append(scalp_config)
-
-                if not configs:
-                    # Fallback to searching single model
-                    models = list(Path("ml_models").glob(f"*_{symbol}_*.pkl"))
-                    if models:
-                        configs = [{"mode": "single", "model_path": str(models[0]), "name": models[0].stem}]
 
             if not configs:
                 logger.warning(f"[{symbol}] No strategy configs found, skipping")
@@ -955,8 +961,6 @@ class TradingLoop:
                 if instance:
                     if cfg.get("mode") == "mtf" and not hasattr(instance, 'predict_combined'):
                         needs_init = True
-                    elif cfg.get("mode") == "single" and hasattr(instance, 'predict_combined'):
-                        needs_init = True
                     elif cfg.get("mode") == "scalp" and hasattr(instance, 'predict_combined'):
                         needs_init = True
 
@@ -983,13 +987,8 @@ class TradingLoop:
                             use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
                         )
                     else:
-                        instance = MLStrategy(
-                            model_path=cfg["model_path"],
-                            confidence_threshold=ms.confidence_threshold,
-                            min_signal_strength=ms.min_signal_strength,
-                            use_dynamic_ensemble_weights=getattr(ms, "use_dynamic_ensemble_weights", False),
-                            use_fixed_sl_from_risk=getattr(ms, "use_fixed_sl_from_risk", False),
-                        )
+                        logger.warning(f"[{symbol}] Unsupported strategy mode: {cfg.get('mode')}, skipping")
+                        continue
                     self.strategies[strat_id] = instance
                 active_strats.append((cfg, instance))
 
@@ -1093,14 +1092,8 @@ class TradingLoop:
                             skip_feature_creation=True,
                         )
                     else:
-                        # Single timeframe strategy (15m)
-                        sig = await asyncio.to_thread(
-                            strat.generate_signal,
-                            row=strat_row, df=df,
-                            has_position=has_pos, current_price=strat_row['close'],
-                            leverage=self.settings.get_leverage_for_symbol(symbol),
-                            skip_feature_creation=True,
-                        )
+                        logger.warning(f"[{symbol}] Unsupported strategy instance for {strat_id}, skipping")
+                        continue
 
                     if sig and sig.action != Action.HOLD:
                         sig.model_name = strat_id
@@ -1141,9 +1134,22 @@ class TradingLoop:
                     logger.info(f"[{symbol}] No consensus: Longs={len(longs)}, Shorts={len(shorts)}, Min={min_count}")
                     return
             elif mode == "weighted_voting":
-                # Simple weight: 1.0 for MTF, 0.8 for Scalp, 0.6 for Single (heuristic)
+                # Dynamic weight: adapt by regime + signal strength
                 long_score = 0.0
                 short_score = 0.0
+                regime = "neutral"
+                try:
+                    adx = float(df.iloc[-1].get("adx", np.nan))
+                    atr_pct = float(df.iloc[-1].get("atr_pct", np.nan))
+                    if np.isfinite(adx):
+                        if adx >= 25:
+                            regime = "trend"
+                        elif adx <= 20:
+                            regime = "sideways"
+                    if np.isfinite(atr_pct) and atr_pct >= 1.2:
+                        regime = "volatile"
+                except Exception:
+                    regime = "neutral"
                 for s in all_signals:
                     model_name_lower = s.model_name.lower()
                     if "mtf" in model_name_lower:
@@ -1153,11 +1159,26 @@ class TradingLoop:
                     else:
                         weight = 0.6
 
+                    if regime == "trend" and "mtf" in model_name_lower:
+                        weight *= 1.25
+                    elif regime == "sideways" and "scalp" in model_name_lower:
+                        weight *= 1.25
+                    elif regime == "volatile" and "scalp" in model_name_lower:
+                        weight *= 1.15
+
                     conf = (s.indicators_info or {}).get("confidence", 0)
+                    strength = str((s.indicators_info or {}).get("strength", "")).strip().lower()
+                    strength_mult = {
+                        "очень_сильное": 1.15,
+                        "сильное": 1.08,
+                        "среднее": 1.03,
+                        "умеренное": 1.0,
+                        "слабое": 0.95,
+                    }.get(strength, 1.0)
                     if s.action == Action.LONG:
-                        long_score += conf * weight
+                        long_score += conf * weight * strength_mult
                     else:
-                        short_score += conf * weight
+                        short_score += conf * weight * strength_mult
 
                 if long_score > short_score and long_score > 0.5:
                     longs = [s for s in all_signals if s.action == Action.LONG]

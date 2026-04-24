@@ -18,6 +18,12 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+def _is_legacy_single_mtf_name(name: str) -> bool:
+    """Legacy single-model MTF artifacts usually contain '_mtf' in filename."""
+    n = str(name or "").lower()
+    return "_mtf" in n
+
+
 def load_manual_mtf_models(symbol: str) -> Optional[Dict[str, str]]:
     """
     Загружает вручную выбранные MTF модели для символа из ml_settings.json.
@@ -114,6 +120,9 @@ def find_best_models_from_comparison(symbol: str) -> Tuple[Optional[str], Option
                 best_1h_name = best_row.get('best_1h_model', '')
                 
                 if best_15m_name and best_1h_name:
+                    if _is_legacy_single_mtf_name(best_15m_name) or _is_legacy_single_mtf_name(best_1h_name):
+                        logger.warning(f"[{symbol}] comparison_15m_vs_1h points to legacy _mtf models; skipping")
+                        return None, None
                     model_15m_path = models_dir / f"{best_15m_name}.pkl"
                     model_1h_path = models_dir / f"{best_1h_name}.pkl"
                     
@@ -138,6 +147,18 @@ def find_best_models_from_comparison(symbol: str) -> Tuple[Optional[str], Option
         
         # Ищем лучшие модели для символа, раздельно для 1h и 15m
         symbol_data = df[df['symbol'] == symbol_upper]
+        if symbol_data.empty:
+            return None, None
+
+        # Удаляем legacy single-MTF артефакты из текущего пайплайна (используем только чистые 1h/15m модели).
+        if "model_filename" in symbol_data.columns:
+            symbol_data = symbol_data[
+                ~symbol_data["model_filename"].astype(str).str.lower().str.contains("_mtf", na=False)
+            ]
+        if "model_name" in symbol_data.columns:
+            symbol_data = symbol_data[
+                ~symbol_data["model_name"].astype(str).str.lower().str.contains("_mtf", na=False)
+            ]
         if symbol_data.empty:
             return None, None
         
@@ -204,6 +225,11 @@ def find_all_models_for_symbol(symbol: str) -> Tuple[List[str], List[str], List[
     models_5m = list(models_dir.glob(f"*_{symbol}_5_*.pkl"))
     if not models_5m:
         models_5m = list(models_dir.glob(f"*_{symbol}_*5m*.pkl"))
+
+    # Фильтруем legacy single-MTF артефакты.
+    models_1h = [m for m in models_1h if not _is_legacy_single_mtf_name(m.name)]
+    models_15m = [m for m in models_15m if not _is_legacy_single_mtf_name(m.name)]
+    models_5m = [m for m in models_5m if not _is_legacy_single_mtf_name(m.name)]
 
     # Сортируем по имени (для стабильности)
     models_1h = sorted([str(m) for m in models_1h])

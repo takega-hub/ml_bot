@@ -6071,11 +6071,17 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 or merged_models.get("tf_1h")
                 or merged_models.get("h1")
             )
+            model_5m_path = (
+                merged_models.get("5m")
+                or merged_models.get("model_5m")
+                or merged_models.get("tf_5m")
+                or merged_models.get("m5")
+            )
             recommended_tactic = results.get("recommended_tactic")
             if not recommended_tactic and isinstance((results.get("selection") or {}).get("recommended_tactic"), str):
                 recommended_tactic = (results.get("selection") or {}).get("recommended_tactic")
             
-            if not model_15m_path and not model_1h_path:
+            if not model_15m_path and not model_1h_path and not model_5m_path:
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -6089,11 +6095,15 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             if not recommended_tactic:
                 if model_1h_path and model_15m_path:
                     recommended_tactic = "mtf"
+                elif model_5m_path:
+                    recommended_tactic = "scalp_5m"
                 elif model_1h_path:
                     recommended_tactic = "single_1h"
                 else:
                     recommended_tactic = "single_15m"
 
+            if recommended_tactic == "scalp_5m" and not model_5m_path:
+                recommended_tactic = "mtf" if (model_1h_path and model_15m_path) else ("single_15m" if model_15m_path else "single_1h")
             if recommended_tactic == "single_1h" and not model_1h_path and model_15m_path:
                 recommended_tactic = "single_15m"
             if recommended_tactic == "single_15m" and not model_15m_path and model_1h_path:
@@ -6127,6 +6137,19 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 experiment["applied_mode"] = "single_15m"
                 experiment["applied_models"] = {"single": model_path}
                 logger.info(f"Applied single_15m experiment {body.experiment_id} for {symbol}: model={model_path}")
+            elif recommended_tactic == "scalp_5m":
+                model_path = model_5m_path
+                if not model_path:
+                    raise HTTPException(status_code=400, detail="No 5m model available for scalp_5m tactic")
+                if not model_manager:
+                    raise HTTPException(status_code=501, detail="Model manager not available")
+                model_manager.apply_model(symbol, model_path)
+                state.symbol_models[symbol] = model_path
+                config = {"mode": "scalp", "model_path": model_path, "name": f"scalp_{Path(model_path).stem}"}
+                state.set_strategy_config(symbol, config)
+                experiment["applied_mode"] = "scalp_5m"
+                experiment["applied_models"] = {"5m": model_path}
+                logger.info(f"Applied scalp_5m experiment {body.experiment_id} for {symbol}: model={model_path}")
             elif model_1h_path and model_15m_path:
                 # MTF стратегия
                 config = {

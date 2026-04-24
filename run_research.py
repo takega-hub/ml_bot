@@ -571,6 +571,7 @@ def main():
 
         model_15m_path = None
         model_1h_path = None
+        model_5m_path = None
         training_reports: Dict[str, Any] = {}
         interval_candidate_models: Dict[str, List[Dict[str, Any]]] = {}
         hyperparams_payload = details.get("hyperparams") if isinstance(details.get("hyperparams"), dict) else None
@@ -627,6 +628,8 @@ def main():
             found_model = Path(str(selected_model.get("path")))
             if interval == "15m":
                 model_15m_path = str(found_model)
+            elif interval == "5m":
+                model_5m_path = str(found_model)
             else:
                 model_1h_path = str(found_model)
             if isinstance(report_payload, dict):
@@ -640,7 +643,7 @@ def main():
         update_experiment_status(experiment_id, "training_completed", _status_payload({
             "progress": 45,
             "current_phase": "training_completed",
-            "models": {"15m": model_15m_path, "1h": model_1h_path},
+            "models": {"5m": model_5m_path, "15m": model_15m_path, "1h": model_1h_path},
             "training_report": training_reports,
             "market_regime": market_regime,
         }))
@@ -717,6 +720,12 @@ def main():
         if isinstance(best_15m, dict) and isinstance(best_15m.get("metrics"), dict):
             model_15m_path = str(best_15m.get("model_path") or model_15m_path or "")
             tactics["single_15m"] = best_15m.get("metrics")
+        eval_5m = _evaluate_interval_models("5m", interval_candidate_models.get("5m") or ([{"path": model_5m_path, "model_type": "fallback"}] if model_5m_path else []))
+        interval_model_results["5m"] = eval_5m
+        best_5m = eval_5m.get("best") if isinstance(eval_5m, dict) else None
+        if isinstance(best_5m, dict) and isinstance(best_5m.get("metrics"), dict):
+            model_5m_path = str(best_5m.get("model_path") or model_5m_path or "")
+            tactics["scalp_5m"] = best_5m.get("metrics")
         eval_1h = _evaluate_interval_models("1h", interval_candidate_models.get("1h") or ([{"path": model_1h_path, "model_type": "fallback"}] if model_1h_path else []))
         interval_model_results["1h"] = eval_1h
         best_1h = eval_1h.get("best") if isinstance(eval_1h, dict) else None
@@ -761,8 +770,17 @@ def main():
         walk_forward: Dict[str, Any] = {}
         oos_validation: Dict[str, Any] = {}
         for tactic_name, tactic_metrics in list(tactics.items()):
-            model_path = model_15m_path if tactic_name in {"single_15m", "mtf"} else model_1h_path
-            interval = "15m" if tactic_name in {"single_15m", "mtf"} else "1h"
+            if tactic_name in {"single_15m", "mtf"}:
+                model_path = model_15m_path
+                interval = "15m"
+            elif tactic_name == "single_1h":
+                model_path = model_1h_path
+                interval = "1h"
+            elif tactic_name == "scalp_5m":
+                model_path = model_5m_path
+                interval = "5m"
+            else:
+                continue
             wf_windows = []
             for wf_days in (max(3, backtest_days // 2), backtest_days):
                 metrics = _run_single_backtest(f"{tactic_name}_wf_{wf_days}", model_path, interval, wf_days)
@@ -845,12 +863,16 @@ def main():
         result_data["model_comparison"] = interval_model_results
         training_report_15m = training_reports.get("15m") if isinstance(training_reports.get("15m"), dict) else {}
         training_report_1h = training_reports.get("1h") if isinstance(training_reports.get("1h"), dict) else {}
+        training_report_5m = training_reports.get("5m") if isinstance(training_reports.get("5m"), dict) else {}
         best_15m_payload = (interval_model_results.get("15m") or {}).get("best") if isinstance(interval_model_results.get("15m"), dict) else {}
         best_1h_payload = (interval_model_results.get("1h") or {}).get("best") if isinstance(interval_model_results.get("1h"), dict) else {}
+        best_5m_payload = (interval_model_results.get("5m") or {}).get("best") if isinstance(interval_model_results.get("5m"), dict) else {}
         selected_path_15m = str((best_15m_payload or {}).get("model_path") or training_report_15m.get("selected_model_path") or model_15m_path or "")
         selected_path_1h = str((best_1h_payload or {}).get("model_path") or training_report_1h.get("selected_model_path") or model_1h_path or "")
+        selected_path_5m = str((best_5m_payload or {}).get("model_path") or training_report_5m.get("selected_model_path") or model_5m_path or "")
         selected_type_15m = str((best_15m_payload or {}).get("model_type") or training_report_15m.get("selected_model_type") or "")
         selected_type_1h = str((best_1h_payload or {}).get("model_type") or training_report_1h.get("selected_model_type") or "")
+        selected_type_5m = str((best_5m_payload or {}).get("model_type") or training_report_5m.get("selected_model_type") or "")
         selected_score_15m = (
             _to_float(((best_15m_payload or {}).get("metrics") or {}).get("total_pnl_pct"))
             if isinstance((best_15m_payload or {}).get("metrics"), dict)
@@ -861,9 +883,19 @@ def main():
             if isinstance((best_1h_payload or {}).get("metrics"), dict)
             else training_report_1h.get("model_selection_score")
         )
-        best_model_path = selected_path_15m if recommended_tactic in {"single_15m", "mtf"} else selected_path_1h
-        best_model_type = selected_type_15m if recommended_tactic in {"single_15m", "mtf"} else selected_type_1h
-        best_model_score = selected_score_15m if recommended_tactic in {"single_15m", "mtf"} else selected_score_1h
+        selected_score_5m = (
+            _to_float(((best_5m_payload or {}).get("metrics") or {}).get("total_pnl_pct"))
+            if isinstance((best_5m_payload or {}).get("metrics"), dict)
+            else training_report_5m.get("model_selection_score")
+        )
+        if recommended_tactic in {"single_15m", "mtf"}:
+            best_model_path, best_model_type, best_model_score = selected_path_15m, selected_type_15m, selected_score_15m
+        elif recommended_tactic == "single_1h":
+            best_model_path, best_model_type, best_model_score = selected_path_1h, selected_type_1h, selected_score_1h
+        elif recommended_tactic == "scalp_5m":
+            best_model_path, best_model_type, best_model_score = selected_path_5m, selected_type_5m, selected_score_5m
+        else:
+            best_model_path, best_model_type, best_model_score = "", "", None
         result_data["best_model_path"] = best_model_path
         result_data["best_model_type"] = best_model_type
         result_data["best_model"] = {
@@ -871,9 +903,9 @@ def main():
             "primary_path": best_model_path,
             "primary_type": best_model_type,
             "primary_score": best_model_score,
-            "paths": {"15m": selected_path_15m, "1h": selected_path_1h},
-            "types": {"15m": selected_type_15m, "1h": selected_type_1h},
-            "scores": {"15m": selected_score_15m, "1h": selected_score_1h},
+            "paths": {"5m": selected_path_5m, "15m": selected_path_15m, "1h": selected_path_1h},
+            "types": {"5m": selected_type_5m, "15m": selected_type_15m, "1h": selected_type_1h},
+            "scores": {"5m": selected_score_5m, "15m": selected_score_15m, "1h": selected_score_1h},
         }
         result_data["selection"] = {
             "recommended_tactic": recommended_tactic,
