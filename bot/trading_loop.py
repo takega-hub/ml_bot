@@ -1214,6 +1214,7 @@ class TradingLoop:
             # 5. Decision Engine & AI Agent Confirmation
             indicators_info = winning_signal.indicators_info or {}
             confidence = indicators_info.get("confidence", 0)
+            current_price = float(getattr(winning_signal, "price", 0) or df.iloc[-1]["close"])
 
             engine = self._get_decision_engine()
             ohlcv = [{"time": int(r.get("timestamp", 0)), "open": float(r.get("open", 0.0)), "high": float(r.get("high", 0.0)), "low": float(r.get("low", 0.0)), "close": float(r.get("close", 0.0)), "volume": float(r.get("volume", 0.0))} for r in df.tail(60).to_dict(orient="records")]
@@ -1267,7 +1268,10 @@ class TradingLoop:
 
         except Exception as e:
             logger.error(f"Error in process_symbol for {symbol}: {e}", exc_info=True)
-            strategy = self.strategies[symbol]
+            strategy = self.strategies.get(symbol)
+            if strategy is None:
+                logger.warning(f"[{symbol}] No legacy strategy instance found for fallback path; skipping symbol.")
+                return
             # Определяем, какая свеча закрыта и может быть использована для предсказания
             # ВАЖНО: Используем последнюю закрытую свечу (как в тесте), а не предпоследнюю
             # Последняя свеча считается закрытой, если прошло достаточно времени с момента её закрытия
