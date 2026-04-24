@@ -1062,7 +1062,7 @@ REGIME_MEMORY:
 
 Верни строго JSON:
 {{
-  "interval": "15m|1h",
+  "interval": "5m|15m|1h",
   "use_mtf": true,
   "safe_mode": true,
   "backtest_days": 7,
@@ -1098,7 +1098,16 @@ REGIME_MEMORY:
                 raise ValueError("Planner returned non-object JSON")
             merged = {**defaults, **data}
             interval = str(merged.get("interval") or defaults["interval"]).lower()
-            merged["interval"] = "1h" if interval in {"1h", "60m"} else "15m"
+            if experiment_type == "scalp":
+                # Keep scalp experiments strictly on 5m regardless of planner drift.
+                merged["interval"] = "5m"
+                merged["use_mtf"] = False
+            elif interval in {"1h", "60m", "60"}:
+                merged["interval"] = "1h"
+            elif interval in {"5m", "5"}:
+                merged["interval"] = "5m"
+            else:
+                merged["interval"] = "15m"
             merged["use_mtf"] = bool(merged.get("use_mtf"))
             merged["safe_mode"] = bool(merged.get("safe_mode"))
             days = int(merged.get("backtest_days") or defaults["backtest_days"])
