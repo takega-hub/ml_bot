@@ -4,6 +4,7 @@ ML-стратегия для торгового бота.
 """
 import warnings
 import os
+import time
 
 # Подавляем предупреждения scikit-learn ДО импорта библиотек
 # Устанавливаем переменную окружения ПЕРВОЙ
@@ -782,12 +783,16 @@ class MLStrategy:
             self._generate_signal_call_count += 1
 
             # Если предсказания не переданы, вычисляем их
+            predict_start = None
+            if self._generate_signal_call_count <= 3:
+                predict_start = time.time()
+
             if precalculated_pred is not None and precalculated_conf is not None:
                 prediction, confidence = precalculated_pred, precalculated_conf
             else:
                 prediction, confidence = self.predict(df, skip_feature_creation=skip_feature_creation)
             
-            if self._generate_signal_call_count <= 3:
+            if self._generate_signal_call_count <= 3 and predict_start is not None:
                 predict_elapsed = time.time() - predict_start
                 logger.debug(f"[ml_strategy] predict() завершен за {predict_elapsed:.2f} сек, prediction={prediction}, confidence={confidence:.4f}")
             
