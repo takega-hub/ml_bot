@@ -1017,6 +1017,36 @@ class TradingLoop:
                 except Exception as fe_err:
                     logger.error(f"[{symbol}] Error calculating 1h features: {fe_err}")
 
+            # Состояние позиции нужно заранее: используется в generate_signal и при исполнении.
+            has_pos = None
+            try:
+                pos_info = self.bybit.get_position_info(symbol=symbol)
+                if pos_info and isinstance(pos_info, dict) and pos_info.get("retCode") == 0:
+                    result = pos_info.get("result")
+                    if result and isinstance(result, dict):
+                        list_data = result.get("list", [])
+                        if list_data and isinstance(list_data, list):
+                            p = list_data[0]
+                            if p and isinstance(p, dict):
+                                size = float(p.get("size", 0) or 0)
+                                if size > 0:
+                                    side = p.get("side")
+                                    if side == "Buy":
+                                        has_pos = Bias.LONG
+                                    elif side == "Sell":
+                                        has_pos = Bias.SHORT
+            except Exception as pos_err:
+                logger.warning(f"[{symbol}] Failed to load position before signal generation: {pos_err}")
+
+            if has_pos is None:
+                local_pos = self.state.get_open_position(symbol)
+                if local_pos and getattr(local_pos, "status", "") == "open":
+                    local_side = str(getattr(local_pos, "side", "")).strip().lower()
+                    if local_side == "buy":
+                        has_pos = Bias.LONG
+                    elif local_side == "sell":
+                        has_pos = Bias.SHORT
+
             # 3. Генерируем сигналы от всех стратегий
             all_signals = []
 
