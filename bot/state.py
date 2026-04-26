@@ -47,6 +47,8 @@ class SignalRecord:
     price: float
     confidence: float
     reason: str
+    strategy: str = ""
+    model_name: str = ""
     indicators: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -325,7 +327,22 @@ class BotState:
         self.save()
         return True
 
-    def add_signal(self, symbol: str, action: str, price: float, confidence: float, reason: str, indicators: Dict[str, Any] = None):
+    def add_signal(
+        self,
+        symbol: str,
+        action: str,
+        price: float,
+        confidence: float,
+        reason: str,
+        indicators: Dict[str, Any] = None,
+        strategy: str = "",
+        model_name: str = "",
+    ):
+        indicators_payload = indicators or {}
+        if not strategy and isinstance(indicators_payload, dict):
+            strategy = str(indicators_payload.get("strategy", "") or "")
+        if not model_name and isinstance(indicators_payload, dict):
+            model_name = str(indicators_payload.get("model_name", "") or "")
         signal = SignalRecord(
             timestamp=datetime.now().isoformat(),
             symbol=symbol,
@@ -333,11 +350,16 @@ class BotState:
             price=price,
             confidence=confidence,
             reason=reason,
-            indicators=indicators or {}
+            strategy=strategy,
+            model_name=model_name,
+            indicators=indicators_payload
         )
         
         # Log to signals.log
-        signal_logger.info(f"SIGNAL: {symbol} | Action: {action} | Price: {price} | Conf: {confidence:.2f} | Reason: {reason}")
+        signal_logger.info(
+            f"SIGNAL: {symbol} | Action: {action} | Price: {price} | Conf: {confidence:.2f} | "
+            f"Strategy: {strategy or 'UNKNOWN'} | Model: {model_name or 'UNKNOWN'} | Reason: {reason}"
+        )
         
         with self.lock:
             self.signals.append(signal)

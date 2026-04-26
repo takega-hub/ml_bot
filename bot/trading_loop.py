@@ -1538,6 +1538,12 @@ class TradingLoop:
             if indicators_info is None:
                 indicators_info = {}
             indicators_info['signal_received_time'] = signal_received_time.isoformat()
+            if "strategy" not in indicators_info or not indicators_info.get("strategy"):
+                if "scalp" in str(getattr(signal, "model_name", "")).lower():
+                    indicators_info["strategy"] = "SCALP"
+                elif "mtf" in str(getattr(signal, "model_name", "")).lower():
+                    indicators_info["strategy"] = "MTF"
+            indicators_info["model_name"] = str(getattr(signal, "model_name", "") or indicators_info.get("model_name", ""))
             signal.indicators_info = indicators_info
             
             confidence = indicators_info.get('confidence', 0) if isinstance(indicators_info, dict) else 0
@@ -1559,7 +1565,12 @@ class TradingLoop:
             
             # Log ALL non-HOLD signals to signals.log
             if signal.action != Action.HOLD:
-                signal_logger.info(f"SIGNAL GEN: {symbol} {signal.action.value} Conf={confidence:.2f} Price={current_price:.2f} Reason={signal.reason}")
+                signal_logger.info(
+                    f"SIGNAL GEN: {symbol} {signal.action.value} Conf={confidence:.2f} Price={current_price:.2f} "
+                    f"Strategy={indicators_info.get('strategy', 'UNKNOWN')} "
+                    f"Model={indicators_info.get('model_name', 'UNKNOWN')} "
+                    f"Reason={signal.reason}"
+                )
                 try:
                     engine = self._get_decision_engine()
                     if engine:
@@ -1671,7 +1682,9 @@ class TradingLoop:
                         price=signal.price,
                         confidence=confidence,
                         reason=signal.reason,
-                        indicators=indicators_info
+                        indicators=indicators_info,
+                        strategy=str(indicators_info.get("strategy", "") or ""),
+                        model_name=str(indicators_info.get("model_name", "") or "")
                     )
                     logger.info(f"[{symbol}] ✅ Signal added to history, checking notification...")
                     
