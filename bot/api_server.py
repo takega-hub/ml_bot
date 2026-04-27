@@ -1439,6 +1439,18 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                         p = cfg.get(key)
                         if isinstance(p, str) and p.strip():
                             active_paths.add(p)
+            multi_map = getattr(state, "multi_strategies", {})
+            if isinstance(multi_map, dict):
+                for configs in multi_map.values():
+                    if not isinstance(configs, list):
+                        continue
+                    for cfg in configs:
+                        if not isinstance(cfg, dict):
+                            continue
+                        for key in ("model_path", "model_1h_path", "model_15m_path"):
+                            p = cfg.get(key)
+                            if isinstance(p, str) and p.strip():
+                                active_paths.add(p)
 
         if trading_loop and getattr(trading_loop, "strategies", None):
             for strategy in trading_loop.strategies.values():
@@ -6111,6 +6123,19 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             if recommended_tactic == "mtf" and not (model_1h_path and model_15m_path):
                 recommended_tactic = "single_15m" if model_15m_path else "single_1h"
 
+            current_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+            current_modes = {
+                str((cfg or {}).get("mode", "")).strip().lower()
+                for cfg in (current_configs or [])
+                if isinstance(cfg, dict)
+            }
+            has_parallel_mtf_and_scalp = "mtf" in current_modes and "scalp" in current_modes
+
+            # Если уже работаем в параллельном режиме (main MTF + scalp),
+            # то при HOT SWAP для эксперимента с 5m моделью обновляем только scalp.
+            if has_parallel_mtf_and_scalp and model_5m_path:
+                recommended_tactic = "scalp_5m"
+
             if recommended_tactic == "single_1h":
                 model_path = model_1h_path
                 if not model_path:
@@ -6141,15 +6166,58 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 model_path = model_5m_path
                 if not model_path:
                     raise HTTPException(status_code=400, detail="No 5m model available for scalp_5m tactic")
-                if not model_manager:
-                    raise HTTPException(status_code=501, detail="Model manager not available")
-                model_manager.apply_model(symbol, model_path)
-                state.symbol_models[symbol] = model_path
-                config = {"mode": "scalp", "model_path": model_path, "name": f"scalp_{Path(model_path).stem}"}
-                state.set_strategy_config(symbol, config)
-                experiment["applied_mode"] = "scalp_5m"
-                experiment["applied_models"] = {"5m": model_path}
-                logger.info(f"Applied scalp_5m experiment {body.experiment_id} for {symbol}: model={model_path}")
+                if has_parallel_mtf_and_scalp and hasattr(state, "set_strategies_for_symbol"):
+                    scalp_config: Dict[str, Any] = {}
+                    updated_configs: List[Dict[str, Any]] = []
+                    replaced_scalp = False
+                    for cfg in current_configs or []:
+                        if not isinstance(cfg, dict):
+                            continue
+                        mode = str(cfg.get("mode", "")).strip().lower()
+                        if mode == "scalp":
+                            if not scalp_config:
+                                scalp_config = dict(cfg)
+                            if not replaced_scalp:
+                                next_scalp = dict(scalp_config)
+                                next_scalp["mode"] = "scalp"
+                                next_scalp["model_path"] = model_path
+                                next_scalp["name"] = str(
+                                    next_scalp.get("name") or f"scalp_{Path(model_path).stem}"
+                                )
+                                updated_configs.append(next_scalp)
+                                replaced_scalp = True
+                        else:
+                            updated_configs.append(dict(cfg))
+
+                    if not replaced_scalp:
+                        updated_configs.append(
+                            {
+                                "mode": "scalp",
+                                "model_path": model_path,
+                                "name": f"scalp_{Path(model_path).stem}",
+                                "confidence_threshold": getattr(
+                                    settings.ml_strategy, "scalp_confidence_threshold", 0.35
+                                ),
+                            }
+                        )
+
+                    state.set_strategies_for_symbol(symbol, updated_configs)
+                    experiment["applied_mode"] = "scalp_5m_hot_swap"
+                    experiment["applied_models"] = {"5m": model_path}
+                    logger.info(
+                        f"Applied scalp HOT SWAP experiment {body.experiment_id} for {symbol}: "
+                        f"model={model_path}, preserved parallel mtf+scalp"
+                    )
+                else:
+                    if not model_manager:
+                        raise HTTPException(status_code=501, detail="Model manager not available")
+                    model_manager.apply_model(symbol, model_path)
+                    state.symbol_models[symbol] = model_path
+                    config = {"mode": "scalp", "model_path": model_path, "name": f"scalp_{Path(model_path).stem}"}
+                    state.set_strategy_config(symbol, config)
+                    experiment["applied_mode"] = "scalp_5m"
+                    experiment["applied_models"] = {"5m": model_path}
+                    logger.info(f"Applied scalp_5m experiment {body.experiment_id} for {symbol}: model={model_path}")
             elif model_1h_path and model_15m_path:
                 # MTF стратегия
                 config = {
