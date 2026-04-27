@@ -6713,21 +6713,28 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 hour_ago = datetime.now() - timedelta(hours=1)
                 
                 for trade in trading_loop.state.trades:
-                    if symbol and trade.symbol != symbol:
+                    trade_symbol = getattr(trade, "symbol", None)
+                    if symbol and trade_symbol != symbol:
                         continue
                     
                     try:
-                        exit_time = datetime.fromisoformat(trade.exit_time) if trade.exit_time else None
+                        exit_time_raw = getattr(trade, "exit_time", None)
+                        exit_time = datetime.fromisoformat(exit_time_raw) if exit_time_raw else None
                         if exit_time and exit_time >= hour_ago:
+                            side = getattr(trade, "side", None)
+                            action = getattr(trade, "action", None) or side
+                            pnl_usd = float(getattr(trade, "pnl_usd", 0.0) or 0.0)
+                            pnl_pct = float(getattr(trade, "pnl_pct", getattr(trade, "pnl_percent", 0.0)) or 0.0)
                             recent_trades.append({
-                                "symbol": trade.symbol,
-                                "action": trade.action,
-                                "entry_price": trade.entry_price,
-                                "exit_price": trade.exit_price,
-                                "pnl_usd": trade.pnl_usd,
-                                "pnl_percent": trade.pnl_percent,
-                                "entry_time": trade.entry_time,
-                                "exit_time": trade.exit_time,
+                                "symbol": trade_symbol,
+                                "action": action,
+                                "side": side,
+                                "entry_price": getattr(trade, "entry_price", None),
+                                "exit_price": getattr(trade, "exit_price", None),
+                                "pnl_usd": pnl_usd,
+                                "pnl_percent": pnl_pct,
+                                "entry_time": getattr(trade, "entry_time", None),
+                                "exit_time": exit_time_raw,
                             })
                     except (ValueError, TypeError):
                         pass
