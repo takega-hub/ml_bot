@@ -1992,6 +1992,7 @@ class TradingLoop:
                         f"Signal timestamp: {signal_received_time.strftime('%Y-%m-%d %H:%M:%S')}, "
                         f"current time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
                     )
+                    logger.info(f"[{symbol}] 🚫 Entry blocked reason=stale_signal")
                     return None
             except Exception:
                 pass
@@ -2004,6 +2005,7 @@ class TradingLoop:
                 f"TP={signal_tp}, SL={signal_sl}, signal.take_profit={signal.take_profit}, "
                 f"signal.stop_loss={signal.stop_loss}, indicators_info={indicators_info}"
             )
+            logger.info(f"[{symbol}] 🚫 Entry blocked reason=missing_tp_sl")
             return None
 
         if not is_add and bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)):
@@ -2015,6 +2017,11 @@ class TradingLoop:
                 if eng_d not in ("allow", "reduce", "veto"):
                     eng_d = "veto"
                 if engine_mode == "enforce" and eng_d == "veto":
+                    logger.info(
+                        f"[{symbol}] 🚫 Entry blocked reason=engine_veto "
+                        f"decision_id={eng.get('decision_id') if isinstance(eng, dict) else None} "
+                        f"codes={eng.get('reason_codes') if isinstance(eng, dict) else None}"
+                    )
                     try:
                         root = Path(__file__).resolve().parent.parent
                         try:
@@ -2106,6 +2113,10 @@ class TradingLoop:
             if ai_mode == "shadow":
                 logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked (AI decision: {d})")
             elif d == "veto":
+                logger.info(
+                    f"[{symbol}] 🚫 Entry blocked reason=ai_or_engine_veto "
+                    f"source={d_source} decision_id={decision_id} codes={codes}"
+                )
                 try:
                     root = Path(__file__).resolve().parent.parent
                     append_jsonl(
@@ -2141,6 +2152,7 @@ class TradingLoop:
         tp_str = f"{signal_tp:.2f}" if signal_tp else "None"
         sl_str = f"{signal_sl:.2f}" if signal_sl else "None"
         logger.info(f"[{symbol}] ✅ TP/SL check passed: TP={tp_str}, SL={sl_str}")
+        logger.info(f"[{symbol}] ✅ Entry precheck passed")
         return signal_tp, signal_sl, indicators_info
 
     async def _calc_order_qty(
@@ -2153,6 +2165,7 @@ class TradingLoop:
         qty_step = self.bybit.get_qty_step(symbol)
         if qty_step <= 0:
             logger.error(f"Invalid qtyStep for {symbol}: {qty_step}")
+            logger.info(f"[{symbol}] 🚫 Entry blocked reason=invalid_qty_step")
             return None
 
         qty_step_str = str(qty_step)
@@ -2176,6 +2189,7 @@ class TradingLoop:
 
         if balance <= 0:
             logger.error(f"[{symbol}] ❌ Cannot get balance or balance is zero: {balance}")
+            logger.info(f"[{symbol}] 🚫 Entry blocked reason=balance_unavailable_or_zero")
             return None
 
         logger.info(f"[{symbol}] ✅ Balance check passed: ${balance:.2f}")
@@ -2223,6 +2237,7 @@ class TradingLoop:
 
         if entry_price <= 0:
             logger.error(f"[{symbol}] ❌ Invalid entry_price: {entry_price}")
+            logger.info(f"[{symbol}] 🚫 Entry blocked reason=invalid_entry_price")
             return None
 
         total_qty = position_size_usd / entry_price
@@ -2242,6 +2257,7 @@ class TradingLoop:
         qty = float(f"{qty:.{precision}f}")
         if qty <= 0:
             logger.error(f"[{symbol}] ❌ Calculated qty is zero or negative: {qty}")
+            logger.info(f"[{symbol}] 🚫 Entry blocked reason=qty_zero_after_rounding")
             return None
         return qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision
 
@@ -2259,6 +2275,7 @@ class TradingLoop:
             # Проверяем наличие TP/SL в сигнале (критично для открытия позиции)
             prep = await self._prepare_entry(symbol, side, signal, is_add, position_horizon)
             if prep is None:
+                logger.info(f"[{symbol}] 🚫 execute_trade aborted at stage=prepare_entry")
                 return
             signal_tp, signal_sl, indicators_info = prep
             if not is_add:
@@ -2267,6 +2284,7 @@ class TradingLoop:
 
             qty_calc = await self._calc_order_qty(symbol, float(signal.price), indicators_info, is_add)
             if qty_calc is None:
+                logger.info(f"[{symbol}] 🚫 execute_trade aborted at stage=calc_order_qty")
                 return
             qty, fixed_margin_usd, position_size_usd, balance, qty_step, precision = qty_calc
 
@@ -2373,6 +2391,7 @@ class TradingLoop:
                         f"[{symbol}] ❌ Insufficient balance: required=${required_margin:.2f}, "
                         f"available=${balance:.2f}, shortfall=${shortfall:.2f}"
                     )
+                    logger.info(f"[{symbol}] 🚫 execute_trade aborted reason=insufficient_balance_exception")
                     return
                 else:
                     # Другая ошибка InvalidRequestError - пробрасываем дальше
@@ -2561,6 +2580,7 @@ class TradingLoop:
                         f"[{symbol}] ❌ Insufficient balance (retCode={ret_code}): required=${required_margin:.2f}, "
                         f"available=${balance:.2f}, shortfall=${shortfall:.2f}"
                     )
+                    logger.info(f"[{symbol}] 🚫 execute_trade aborted reason=insufficient_balance_response")
                     return
                 
                 # Другие ошибки - просто логируем
@@ -2572,8 +2592,10 @@ class TradingLoop:
                     f"SL={signal.stop_loss if not is_add else 'N/A'}, "
                     f"full_response={resp}"
                 )
+                logger.info(f"[{symbol}] 🚫 execute_trade aborted reason=exchange_rejected_order retCode={ret_code}")
         except Exception as e:
             logger.error(f"[{symbol}] ❌ Exception in execute_trade: {e}", exc_info=True)
+            logger.info(f"[{symbol}] 🚫 execute_trade aborted reason=exception")
     
     async def update_breakeven_stop(self, symbol: str, position_info: dict):
         """Перемещает SL в безубыток при достижении порога прибыли"""
