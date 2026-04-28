@@ -295,34 +295,73 @@ def _get_status_data(state, bybit_client, settings, trading_loop=None) -> Dict[s
 
     strategies: List[Dict[str, Any]] = []
     for symbol in state.active_symbols:
-        strategy_info: Dict[str, Any] = {"symbol": symbol, "model": None, "mtf": False}
-        
-        # Try to get from running strategy first
-        strategy = None
+        strategy_info: Dict[str, Any] = {
+            "symbol": symbol,
+            "mode": "single",
+            "model": None,
+            "mtf": False,
+            "scalp": False,
+            "model_1h": None,
+            "model_15m": None,
+            "model_scalp": None,
+            "model_5m": None,
+        }
+
+        mtf_1h = None
+        mtf_15m = None
+        scalp_model = None
+        single_model = None
+
+        all_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+        for cfg in all_configs or []:
+            if not isinstance(cfg, dict):
+                continue
+            mode = str(cfg.get("mode", "")).strip().lower()
+            if mode == "mtf":
+                mtf_1h = cfg.get("model_1h_path") or mtf_1h
+                mtf_15m = cfg.get("model_15m_path") or mtf_15m
+            elif mode == "scalp":
+                scalp_model = cfg.get("model_path") or scalp_model
+            elif mode == "single":
+                single_model = cfg.get("model_path") or single_model
+
+        # Runtime override: стратегии в рантайме хранятся с ключами {symbol}_{name}.
         if trading_loop and getattr(trading_loop, "strategies", None):
-            strategy = trading_loop.strategies.get(symbol)
-            
-        if strategy:
-            if getattr(strategy, "predict_combined", None):
-                strategy_info["mtf"] = True
-                strategy_info["model_1h"] = getattr(strategy, "model_1h_path", None)
-                strategy_info["model_15m"] = getattr(strategy, "model_15m_path", None)
-            else:
-                strategy_info["model"] = getattr(strategy, "model_path", None)
-        else:
-            # Fallback to state config
-            config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
-            if config:
-                mode = config.get("mode", "single")
-                if mode == "mtf":
-                    strategy_info["mtf"] = True
-                    strategy_info["model_1h"] = config.get("model_1h_path")
-                    strategy_info["model_15m"] = config.get("model_15m_path")
+            for strat_id, strategy in (trading_loop.strategies or {}).items():
+                sid = str(strat_id or "")
+                if sid != symbol and not sid.startswith(f"{symbol}_"):
+                    continue
+                if getattr(strategy, "predict_combined", None):
+                    mtf_1h = getattr(strategy, "model_1h_path", None) or mtf_1h
+                    mtf_15m = getattr(strategy, "model_15m_path", None) or mtf_15m
                 else:
-                    strategy_info["model"] = config.get("model_path") or state.symbol_models.get(symbol)
-            else:
-                strategy_info["model"] = state.symbol_models.get(symbol)
-                
+                    runtime_model = getattr(strategy, "model_path", None)
+                    if "scalp" in sid.lower():
+                        scalp_model = runtime_model or scalp_model
+                    else:
+                        single_model = runtime_model or single_model
+
+        if not single_model:
+            single_model = state.symbol_models.get(symbol)
+
+        if mtf_1h and mtf_15m:
+            strategy_info["mode"] = "mtf"
+            strategy_info["mtf"] = True
+            strategy_info["model_1h"] = mtf_1h
+            strategy_info["model_15m"] = mtf_15m
+        elif scalp_model:
+            strategy_info["mode"] = "scalp"
+        else:
+            strategy_info["mode"] = "single"
+
+        if scalp_model:
+            strategy_info["scalp"] = True
+            strategy_info["model_scalp"] = scalp_model
+            strategy_info["model_5m"] = scalp_model
+            strategy_info["model"] = single_model or scalp_model
+        else:
+            strategy_info["model"] = single_model
+
         cooldown = state.get_cooldown_info(symbol) if hasattr(state, "get_cooldown_info") else None
         if cooldown and cooldown.get("active"):
             strategy_info["cooldown"] = {"hours_left": cooldown.get("hours_left"), "reason": cooldown.get("reason", "")}
@@ -1177,58 +1216,82 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         from datetime import datetime
         
         for symbol in state.active_symbols:
-            # Get config
-            config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
-            active_mode = config.get("mode", "single") if config else "single"
-            
-            # Если стратегия запущена прямо сейчас в trading_loop, возьмем режим оттуда
-            if trading_loop and getattr(trading_loop, "strategies", None):
-                strategy = trading_loop.strategies.get(symbol)
-                if strategy:
-                     if getattr(strategy, "predict_combined", None):
-                         active_mode = "mtf"
-                     else:
-                         active_mode = "single"
-
-            # Single Info
+            active_mode = "single"
             single_path = state.symbol_models.get(symbol)
-            if config and config.get("mode") == "single":
-                single_path = config.get("model_path") or single_path
-            
+            m1h_path = None
+            m15m_path = None
+            scalp_path = None
+            scalp_name = None
+
+            all_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+            for cfg in all_configs or []:
+                if not isinstance(cfg, dict):
+                    continue
+                mode = str(cfg.get("mode", "")).strip().lower()
+                if mode == "mtf":
+                    m1h_path = cfg.get("model_1h_path") or m1h_path
+                    m15m_path = cfg.get("model_15m_path") or m15m_path
+                elif mode == "scalp":
+                    scalp_path = cfg.get("model_path") or scalp_path
+                    scalp_name = cfg.get("name") or scalp_name
+                elif mode == "single":
+                    single_path = cfg.get("model_path") or single_path
+
+            if m1h_path and m15m_path:
+                active_mode = "mtf"
+            elif scalp_path:
+                active_mode = "scalp"
+
+            # Runtime override: стратегии в рантайме хранятся с ключами {symbol}_{name}.
+            if trading_loop and getattr(trading_loop, "strategies", None):
+                for strat_id, strategy in (trading_loop.strategies or {}).items():
+                    sid = str(strat_id or "")
+                    if sid != symbol and not sid.startswith(f"{symbol}_"):
+                        continue
+                    if getattr(strategy, "predict_combined", None):
+                        active_mode = "mtf"
+                        m1h_path = getattr(strategy, "model_1h_path", None) or m1h_path
+                        m15m_path = getattr(strategy, "model_15m_path", None) or m15m_path
+                    else:
+                        model_path = getattr(strategy, "model_path", None)
+                        if "scalp" in sid.lower():
+                            scalp_path = model_path or scalp_path
+                        else:
+                            single_path = model_path or single_path
+
             single_info = {"name": None, "updated": None}
             if single_path:
                 p = Path(single_path)
                 if p.exists():
                     single_info["name"] = p.stem
                     single_info["updated"] = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
-            
-            # MTF Info
+
             mtf_info = {"model_1h": None, "model_15m": None, "updated": None}
-            m1h_path = config.get("model_1h_path") if config else None
-            m15m_path = config.get("model_15m_path") if config else None
-            
-            # Если MTF активен в trading_loop, берем пути оттуда, так как они самые точные
-            if active_mode == "mtf" and trading_loop and getattr(trading_loop, "strategies", None):
-                strategy = trading_loop.strategies.get(symbol)
-                if strategy:
-                    m1h_path = getattr(strategy, "model_1h_path", m1h_path)
-                    m15m_path = getattr(strategy, "model_15m_path", m15m_path)
-            
             if m1h_path and m15m_path:
                 p1h = Path(m1h_path)
                 p15m = Path(m15m_path)
                 if p1h.exists() and p15m.exists():
                     mtf_info["model_1h"] = p1h.stem
                     mtf_info["model_15m"] = p15m.stem
-                    # Use latest update time
                     ts = max(p1h.stat().st_mtime, p15m.stat().st_mtime)
                     mtf_info["updated"] = datetime.fromtimestamp(ts).isoformat()
+
+            scalp_info = {"model_5m": None, "name": scalp_name, "updated": None}
+            if scalp_path:
+                p5m = Path(scalp_path)
+                if p5m.exists():
+                    scalp_info["model_5m"] = p5m.stem
+                    scalp_info["name"] = scalp_info["name"] or p5m.stem
+                    scalp_info["updated"] = datetime.fromtimestamp(p5m.stat().st_mtime).isoformat()
+                else:
+                    scalp_info["model_5m"] = Path(str(scalp_path)).stem or str(scalp_path)
 
             out.append({
                 "symbol": symbol,
                 "active_mode": active_mode,
                 "single": single_info,
-                "mtf": mtf_info
+                "mtf": mtf_info,
+                "scalp": scalp_info,
             })
         return {"symbols": out}
 
@@ -1324,32 +1387,46 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         current_1h = None
         current_15m = None
         current_single = None
+        current_scalp = None
         mode = "single"
 
+        all_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+        for cfg in all_configs or []:
+            if not isinstance(cfg, dict):
+                continue
+            cfg_mode = str(cfg.get("mode", "")).strip().lower()
+            if cfg_mode == "mtf":
+                current_1h = cfg.get("model_1h_path") or current_1h
+                current_15m = cfg.get("model_15m_path") or current_15m
+            elif cfg_mode == "scalp":
+                current_scalp = cfg.get("model_path") or current_scalp
+            elif cfg_mode == "single":
+                current_single = cfg.get("model_path") or current_single
+
         if trading_loop and getattr(trading_loop, "strategies", None):
-            strategy = trading_loop.strategies.get(symbol)
-            if strategy:
+            for strat_id, strategy in (trading_loop.strategies or {}).items():
+                sid = str(strat_id or "")
+                if sid != symbol and not sid.startswith(f"{symbol}_"):
+                    continue
                 if getattr(strategy, "predict_combined", None):
-                    mode = "mtf"
-                    current_1h = getattr(strategy, "model_1h_path", None)
-                    current_15m = getattr(strategy, "model_15m_path", None)
+                    current_1h = getattr(strategy, "model_1h_path", None) or current_1h
+                    current_15m = getattr(strategy, "model_15m_path", None) or current_15m
                 else:
-                    mode = "single"
-                    current_single = getattr(strategy, "model_path", None)
-        
-        if not current_single and not current_1h and not current_15m:
-             # Try to get from config
-             config = state.get_strategy_config(symbol) if hasattr(state, "get_strategy_config") else None
-             if config:
-                 mode = config.get("mode", "single")
-                 if mode == "mtf":
-                     current_1h = config.get("model_1h_path")
-                     current_15m = config.get("model_15m_path")
-                 else:
-                     current_single = config.get("model_path")
-             
-             if not current_single and not current_1h:
-                  current_single = state.symbol_models.get(symbol)
+                    runtime_model = getattr(strategy, "model_path", None)
+                    if "scalp" in sid.lower():
+                        current_scalp = runtime_model or current_scalp
+                    else:
+                        current_single = runtime_model or current_single
+
+        if not current_single:
+            current_single = state.symbol_models.get(symbol)
+
+        if current_1h and current_15m:
+            mode = "mtf"
+        elif current_scalp:
+            mode = "scalp"
+        else:
+            mode = "single"
 
         # Calculate real stats per model
         real_stats = {}
@@ -1394,6 +1471,7 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                 "is_active_single": mp_str == current_single,
                 "is_active_1h": mp_str == current_1h,
                 "is_active_15m": mp_str == current_15m,
+                "is_active_scalp": mp_str == current_scalp,
                 "test": res_test,
                 "real": res_real,
             }
@@ -1413,6 +1491,8 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             "current_single": current_single,
             "current_1h": current_1h,
             "current_15m": current_15m,
+            "current_scalp": current_scalp,
+            "current_5m": current_scalp,
             "mtf_candidates": mtf_candidates
         }
 
@@ -1497,10 +1577,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
         symbol = symbol.upper()
         if not model_manager:
             raise HTTPException(status_code=501, detail="Model manager not available")
-            
-        config = {"mode": body.mode}
-        
-        if body.mode == "mtf":
+
+        mode = str(body.mode or "single").strip().lower()
+        config = {"mode": mode}
+
+        if mode == "mtf":
             if not body.model_1h_path or not body.model_15m_path:
                  raise HTTPException(status_code=400, detail="Both 1h and 15m models required for MTF")
             
@@ -1511,17 +1592,63 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             state.set_strategy_config(symbol, config)
             
             return {"ok": True, "mode": "mtf"}
-            
+
+        elif mode == "scalp":
+            if not body.model_path:
+                raise HTTPException(status_code=400, detail="Model path required for Scalp mode")
+
+            config["model_path"] = body.model_path
+
+            # Если уже есть параллельный контур MTF, меняем только scalp-конфиг без переключения в single.
+            all_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+            has_mtf = any(
+                isinstance(cfg, dict) and str(cfg.get("mode", "")).strip().lower() == "mtf"
+                for cfg in (all_configs or [])
+            )
+            if has_mtf and hasattr(state, "set_strategies_for_symbol"):
+                updated: List[Dict[str, Any]] = []
+                replaced_scalp = False
+                for cfg in all_configs or []:
+                    if not isinstance(cfg, dict):
+                        continue
+                    cfg_mode = str(cfg.get("mode", "")).strip().lower()
+                    if cfg_mode == "scalp":
+                        if not replaced_scalp:
+                            next_cfg = dict(cfg)
+                            next_cfg["mode"] = "scalp"
+                            next_cfg["model_path"] = body.model_path
+                            next_cfg["name"] = str(next_cfg.get("name") or f"scalp_{Path(body.model_path).stem}")
+                            updated.append(next_cfg)
+                            replaced_scalp = True
+                    else:
+                        updated.append(dict(cfg))
+                if not replaced_scalp:
+                    updated.append(
+                        {
+                            "mode": "scalp",
+                            "model_path": body.model_path,
+                            "name": f"scalp_{Path(body.model_path).stem}",
+                            "confidence_threshold": getattr(settings.ml_strategy, "scalp_confidence_threshold", 0.35),
+                        }
+                    )
+                state.set_strategies_for_symbol(symbol, updated)
+            else:
+                model_manager.apply_model(symbol, body.model_path)
+                state.symbol_models[symbol] = body.model_path
+                state.set_strategy_config(symbol, config)
+
+            return {"ok": True, "mode": "scalp", "model_path": body.model_path}
+
         else:
             if not body.model_path:
                 raise HTTPException(status_code=400, detail="Model path required for Single mode")
-            
+
             config["model_path"] = body.model_path
-            
+
             model_manager.apply_model(symbol, body.model_path)
             state.symbol_models[symbol] = body.model_path
             state.set_strategy_config(symbol, config)
-            
+
             return {"ok": True, "mode": "single", "model_path": body.model_path}
 
     class TestModelBody(BaseModel):
@@ -1657,7 +1784,13 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
             try:
                 # Loop removed, using sync telegram
                 
-                test_type = "Single Strategy" if body.mode == "single" else "MTF Strategy"
+                mode = str(body.mode or "mtf").strip().lower()
+                if mode == "single":
+                    test_type = "Single Strategy"
+                elif mode == "scalp":
+                    test_type = "Scalp Strategy"
+                else:
+                    test_type = "MTF Strategy"
                 if tg_bot:
                     _send_telegram_sync(f"🧪 Started {test_type} test for {symbol}...")
                 state.add_notification(f"Started {test_type} test for {symbol}", "info")
@@ -1707,11 +1840,11 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     logger.error(f"Error updating model results from CSV: {e}")
 
                 # 2. Выбираем лучшие модели на основе результатов
-                from bot.ml.model_selector import select_best_models, select_best_single_model
+                from bot.ml.model_selector import select_best_models, select_best_single_model, select_best_scalp_model
                 
                 selected_info = ""
                 
-                if body.mode == "single":
+                if mode == "single":
                     # Выбираем лучшую Single модель
                     best_model_path, info = select_best_single_model(symbol, use_best_from_comparison=True)
                     
@@ -1729,6 +1862,52 @@ def create_app(state, bybit_client, settings, trading_loop=None, model_manager=N
                     else:
                         selected_info = "No suitable single model found"
                         
+                elif mode == "scalp":
+                    best_model_path, info = select_best_scalp_model(symbol, use_best_from_comparison=True)
+                    if best_model_path:
+                        all_configs = state.get_all_strategies_for_symbol(symbol) if hasattr(state, "get_all_strategies_for_symbol") else []
+                        has_mtf = any(
+                            isinstance(cfg, dict) and str(cfg.get("mode", "")).strip().lower() == "mtf"
+                            for cfg in (all_configs or [])
+                        )
+                        if has_mtf and hasattr(state, "set_strategies_for_symbol"):
+                            updated: List[Dict[str, Any]] = []
+                            replaced_scalp = False
+                            for cfg in all_configs or []:
+                                if not isinstance(cfg, dict):
+                                    continue
+                                cfg_mode = str(cfg.get("mode", "")).strip().lower()
+                                if cfg_mode == "scalp":
+                                    if not replaced_scalp:
+                                        next_cfg = dict(cfg)
+                                        next_cfg["mode"] = "scalp"
+                                        next_cfg["model_path"] = best_model_path
+                                        next_cfg["name"] = str(next_cfg.get("name") or f"scalp_{Path(best_model_path).stem}")
+                                        updated.append(next_cfg)
+                                        replaced_scalp = True
+                                else:
+                                    updated.append(dict(cfg))
+                            if not replaced_scalp:
+                                updated.append(
+                                    {
+                                        "mode": "scalp",
+                                        "model_path": best_model_path,
+                                        "name": f"scalp_{Path(best_model_path).stem}",
+                                        "confidence_threshold": getattr(settings.ml_strategy, "scalp_confidence_threshold", 0.35),
+                                    }
+                                )
+                            state.set_strategies_for_symbol(symbol, updated)
+                        else:
+                            model_manager.apply_model(symbol, best_model_path)
+                            state.symbol_models[symbol] = best_model_path
+                            state.set_strategy_config(symbol, {"mode": "scalp", "model_path": best_model_path})
+
+                        pnl = info.get('pnl_pct', 0)
+                        name = info.get('model_name', 'Unknown')
+                        selected_info = f"Selected Scalp: {name} (PnL: {pnl:.2f}%)"
+                    else:
+                        selected_info = "No suitable scalp model found"
+
                 else:
                     # Выбираем лучшие MTF модели (как раньше)
                     # select_best_models сохраняет результат в internal state? 
