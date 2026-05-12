@@ -1189,6 +1189,14 @@ class TradingLoop:
             confidence = indicators_info.get("confidence", 0)
             current_price = float(getattr(winning_signal, "price", 0) or df.iloc[-1]["close"])
 
+            # Keep legacy-compatible signal entries in signals.log for dashboard/API consumers.
+            signal_logger.info(
+                f"SIGNAL GEN: {symbol} {winning_signal.action.value} Conf={confidence:.2f} Price={current_price:.2f} "
+                f"Strategy={indicators_info.get('strategy', 'UNKNOWN')} "
+                f"Model={getattr(winning_signal, 'model_name', '') or indicators_info.get('model_name', 'UNKNOWN')} "
+                f"Reason={winning_signal.reason}"
+            )
+
             engine = self._get_decision_engine()
             ohlcv = [{"time": int(r.get("timestamp", 0)), "open": float(r.get("open", 0.0)), "high": float(r.get("high", 0.0)), "low": float(r.get("low", 0.0)), "close": float(r.get("close", 0.0)), "volume": float(r.get("volume", 0.0))} for r in df.tail(60).to_dict(orient="records")]
 
