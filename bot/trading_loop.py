@@ -1225,9 +1225,19 @@ class TradingLoop:
                     f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
                     f"codes={engine_eval.get('reason_codes')}"
                 )
+                signal_logger.info(
+                    f"DECISION ENGINE: {symbol} {'Buy' if winning_signal.action == Action.LONG else 'Sell'} "
+                    f"action={winning_signal.action.value} score={engine_eval.get('score')} "
+                    f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
+                    f"codes={engine_eval.get('reason_codes')}"
+                )
                 if isinstance(engine_eval.get("engine"), dict):
                     signal_logger.info(
                         "ALGO GATE DETAILS: " + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
+                    )
+                    signal_logger.info(
+                        "DECISION ENGINE DETAILS: "
+                        + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
                     )
                 engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
                 engine_decision = str(engine_eval.get("decision", "")).lower()
@@ -1621,9 +1631,19 @@ class TradingLoop:
                             f"ENGINE EVAL: {symbol} action={signal.action.value} score={engine_eval.get('score')} "
                             f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} codes={engine_eval.get('reason_codes')}"
                         )
+                        signal_logger.info(
+                            f"DECISION ENGINE: {symbol} {'Buy' if signal.action == Action.LONG else 'Sell'} "
+                            f"action={signal.action.value} score={engine_eval.get('score')} "
+                            f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
+                            f"codes={engine_eval.get('reason_codes')}"
+                        )
                         if isinstance(engine_eval, dict) and isinstance(engine_eval.get("engine"), dict):
                             signal_logger.info(
                                 "ENGINE DETAILS: " + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
+                            )
+                            signal_logger.info(
+                                "DECISION ENGINE DETAILS: "
+                                + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
                             )
                         try:
                             root = Path(__file__).resolve().parent.parent
