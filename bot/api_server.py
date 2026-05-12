@@ -38,6 +38,19 @@ _SIGNAL_LOG_PATTERN_SIGNAL_LINE = re.compile(
     r"Signal:\s+(?P<direction>LONG|SHORT|HOLD)\b.*?Confidence:\s+(?P<conf>[0-9]*\.?[0-9]+)%",
     re.IGNORECASE,
 )
+_SIGNAL_LOG_PATTERN_SIGNAL_STATE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?SIGNAL:\s+(?P<pair>[A-Z0-9]+)\s+\|\s+"
+    r"Action:\s+(?P<direction>LONG|SHORT|HOLD)\s+\|.*?\bConf:\s+(?P<conf>[0-9]*\.?[0-9]+)",
+    re.IGNORECASE,
+)
+_SIGNAL_LOG_PATTERN_GATE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}).*?"
+    r"(?P<gate>ALGO GATE|AI GATE):\s+(?P<pair>[A-Z0-9]+)\s+action="
+    r"(?P<direction>LONG|SHORT|BUY|SELL|HOLD)\s+"
+    r"(?:(?:score=(?P<score>-?[0-9]*\.?[0-9]+)\s+)?)decision="
+    r"(?P<decision>allow|reduce|veto)\b",
+    re.IGNORECASE,
+)
 _TIMEFRAME_TO_MINUTES = {"15m": 15, "1h": 60}
 
 
@@ -77,6 +90,31 @@ def _normalize_signal(direction: str, conf: float) -> float:
     return conf if direction == "LONG" else -conf
 
 
+def _normalize_signal_direction(direction: str) -> str:
+    normalized = (direction or "").strip().upper()
+    if normalized == "BUY":
+        return "LONG"
+    if normalized == "SELL":
+        return "SHORT"
+    return normalized
+
+
+def _confidence_from_gate(decision: str, score: Optional[float]) -> float:
+    decision_norm = (decision or "").strip().lower()
+    score_val = abs(score) if isinstance(score, (int, float)) else None
+    if decision_norm == "allow":
+        if score_val is None:
+            return 0.9
+        return min(1.0, max(0.8, 0.8 + min(score_val, 1.5) / 1.5 * 0.2))
+    if decision_norm == "reduce":
+        if score_val is None:
+            return 0.65
+        return min(0.79, max(0.55, 0.55 + min(score_val, 1.2) / 1.2 * 0.24))
+    if score_val is None:
+        return 0.35
+    return min(0.54, max(0.2, 0.2 + min(score_val, 0.8) / 0.8 * 0.34))
+
+
 def _parse_signal_line(line: str) -> Optional[Dict[str, Any]]:
     m = _SIGNAL_LOG_PATTERN_SIGNAL_GEN.search(line)
     source = "signal_gen"
@@ -84,13 +122,24 @@ def _parse_signal_line(line: str) -> Optional[Dict[str, Any]]:
         m = _SIGNAL_LOG_PATTERN_SIGNAL_LINE.search(line)
         source = "signal_line"
     if not m:
+        m = _SIGNAL_LOG_PATTERN_SIGNAL_STATE.search(line)
+        source = "signal_state"
+    if not m:
+        m = _SIGNAL_LOG_PATTERN_GATE.search(line)
+        source = "gate"
+    if not m:
         return None
 
     try:
         ts = datetime.strptime(m.group("timestamp"), "%Y-%m-%d %H:%M:%S")
         pair = m.group("pair").upper()
-        direction = m.group("direction").upper()
-        conf = float(m.group("conf"))
+        direction = _normalize_signal_direction(m.group("direction"))
+        if source == "gate":
+            score_raw = m.groupdict().get("score")
+            score = float(score_raw) if score_raw not in (None, "") else None
+            conf = _confidence_from_gate(m.group("decision"), score)
+        else:
+            conf = float(m.group("conf"))
     except Exception:
         return None
 

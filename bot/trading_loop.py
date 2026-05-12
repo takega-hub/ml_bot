@@ -351,6 +351,7 @@ class TradingLoop:
             logger.warning(f"[{symbol}] AI confirm_entry market data error: {e}")
 
         indicators_info = signal.indicators_info if isinstance(signal.indicators_info, dict) else {}
+        algo_gate = indicators_info.get("decision_engine_eval") if isinstance(indicators_info.get("decision_engine_eval"), dict) else None
         payload = {
             "request_id": decision_id,
             "timestamp_utc": now_utc,
@@ -374,6 +375,7 @@ class TradingLoop:
             },
             "bot_context": {
                 "side": side,
+                "algo_gate": algo_gate,
                 "leverage": int(self.settings.get_leverage_for_symbol(symbol)),
                 "position_horizon": position_horizon or "",
                 "risk_settings": {
@@ -419,33 +421,14 @@ class TradingLoop:
             result_raw = result
 
         root = Path(__file__).resolve().parent.parent
-        engine_eval = None
-        try:
-            engine = self._get_decision_engine()
-            if engine and isinstance(payload.get("market_context", {}).get("ohlcv"), list):
-                engine_eval = engine.evaluate(
-                    symbol=symbol,
-                    side=side,
-                    signal_payload=payload.get("signal", {}) if isinstance(payload.get("signal"), dict) else {},
-                    ohlcv=payload.get("market_context", {}).get("ohlcv") or [],
-                )
-        except Exception:
-            engine_eval = None
-
-        if isinstance(engine_eval, dict):
-            try:
-                signal_logger.info(
-                    f"DECISION ENGINE: {symbol} {side} action={payload.get('signal', {}).get('action')} "
-                    f"score={engine_eval.get('score')} decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
-                    f"codes={engine_eval.get('reason_codes')}"
-                )
-                if isinstance(engine_eval.get("engine"), dict):
-                    signal_logger.info(
-                        "DECISION ENGINE DETAILS: "
-                        + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
-                    )
-            except Exception:
-                pass
+        if isinstance(result, dict) and "decision" in result:
+            result = dict(result)
+            if not result.get("decision_id"):
+                result["decision_id"] = decision_id
+            if not result.get("timestamp_utc"):
+                result["timestamp_utc"] = now_utc
+        else:
+            result = self._normalize_ai_confirm_entry_result(result, decision_id)
 
         append_jsonl(
             str(root / "logs" / "ai_entry_audit.jsonl"),
@@ -459,14 +442,9 @@ class TradingLoop:
                 "request": payload,
                 "response": result,
                 "response_raw": result_raw,
-                "decision_engine": engine_eval,
+                "decision_engine": algo_gate,
             },
         )
-
-        if isinstance(engine_eval, dict):
-            out = dict(result)
-            out["decision_engine"] = engine_eval
-            return out
         return result
     
     def _validate_mtf_models(self):
@@ -770,11 +748,6 @@ class TradingLoop:
                                             # Обновляем trailing stop
                                             await self.update_trailing_stop(symbol, position)
 
-                                            # Проверяем Time Stop
-                                            await self.check_time_stop(symbol, position)
-
-                                            # Проверяем Early Exit
-                                            await self.check_early_exit(symbol, position)
                                     else:
                                         # Позиции нет в списке, проверяем локальное состояние
                                         local_pos = self.state.get_open_position(symbol)
@@ -1239,6 +1212,25 @@ class TradingLoop:
                 indicators_info["decision_engine_eval"] = engine_eval
                 indicators_info["engine_decision_id"] = engine_eval["decision_id"]
                 winning_signal.indicators_info = indicators_info
+                signal_logger.info(
+                    f"ALGO GATE: {symbol} action={winning_signal.action.value} score={engine_eval.get('score')} "
+                    f"decision={engine_eval.get('decision')} mult={engine_eval.get('size_multiplier')} "
+                    f"codes={engine_eval.get('reason_codes')}"
+                )
+                if isinstance(engine_eval.get("engine"), dict):
+                    signal_logger.info(
+                        "ALGO GATE DETAILS: " + json.dumps(engine_eval.get("engine"), ensure_ascii=False, separators=(",", ":"))
+                    )
+                engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
+                engine_decision = str(engine_eval.get("decision", "")).lower()
+                if engine_decision not in ("allow", "reduce", "veto"):
+                    engine_decision = "veto"
+                if bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False)) and engine_mode == "enforce" and engine_decision == "veto":
+                    logger.info(
+                        f"[{symbol}] 🚫 Signal blocked at stage=algo_gate "
+                        f"decision_id={engine_eval.get('decision_id')} codes={engine_eval.get('reason_codes')}"
+                    )
+                    return
 
             # AI Confirmation if needed
             ai_agent = self._get_ai_agent()
@@ -1261,8 +1253,13 @@ class TradingLoop:
                     )
                     indicators_info["ai_entry_confirmation"] = ai_decision
                     winning_signal.indicators_info = indicators_info
-
-                    if ai_decision.get("decision") == "veto":
+                    signal_logger.info(
+                        f"AI GATE: {symbol} action={winning_signal.action.value} decision={ai_decision.get('decision')} "
+                        f"mult={ai_decision.get('size_multiplier')} codes={ai_decision.get('reason_codes')} "
+                        f"decision_id={ai_decision.get('decision_id')}"
+                    )
+                    ai_mode = str(getattr(self.settings.ml_strategy, "ai_entry_confirmation_mode", "enforce"))
+                    if ai_mode != "shadow" and ai_decision.get("decision") == "veto":
                         logger.info(f"[{symbol}] AI VETOED signal from {winning_signal.model_name}")
                         return
 
@@ -2070,14 +2067,14 @@ class TradingLoop:
                         indicators_info = signal.indicators_info
 
         if not is_add and getattr(self.settings.ml_strategy, "ai_entry_confirmation_enabled", False):
-            decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
+            decision = indicators_info.get("ai_entry_confirmation") if isinstance(indicators_info, dict) else None
+            if not isinstance(decision, dict):
+                decision = await self._confirm_entry_with_ai(symbol, side, signal, position_horizon)
             if not isinstance(signal.indicators_info, dict):
                 signal.indicators_info = {}
             signal.indicators_info["ai_entry_confirmation"] = decision
             indicators_info = signal.indicators_info
             ai_mode = str(getattr(self.settings.ml_strategy, "ai_entry_confirmation_mode", "enforce"))
-            engine_enabled = bool(getattr(self.settings.ml_strategy, "decision_engine_enabled", False))
-            engine_mode = str(getattr(self.settings.ml_strategy, "decision_engine_mode", "shadow"))
 
             ai_d = "veto"
             ai_mult = None
@@ -2087,35 +2084,18 @@ class TradingLoop:
                 if ai_d not in ("allow", "reduce", "veto"):
                     ai_d = "veto"
 
-            eng = decision.get("decision_engine") if isinstance(decision, dict) else None
-            eng_d = None
-            eng_mult = None
-            if isinstance(eng, dict):
-                eng_d = str(eng.get("decision", "")).lower()
-                eng_mult = eng.get("size_multiplier")
-                if eng_d not in ("allow", "reduce", "veto"):
-                    eng_d = "veto"
-
-            d_source = "ai"
-            d = ai_d
-            mult = ai_mult
-            if engine_enabled and engine_mode == "enforce" and eng_d:
-                d_source = "engine"
-                d = eng_d
-                mult = eng_mult
-
             decision_id = decision.get("decision_id") if isinstance(decision, dict) else None
             codes = decision.get("reason_codes") if isinstance(decision, dict) else None
             logger.info(
-                f"[{symbol}] 🤖 Entry decision_source={d_source} decision={d} mult={mult} codes={codes} decision_id={decision_id}"
+                f"[{symbol}] 🤖 AI gate decision={ai_d} mult={ai_mult} codes={codes} decision_id={decision_id}"
             )
 
             if ai_mode == "shadow":
-                logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked (AI decision: {d})")
-            elif d == "veto":
+                logger.info(f"[{symbol}] 🤖 AI confirmation shadow mode: entry not blocked (AI decision: {ai_d})")
+            elif ai_d == "veto":
                 logger.info(
-                    f"[{symbol}] 🚫 Entry blocked reason=ai_or_engine_veto "
-                    f"source={d_source} decision_id={decision_id} codes={codes}"
+                    f"[{symbol}] 🚫 Entry blocked reason=ai_veto "
+                    f"decision_id={decision_id} codes={codes}"
                 )
                 try:
                     root = Path(__file__).resolve().parent.parent
@@ -2127,9 +2107,9 @@ class TradingLoop:
                             "side": side,
                             "decision_id": decision_id,
                             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                            "decision_source": d_source,
+                            "decision_source": "ai",
                             "ai": decision if isinstance(decision, dict) else None,
-                            "engine": eng if isinstance(eng, dict) else None,
+                            "engine": indicators_info.get("decision_engine_eval") if isinstance(indicators_info, dict) else None,
                             "reason_codes": codes if isinstance(codes, list) else None,
                             "notes": decision.get("notes") if isinstance(decision, dict) else None,
                         },
@@ -2138,13 +2118,13 @@ class TradingLoop:
                     pass
                 return None
 
-            if ai_mode != "shadow" and mult is not None:
+            if ai_mode != "shadow" and ai_mult is not None:
                 try:
-                    signal.indicators_info["ai_size_multiplier"] = float(mult)
+                    signal.indicators_info["ai_size_multiplier"] = float(ai_mult)
                 except Exception:
                     signal.indicators_info["ai_size_multiplier"] = 1.0
                 indicators_info = signal.indicators_info
-            if ai_mode != "shadow" and d == "reduce":
+            if ai_mode != "shadow" and ai_d == "reduce":
                 if "ai_size_multiplier" not in signal.indicators_info or signal.indicators_info.get("ai_size_multiplier", 1.0) >= 1.0:
                     signal.indicators_info["ai_size_multiplier"] = 0.25
                     indicators_info = signal.indicators_info
